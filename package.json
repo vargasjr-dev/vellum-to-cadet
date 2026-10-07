@@ -1,0 +1,16 @@
+{
+  "name": "vellum-to-cadet",
+  "private": true,
+  "description": "Migration tooling: vellum assistant → cadet. Publishes @mycadet/vellum and the migrate-vellum-assistant-to-cadet npx script.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}

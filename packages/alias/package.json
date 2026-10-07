@@ -1,0 +1,24 @@
+{
+  "name": "migrate-vellum-assistant-to-cadet",
+  "version": "0.1.0",
+  "description": "npx entry point: migrate a vellum assistant workspace to cadet. Thin alias for @mycadet/vellum.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "bin": {
+    "migrate-vellum-assistant-to-cadet": "./bin/migrate-vellum-assistant-to-cadet.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "@mycadet/vellum": "^0.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vargasjr-dev/vellum-to-cadet.git",
+    "directory": "packages/alias"
+  }
+}
