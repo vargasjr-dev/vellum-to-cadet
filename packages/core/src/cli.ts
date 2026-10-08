@@ -11,20 +11,27 @@ import { colors, command, detail, errorText, failIcon, header, skipIcon, success
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate } from "./runner.js";
 import { toCadetRoot } from "./steps/detect.js";
-import { EXIT_CODES, type MigrationReport, type MigrateOptions } from "./types.js";
+import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepResult } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
   help: boolean;
   json: boolean;
+  cadetRootExplicit: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const parsed: ParsedArgs = { help: false, json: false, verbose: false };
+  const parsed: ParsedArgs = {
+    help: false,
+    json: false,
+    verbose: false,
+    cadetRootExplicit: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg: string = argv[i]!;
     switch (arg) {
       case "--cadet-root":
         parsed.cadetRoot = requireValue(argv[++i], arg);
+        parsed.cadetRootExplicit = true;
         break;
       case "--dry-run":
         parsed.dryRun = true;
@@ -83,7 +90,7 @@ Exit codes:
   0  success (or already migrated + verified)
   2  no vellum root found
   3  preflight failed
-  4  vellum processes refused to stop
+  4  vellum processes still running after \`vellum sleep\`
   5  backup failed
   6  migration failed
   7  verification failed
@@ -132,26 +139,74 @@ async function promptForRoot(
   }
 }
 
-function renderHuman(report: MigrationReport): string {
+function stepIcon(status: StepResult["status"]): string {
+  return status === "completed"
+    ? successIcon()
+    : status === "failed"
+      ? failIcon()
+      : status === "skipped"
+        ? skipIcon()
+        : detail("·");
+}
+
+/**
+ * Live step progress on stderr: a pending line the moment a step starts,
+ * replaced in place by the completed line (icon + summary + issues) when it
+ * finishes. Only when stderr is a TTY — piped runs and --json keep their
+ * output contracts untouched.
+ */
+function createLiveProgress(): {
+  onStepStart: (step: string) => void;
+  onStepDone: (result: StepResult) => void;
+  /** Clear a dangling pending line before the final summary prints. */
+  finish: () => void;
+} {
+  const live = Boolean(process.stderr.isTTY);
+  let pending = false;
+  const clearPending = (): void => {
+    if (live && pending) {
+      // Cursor up one line, clear it.
+      process.stderr.write("\u001b[1A\u001b[2K");
+    }
+    pending = false;
+  };
+  return {
+    onStepStart: (step) => {
+      clearPending();
+      if (!live) return;
+      process.stderr.write(`  ${detail("·")} ${step} …\n`);
+      pending = true;
+    },
+    onStepDone: (result) => {
+      clearPending();
+      if (!live) return;
+      process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+      for (const issue of result.issues ?? []) {
+        process.stderr.write(
+          `    ${issue.severity === "error" ? colors.red("!") : detail("·")} ${issue.message}\n`,
+        );
+      }
+    },
+    finish: clearPending,
+  };
+}
+
+function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boolean }): string {
   const lines: string[] = [];
   lines.push("");
   lines.push(header("  vellum → cadet migration"));
   lines.push(detail("  ─────────────────────────"));
-  for (const step of report.steps) {
-    const icon =
-      step.status === "completed"
-        ? successIcon()
-        : step.status === "failed"
-          ? failIcon()
-          : step.status === "skipped"
-            ? skipIcon()
-            : detail("·");
-    lines.push(`  ${icon} ${step.step.padEnd(20)} ${step.summary}`);
-    for (const issue of step.issues ?? []) {
-      lines.push(`    ${issue.severity === "error" ? colors.red("!") : detail("·")} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
+  // In a TTY run the steps were already streamed live to stderr — repeating
+  // them here would print the run twice.
+  if (!opts?.stepsStreamedLive) {
+    for (const step of report.steps) {
+      lines.push(`  ${stepIcon(step.status)} ${step.step.padEnd(20)} ${step.summary}`);
+      for (const issue of step.issues ?? []) {
+        lines.push(`    ${issue.severity === "error" ? colors.red("!") : detail("·")} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
+      }
     }
+    lines.push("");
   }
-  lines.push("");
 
   if (report.ok) {
     lines.push(`  ${successIcon()} ${colors.green("Migration complete.")} Your assistant data now lives in:`);
@@ -220,15 +275,23 @@ async function main(): Promise<number> {
   parsed.vellumRoot = resolved;
   if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
 
+  const live = !parsed.json && !parsed.verbose && Boolean(process.stderr.isTTY);
+  const progress = createLiveProgress();
   try {
-    const report = await migrate(parsed);
+    const report = await migrate({
+      ...parsed,
+      onStepStart: live ? progress.onStepStart : undefined,
+      onStepDone: live ? progress.onStepDone : undefined,
+    });
+    progress.finish();
     if (parsed.json) {
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     } else {
-      process.stdout.write(renderHuman(report));
+      process.stdout.write(renderHuman(report, { stepsStreamedLive: live }));
     }
     return report.exitCode;
   } catch (err) {
+    progress.finish();
     console.error(errorText(`migration crashed: ${(err as Error).message}`));
     if (parsed.verbose && (err as Error).stack) {
       console.error((err as Error).stack);

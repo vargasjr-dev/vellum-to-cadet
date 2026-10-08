@@ -1,66 +1,61 @@
 import { discoveryPatterns } from "../process.js";
-import type { DetectInfo, ProcessKiller, StepResult } from "../types.js";
+import type { DetectInfo, ProcessOps, StepResult } from "../types.js";
 
 /**
  * Put the vellum assistant to sleep before touching its data.
- * SIGTERM first, grace period, then SIGKILL for holdouts.
+ *
+ * The migrator has no custom stop logic: it asks the vellum CLI to sleep
+ * its own assistant (`vellum sleep`) and hopes. A previous custom
+ * SIGTERM/SIGKILL implementation killed unrelated processes matching the
+ * discovery patterns — never again. Whatever survives the sleep is
+ * reported and fails the run; we never signal processes ourselves.
  */
 export async function stopAssistant(
   detect: DetectInfo,
-  killer: ProcessKiller,
+  ops: ProcessOps,
   verbose = false,
-  termGraceMs = 5_000,
+  graceMs = 5_000,
 ): Promise<StepResult> {
   const running = detect.runningProcesses;
   if (running.length === 0) {
     return { step: "stop-assistant", status: "skipped", summary: "no running vellum processes" };
   }
 
-  const killed: number[] = [];
-  const survived: Array<{ pid: number; command: string }> = [];
-
-  for (const proc of running) {
-    try {
-      await killer.terminate(proc.pid);
-      killed.push(proc.pid);
-    } catch (err) {
-      survived.push(proc);
-      if (verbose) console.error(`terminate(${proc.pid}) failed: ${(err as Error).message}`);
-    }
+  const issues: Array<{ severity: "warning" | "error"; message: string }> = [];
+  try {
+    await ops.vellumSleep();
+  } catch (err) {
+    const message = (err as NodeJS.ErrnoException).message ?? String(err);
+    issues.push({
+      severity: "warning",
+      message: `\`vellum sleep\` failed (${message}) — is the vellum CLI on PATH? Continuing; the re-check below decides.`,
+    });
+    if (verbose) console.error(`vellum sleep failed: ${message}`);
   }
 
-  await sleep(termGraceMs);
+  await sleep(graceMs);
 
-  // Re-discover: whatever is still alive gets SIGKILL.
-  // Re-check with the same specific pattern set the detector used.
-  const stillRunning = await killer.find(discoveryPatterns());
-
-  for (const proc of stillRunning) {
-    if (!killed.includes(proc.pid)) continue;
-    try {
-      await killer.kill(proc.pid);
-    } catch (err) {
-      if (verbose) console.error(`kill(${proc.pid}) failed: ${(err as Error).message}`);
-      survived.push(proc);
-    }
-  }
-
-  if (survived.length > 0) {
+  const stillRunning = await ops.find(discoveryPatterns());
+  if (stillRunning.length > 0) {
     return {
       step: "stop-assistant",
       status: "failed",
-      summary: `${survived.length} vellum process(es) refused to stop — close the assistant and retry`,
-      issues: survived.map((p) => ({
-        severity: "error" as const,
-        message: `pid ${p.pid}: ${p.command}`,
-      })),
+      summary: `${stillRunning.length} vellum process(es) still running after \`vellum sleep\` — stop the assistant and retry`,
+      issues: [
+        ...issues,
+        ...stillRunning.map((p) => ({
+          severity: "error" as const,
+          message: `pid ${p.pid}: ${p.command}`,
+        })),
+      ],
     };
   }
 
   return {
     step: "stop-assistant",
     status: "completed",
-    summary: `stopped ${killed.length} vellum process(es): ${killed.join(", ")}`,
+    summary: "`vellum sleep` accepted; no vellum processes remain",
+    issues,
   };
 }
 

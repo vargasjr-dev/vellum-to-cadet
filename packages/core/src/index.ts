@@ -8,7 +8,7 @@ export { migrate } from "./runner.js";
 export { detect as detectInstall } from "./steps/detect.js";
 export { buildCopyPlan } from "./steps/migrate-layout.js";
 export { verify } from "./steps/verify.js";
-export { defaultProcessKiller } from "./process.js";
+export { defaultProcessOps } from "./process.js";
 export {
   EXIT_CODES,
   type DetectInfo,
@@ -20,7 +20,7 @@ export {
 } from "./types.js";
 export {
   PATH_RENAMES,
-  TEXT_SUBSTITUTIONS,
+  textSubstitutions,
   USER_WORKSPACE_DIR,
   WORKSPACE_RUNTIME_DIR,
   VERBATIM_DIRS,

@@ -1,0 +1,10 @@
+# Path-scoped review requirements.
+#
+# PRs touching the paths below require an approval from the owner before
+# merge; everything else is unaffected. This file only enforces once
+# "Require review from Code Owners" is enabled in branch protection
+# (Settings → Branches → main → Require a pull request before merging →
+# Require review from Code Owners).
+
+# CI/automation workflows
+.github/     @dvargasfuertes
