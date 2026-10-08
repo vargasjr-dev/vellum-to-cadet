@@ -16,7 +16,10 @@ import type { StepResult } from "../types.js";
  */
 export function backupDirFor(cadetRoot: string, timestamp: string): string {
   const parent = path.dirname(cadetRoot);
-  return path.join(parent, `.cadet-migration-backups`, timestamp);
+  // Instance dirs (…/cadet/assistants/<name>) back up beside the assistants
+  // tree — never inside it.
+  const anchor = path.basename(parent) === "assistants" ? path.dirname(parent) : parent;
+  return path.join(anchor, `.cadet-migration-backups`, timestamp);
 }
 
 export async function backup(vellumRoot: string, cadetRoot: string, timestamp: string): Promise<StepResult> {

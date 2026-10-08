@@ -21,7 +21,10 @@ const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
 describe("e2e: full vellum 0.12.6 workspace", () => {
   test("migrates the full tree, rewrites machine files, keeps user data byte-identical", async () => {
     const { root, home } = await buildFullVellum0126();
-    const cadetRoot = path.join(home, ".cadet");
+    // No explicit cadetRoot: the derivation sends the legacy single root to
+    // a named instance under the XDG data root.
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
 
     const report = await migrate({
       vellumRoot: root,
@@ -45,12 +48,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(config).toContain("@mycadet/slack");
     expect(config).toContain("@mycadet/twilio");
     expect(config).not.toContain("@vellumai/");
-    expect(config).toContain(".cadet/hooks/on-wake.sh");
+    expect(config).toContain(".local/share/cadet/assistants/vellum/hooks/on-wake.sh");
     expect(config).not.toContain(".vellum");
 
     const hook = await fs.readFile(path.join(cadetRoot, "hooks/on-wake.sh"), "utf8");
     expect(hook).toContain("$CADET_HOOK_EVENT|$CADET_HOOK_NAME|$CADET_ROOT_DIR|$CADET_WORKSPACE_DIR");
-    expect(hook).toContain(".cadet/skills");
+    expect(hook).toContain(".local/share/cadet/assistants/vellum/skills");
     expect(hook).not.toContain("VELLUM_");
     expect(hook).not.toContain(".vellum");
 
@@ -60,7 +63,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
     const env = await fs.readFile(path.join(cadetRoot, ".env"), "utf8");
     expect(env).toContain("CADET_PLATFORM_URL");
-    expect(env).toContain("CADET_DATA_DIR=~/.cadet");
+    expect(env).toContain("CADET_DATA_DIR=~/.local/share/cadet/assistants/vellum");
     expect(env).not.toContain("VELLUM_");
 
     // ── Dotfile renames. ──
@@ -110,7 +113,8 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
   test("re-run against an already migrated root is verify-only and exits 0", async () => {
     const { root, home } = await buildFullVellum0126();
-    const cadetRoot = path.join(home, ".cadet");
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
     const opts = { vellumRoot: root, cadetRoot, processKiller: noopKiller };
 
     const first = await migrate(opts);
@@ -124,7 +128,8 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
   test("dry run writes nothing anywhere", async () => {
     const { root, home } = await buildFullVellum0126();
-    const cadetRoot = path.join(home, ".cadet");
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
 
     const report = await migrate({
       vellumRoot: root,
@@ -143,7 +148,8 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
   test("abort with code 8 when cadet root exists and is populated without a manifest", async () => {
     const { root, home } = await buildFullVellum0126();
-    const cadetRoot = path.join(home, ".cadet");
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
     await fs.mkdir(cadetRoot, { recursive: true });
     await fs.writeFile(path.join(cadetRoot, "unrelated.txt"), "not ours");
 
@@ -167,6 +173,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
   test("the vellum root is never mutated: byte-identical before and after", async () => {
     const { root, home } = await buildFullVellum0126();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     const before = await treeHash(root);
 
     const report = await migrate({
@@ -179,8 +186,9 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const after = await treeHash(root);
     expect(after).toEqual(before);
 
-    // Backups live on the cadet side of the house.
+    // Backups live beside the assistants tree (not inside it), still under home.
     expect(report.backupPath).toContain(".cadet-migration-backups");
+    expect(report.backupPath).not.toContain("assistants/.cadet-migration-backups");
     expect(report.backupPath!.startsWith(home)).toBe(true);
     // And the old root is still there for the user to delete manually.
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
@@ -316,7 +324,7 @@ describe("e2e: modern multi-instance layout", () => {
     expect(config).not.toContain(".vellum");
 
     const env = await fs.readFile(path.join(instance, ".env"), "utf8");
-    expect(env).toContain("CADET_DATA_DIR=~/.cadet");
+    expect(env).toContain("CADET_DATA_DIR=~/.local/share/cadet/assistants/vellum");
     expect(env).not.toContain("VELLUM_");
 
     // Source untouched; manifest records the modern source shape.

@@ -1,6 +1,9 @@
+import * as path from "node:path";
+
 import { statfs as statfsPromises } from "node:fs/promises";
 import { promises as fs } from "node:fs";
 
+import { pathExists } from "./detect.js";
 import type { DetectInfo, StepIssue, StepResult } from "../types.js";
 
 /**
@@ -61,12 +64,19 @@ export async function preflight(
     }
   }
 
+  // The cadet root may sit several levels deep (an instance dir under the
+  // XDG data root) — probe the nearest existing ancestor for writability
+  // without creating anything (dry runs must write nothing).
+  let probe = detect.cadetRootExists ? detect.cadetRoot : path_parent(detect.cadetRoot);
+  while (!(await pathExists(probe)) && probe !== path.dirname(probe)) {
+    probe = path.dirname(probe);
+  }
   try {
-    await fs.access(detect.cadetRootExists ? detect.cadetRoot : path_parent(detect.cadetRoot));
+    await fs.access(probe);
   } catch {
     issues.push({
       severity: "error",
-      message: `cannot write to ${path_parent(detect.cadetRoot)}`,
+      message: `cannot write to ${probe}`,
     });
   }
 

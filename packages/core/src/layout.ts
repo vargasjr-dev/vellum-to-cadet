@@ -11,6 +11,14 @@
  * land here first.
  */
 
+/**
+ * Deterministic instance name a legacy single-root assistant receives when
+ * it migrates into cadet's multi-instance layout
+ * (`~/.vellum` → `~/.local/share/cadet/assistants/vellum`). Vellum 0.12.6
+ * recorded no instance name, so the migrated instance carries its origin.
+ */
+export const LEGACY_INSTANCE_NAME = "vellum";
+
 /** Directory/file names that must be renamed, applied to every path segment. */
 export const PATH_RENAMES: ReadonlyArray<{ from: string; to: string; note?: string }> = [
   { from: ".vellum-assistant-ios", to: ".cadet-assistant-ios", note: "iOS helper; removed in cadet but renamed for parity if present" },
@@ -76,9 +84,12 @@ export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
 function buildPathPattern(): RegExp {
   const tokens = [
     ...PATH_RENAMES.map((r) => escapeRegex(r.from)),
-    // The bare data root: ~/.vellum, .vellum/, ".vellum" — but not a prefix of
-    // a longer name (those were already consumed above).
-    "\\.vellum(?![A-Za-z-])",
+    // Legacy lockfile names keep their pre-XDG cadet spellings — cadet
+    // still reads those for device-id continuity.
+    "\\.vellum\\.lock(?:file)?\\.json",
+    // The legacy single root: ~/.vellum or ~/.vellum-<env> — but not a
+    // prefix of a longer name (those were already consumed above).
+    "\\.vellum(-[A-Za-z0-9-]+)?(?![A-Za-z-])",
   ];
   return new RegExp(tokens.join("|"), "g");
 }
@@ -86,7 +97,18 @@ function buildPathPattern(): RegExp {
 function replacePathToken(match: string): string {
   const rename = PATH_RENAMES.find((r) => r.from === match);
   if (rename) return rename.to;
-  return ".cadet";
+  if (match.startsWith(".vellum.lock")) {
+    return ".cadet" + match.slice(".vellum".length);
+  }
+  // The legacy root directory becomes the migrated NAMED INSTANCE under
+  // the XDG data root:
+  //   ~/.vellum      → ~/.local/share/cadet/assistants/vellum
+  //   ~/.vellum-<env> → ~/.local/share/cadet-<env>/assistants/vellum
+  // (POSIX separators — vellum 0.12.6 never shipped on Windows.)
+  const envSuffix = match.startsWith(".vellum-")
+    ? match.slice(".vellum".length)
+    : "";
+  return `.local/share/cadet${envSuffix}/assistants/${LEGACY_INSTANCE_NAME}`;
 }
 
 function escapeRegex(s: string): string {
