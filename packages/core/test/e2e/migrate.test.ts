@@ -82,7 +82,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(manifest.fileCount).toBeGreaterThan(0);
     const backedUp = await fs.readFile(path.join(report.backupPath!, "workspace/notes/vellum-history.md"), "utf8");
     expect(backedUp).toContain("vellum");
-    // Source root still intact (we never delete without --remove-vellum-root).
+    // Source root still intact — it is a read-only source of truth, always.
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
 
     // ── Migration manifest is the audit trail + idempotency marker. ──
@@ -165,19 +165,25 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(report.exitCode).toBe(2);
   });
 
-  test("--remove-vellum-root deletes the old root only after successful verify", async () => {
-    const { root, home } = await buildMinimal();
+  test("the vellum root is never mutated: byte-identical before and after", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const before = await treeHash(root);
+
     const report = await migrate({
       vellumRoot: root,
       cadetRoot: path.join(home, ".cadet"),
-      removeVellumRoot: true,
       processKiller: noopKiller,
     });
 
     expect(report.ok).toBe(true);
-    expect(await exists(root)).toBe(false);
-    // Backup still has everything.
-    expect(await exists(path.join(report.backupPath!, "workspace/hello.txt"))).toBe(true);
+    const after = await treeHash(root);
+    expect(after).toEqual(before);
+
+    // Backups live on the cadet side of the house.
+    expect(report.backupPath).toContain(".cadet-migration-backups");
+    expect(report.backupPath!.startsWith(home)).toBe(true);
+    // And the old root is still there for the user to delete manually.
+    expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
   });
 
   test("stops running vellum processes before migrating (injected killer)", async () => {
@@ -229,6 +235,23 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 });
 
 // ── helpers ──
+
+/** Deterministic content hash of an entire directory tree. */
+async function treeHash(dir: string): Promise<string> {
+  const entries: Array<{ rel: string; hash: string }> = [];
+  await walk(dir, "");
+  entries.sort((a, b) => a.rel.localeCompare(b.rel));
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+
+  async function walk(abs: string, rel: string): Promise<void> {
+    for (const item of (await fs.readdir(abs, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      const r = rel ? `${rel}/${item.name}` : item.name;
+      const p = path.join(abs, item.name);
+      if (item.isDirectory()) await walk(p, r);
+      else entries.push({ rel: r, hash: sha(await fs.readFile(p)) });
+    }
+  }
+}
 
 async function buildDockerFull() {
   const { buildDocker } = await import("../helpers/build-fixture.js");

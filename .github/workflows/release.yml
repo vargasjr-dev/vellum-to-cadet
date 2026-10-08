@@ -1,0 +1,115 @@
+name: Release
+
+# Dispatch-only release: publish from the target branch, then merge it to main.
+# Invocable only by Vargas — everyone else gets a skipped run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to release from (merged into main afterwards)
+        required: true
+        default: main
+      bump:
+        description: Semver bump applied to both packages
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry-run:
+        description: Rehearse — verify, bump, build; no publish, no merge
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write # npm trusted publishing (OIDC)
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.actor == 'dvargasfuertes'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Bump versions (kept in sync)
+        id: bump
+        run: |
+          cd packages/core
+          npm version "${{ inputs.bump }}" --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          cd ../alias
+          npm version "$VERSION" --exact --no-git-tag-version
+          npm pkg set "dependencies.@mycadet/vellum=^$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: bun run build
+
+      - name: Setup node for npm publish
+        if: ${{ !inputs.dry-run }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24 # bundles npm >= 11.5.1 (trusted publishing requires it)
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish @mycadet/vellum
+        if: ${{ !inputs.dry-run }}
+        run: npm publish --access public
+        working-directory: packages/core
+
+      - name: Publish migrate-vellum-assistant-to-cadet
+        if: ${{ !inputs.dry-run }}
+        run: npm publish --access public
+        working-directory: packages/alias
+
+      - name: Commit bump and tag
+        if: ${{ !inputs.dry-run }}
+        run: |
+          git config user.name "vargas-jr[bot]"
+          git config user.email "hello@vargasjr.dev"
+          git add packages/*/package.json
+          git commit -m "chore: release v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin "${{ inputs.branch }}"
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Merge branch into main
+        if: ${{ !inputs.dry-run }}
+        run: |
+          git config user.name "vargas-jr[bot]"
+          git config user.email "hello@vargasjr.dev"
+          git fetch origin main
+          git checkout main
+          git merge --no-ff "origin/${{ inputs.branch }}" -m "Merge ${{ inputs.branch }} (release v${{ steps.bump.outputs.version }})"
+          git push origin main
+
+      - name: Dry-run summary
+        if: inputs.dry-run
+        run: |
+          echo "Rehearsal complete — v${{ steps.bump.outputs.version }} is ready."
+          echo "Re-run with dry-run=false to publish and merge ${{ inputs.branch }} into main."
