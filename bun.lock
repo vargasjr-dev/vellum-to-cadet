@@ -15,7 +15,7 @@
         "migrate-vellum-assistant-to-cadet": "./bin/migrate-vellum-assistant-to-cadet.mjs",
       },
       "dependencies": {
-        "@mycadet/vellum": "^0.1.0",
+        "@mycadet/vellum": "^0.0.2",
       },
     },
     "packages/core": {
