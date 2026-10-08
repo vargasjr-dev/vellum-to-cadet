@@ -30,7 +30,9 @@ describe("layout: text substitutions", () => {
     const { text, counts } = applySubstitutions(
       'cmd: "VELLUM_HOOK_EVENT", pkg: "@vellumai/slack", root: "~/.vellum"',
     );
-    expect(text).toBe('cmd: "CADET_HOOK_EVENT", pkg: "@mycadet/slack", root: "~/.cadet"');
+    expect(text).toBe(
+      'cmd: "CADET_HOOK_EVENT", pkg: "@mycadet/slack", root: "~/.local/share/cadet/assistants/vellum"',
+    );
     expect(counts["env-prefix"]).toBe(1);
     expect(counts["npm-scope"]).toBe(1);
     expect(counts["paths-and-dotfiles"]).toBe(1);
@@ -41,9 +43,19 @@ describe("layout: text substitutions", () => {
     expect(text).toBe("run .cadetAssistant now");
   });
 
-  test("absolute home paths rewrite", () => {
+  test("absolute home paths rewrite to the legacy instance dir", () => {
     const { text } = applySubstitutions("binds /Users/someone/.vellum:/data");
-    expect(text).toBe("binds /Users/someone/.cadet:/data");
+    expect(text).toBe("binds /Users/someone/.local/share/cadet/assistants/vellum:/data");
+  });
+
+  test("legacy env-suffixed roots become env-scoped instances", () => {
+    const { text } = applySubstitutions("root=/home/x/.vellum-staging/workspace");
+    expect(text).toBe("root=/home/x/.local/share/cadet-staging/assistants/vellum/workspace");
+  });
+
+  test("legacy lockfile names keep their pre-XDG cadet spellings", () => {
+    const { text } = applySubstitutions("lock=/home/x/.vellum.lock.json and /home/x/.vellum.lockfile.json");
+    expect(text).toBe("lock=/home/x/.cadet.lock.json and /home/x/.cadet.lockfile.json");
   });
 });
 

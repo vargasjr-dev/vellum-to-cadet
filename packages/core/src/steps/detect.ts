@@ -5,14 +5,17 @@ import * as path from "node:path";
 import type { DetectInfo, MigrateOptions, ProcessKiller } from "../types.js";
 import { discoveryPatterns } from "../process.js";
 import { treeSize } from "../fs-utils.js";
+import { LEGACY_INSTANCE_NAME } from "../layout.js";
 
 export const DEFAULT_VELLUM_ROOT = path.join(os.homedir(), ".vellum");
-export const DEFAULT_CADET_ROOT = path.join(os.homedir(), ".cadet");
 
 /**
- * The cadet root mirrors the vellum root's shape: ~/.vellum → ~/.cadet and
- * ~/.local/share/vellum[-env] → ~/.local/share/cadet[-env]. Custom roots
- * migrate to a sibling named `cadet`.
+ * The cadet root mirrors the vellum root's shape:
+ *   ~/.local/share/vellum[-env] → ~/.local/share/cadet[-env]
+ *   ~/.vellum[-env]             → ~/.local/share/cadet[-env]/assistants/<name>
+ *                                 (a NAMED instance in cadet's multi-instance
+ *                                 layout — never a bare ~/.cadet root)
+ * Custom roots migrate to a sibling named `cadet`.
  */
 export function toCadetRoot(vellumRoot: string): string {
   const base = path.basename(vellumRoot);
@@ -20,7 +23,17 @@ export function toCadetRoot(vellumRoot: string): string {
     return path.join(path.dirname(vellumRoot), `cadet${base.slice("vellum".length)}`);
   }
   if (base === ".vellum" || base.startsWith(".vellum-")) {
-    return path.join(path.dirname(vellumRoot), `.cadet${base.slice(".vellum".length)}`);
+    const dataHome =
+      process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
+    const envSuffix = base.startsWith(".vellum-")
+      ? base.slice(".vellum".length)
+      : "";
+    return path.join(
+      dataHome,
+      `cadet${envSuffix}`,
+      "assistants",
+      LEGACY_INSTANCE_NAME,
+    );
   }
   return path.join(path.dirname(vellumRoot), "cadet");
 }
