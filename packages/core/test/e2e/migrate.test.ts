@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import { migrate } from "../../src/runner.js";
 import type { ProcessKiller } from "../../src/types.js";
-import { buildFullVellum0126, buildMinimal } from "../helpers/build-fixture.js";
+import { buildFullVellum0126 } from "../helpers/build-fixture.js";
 
 /** A no-op killer: fixtures have no real processes to find. */
 const noopKiller: ProcessKiller = {

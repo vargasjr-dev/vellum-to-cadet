@@ -120,8 +120,9 @@ export async function buildFullVellum0126(home?: string): Promise<BuiltFixture> 
 export async function buildMinimal(home?: string): Promise<BuiltFixture> {
   const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "vellum-migrate-")));
   const root = path.join(tempHome, ".vellum");
-  await mkdirs(root, ["workspace"]);
+  await mkdirs(root, ["workspace", ".vellum-assistant"]);
   await write(root, "workspace/hello.txt", "hi\n");
+  await write(root, ".vellum-assistant/version", "0.12.6");
   return { root, home: tempHome };
 }
 
