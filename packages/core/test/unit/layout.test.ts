@@ -43,6 +43,33 @@ describe("layout: text substitutions", () => {
     expect(text).toBe("run .cadetAssistant now");
   });
 
+  test("security-dir env values split per variable", () => {
+    const { text, counts } = applySubstitutions(
+      [
+        "export GATEWAY_SECURITY_DIR=~/.local/share/cadet/protected",
+        'CREDENTIAL_SECURITY_DIR="/home/u/.local/share/cadet/protected"',
+        "UNRELATED_DIR=/x/protected",
+      ].join("\n"),
+    );
+    expect(text).toContain("GATEWAY_SECURITY_DIR=~/.local/share/cadet/gateway-security");
+    expect(text).toContain('CREDENTIAL_SECURITY_DIR="/home/u/.local/share/cadet/ces-security"');
+    // Unrelated vars keep their paths — the split only follows the
+    // security-dir variables.
+    expect(text).toContain("UNRELATED_DIR=/x/protected");
+    expect(counts["protected-layout"]).toBe(2);
+  });
+
+  test("the CES data-root env value maps to ces-data", () => {
+    const { text } = applySubstitutions(
+      'export CES_BOOTSTRAP_SOCKET_DIR="/home/u/.local/share/cadet/protected/credential-executor"',
+    );
+    // The value tail is the CES local data root (where the bootstrap socket
+    // lived) under the old combined dir.
+    expect(text).toBe(
+      'export CES_BOOTSTRAP_SOCKET_DIR="/home/u/.local/share/cadet/ces-data"',
+    );
+  });
+
   test("absolute home paths rewrite to the legacy instance dir", () => {
     const { text } = applySubstitutions("binds /Users/someone/.vellum:/data");
     expect(text).toBe("binds /Users/someone/.local/share/cadet/assistants/vellum:/data");
@@ -68,6 +95,43 @@ describe("layout: rewrite eligibility", () => {
   test("never rewrites protected keys", () => {
     expect(isRewriteEligible("protected/actor-token-signing-key")).toBe(false);
     expect(isRewriteEligible("protected/credential-executor/grants.json")).toBe(false);
+    // The dissolved destinations stay verbatim too.
+    expect(isRewriteEligible("gateway-security/actor-token-signing-key")).toBe(false);
+    expect(isRewriteEligible("ces-security/keys.enc")).toBe(false);
+  });
+
+  describe("layout: protected dir dissolves per service", () => {
+    test("gateway material lands in gateway-security", () => {
+      expect(renameRelativePath("protected/actor-token-signing-key")).toBe(
+        "gateway-security/actor-token-signing-key",
+      );
+      expect(renameRelativePath("protected/trust.json")).toBe(
+        "gateway-security/trust.json",
+      );
+    });
+
+    test("the CES store lands in ces-security", () => {
+      expect(renameRelativePath("protected/keys.enc")).toBe("ces-security/keys.enc");
+      expect(renameRelativePath("protected/store.key")).toBe("ces-security/store.key");
+    });
+
+    test("the CES local data root lands in ces-data", () => {
+      expect(renameRelativePath("protected/credential-executor/grants.json")).toBe(
+        "ces-data/grants.json",
+      );
+    });
+
+    test("assistant sync state lands in platform-sync", () => {
+      expect(renameRelativePath("protected/platform-sync/avatar.json")).toBe(
+        "platform-sync/avatar.json",
+      );
+    });
+
+    test("non-protected paths pass through untouched", () => {
+      expect(renameRelativePath("workspace/notes/README.md")).toBe(
+        "workspace/notes/README.md",
+      );
+    });
   });
 
   test("rewrites machine-owned config and scripts", () => {
