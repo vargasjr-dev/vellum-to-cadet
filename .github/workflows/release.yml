@@ -3,6 +3,8 @@
 # manually before dispatching; the create-release-branch pattern from
 # mycadet-temp may replace that later. Invocable only by Vargas.
 
+name: release
+
 on:
   workflow_dispatch:
 
@@ -77,3 +79,8 @@ jobs:
           git checkout main
           git merge --no-ff "origin/$RELEASE_BRANCH" -m "Merge $RELEASE_BRANCH (release v${{ steps.version.outputs.version }})"
           git push origin main
+
+      # The release is merged and tagged — the branch has served its purpose
+      # and would only linger (release/v0.0.2 hung around until now).
+      - name: Delete the release branch
+        run: git push origin --delete "$RELEASE_BRANCH"
