@@ -1,21 +1,10 @@
-name: Release
-
-# Dispatch-only release: publish from the dispatched branch, then merge it to
-# main. GitHub Actions already lets you pick the target branch when dispatching.
-# Invocable only by Vargas — everyone else gets a skipped run.
+# Dispatch-only release: publish the version already committed on the
+# dispatched branch, tag it, then merge the branch into main. Bumps are done
+# manually before dispatching; the create-release-branch pattern from
+# mycadet-temp may replace that later. Invocable only by Vargas.
 
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: Semver bump applied to both packages
-        required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 permissions:
   contents: write
@@ -49,16 +38,14 @@ jobs:
       - name: Test
         run: bun test
 
-      - name: Bump versions (kept in sync)
-        id: bump
+      # Bumps happen manually on the branch before dispatching — the workflow
+      # publishes exactly the version committed here.
+      - name: Resolve version
+        id: version
         run: |
-          cd packages/core
-          npm version "${{ inputs.bump }}" --no-git-tag-version
-          VERSION=$(node -p "require('./package.json').version")
-          cd ../alias
-          npm version "$VERSION" --exact --no-git-tag-version
-          npm pkg set "dependencies.@mycadet/vellum=^$VERSION"
+          VERSION=$(node -p "require('./packages/core/package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VERSION from $RELEASE_BRANCH"
 
       - name: Build
         run: bun run build
@@ -77,15 +64,10 @@ jobs:
         run: npm publish --access public
         working-directory: packages/alias
 
-      - name: Commit bump and tag
+      - name: Tag release
         run: |
-          git config user.name "vargas-jr[bot]"
-          git config user.email "214182090+vargas-jr[bot]@users.noreply.github.com"
-          git add packages/*/package.json
-          git commit -m "chore: release v${{ steps.bump.outputs.version }}"
-          git tag "v${{ steps.bump.outputs.version }}"
-          git push origin "$RELEASE_BRANCH"
-          git push origin "v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Merge release branch into main
         run: |
@@ -93,5 +75,5 @@ jobs:
           git config user.email "214182090+vargas-jr[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout main
-          git merge --no-ff "origin/$RELEASE_BRANCH" -m "Merge $RELEASE_BRANCH (release v${{ steps.bump.outputs.version }})"
+          git merge --no-ff "origin/$RELEASE_BRANCH" -m "Merge $RELEASE_BRANCH (release v${{ steps.version.outputs.version }})"
           git push origin main
