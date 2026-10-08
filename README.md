@@ -20,8 +20,8 @@ npx migrate-vellum-assistant-to-cadet
 
 The vellum root is **discovered automatically** from the legacy env overrides
 (`VELLUM_DATA_DIR`, `VELLUM_WORKSPACE_DIR`), the default home location
-(`~/.vellum`), and the docker volume convention (`/data/.vellum`). A candidate
-only counts when it carries a marker only the assistant creates. If more than
+(`~/.vellum`). A candidate only counts when it carries a marker only the
+assistant creates. If more than
 one plausible root is found, the CLI asks which one to migrate.
 
 ```sh

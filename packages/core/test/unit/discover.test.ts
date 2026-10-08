@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { candidateRoots, discoverVellumRoots } from "../../src/discover.js";
+import { discoverVellumRoots } from "../../src/discover.js";
 
 const ENV_KEYS = ["VELLUM_DATA_DIR", "VELLUM_WORKSPACE_DIR"] as const;
 const ambientEnv = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -73,10 +73,5 @@ describe("discoverVellumRoots", () => {
 
     const found = await discoverVellumRoots();
     expect(found.find((c) => c.root === empty)).toBeUndefined();
-  });
-
-  test("candidateRoots includes the docker volume convention", () => {
-    const roots = candidateRoots().map((c) => c.root);
-    expect(roots).toContain("/data/.vellum");
   });
 });

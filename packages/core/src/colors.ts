@@ -5,6 +5,8 @@
 
 const isTTY = process.stdout.isTTY;
 const enabled = isTTY && !process.env["NO_COLOR"];
+/** Errors go to stderr; color them only when THAT stream is a terminal. */
+const errEnabled = process.stderr.isTTY && !process.env["NO_COLOR"];
 
 function wrap(code: string, text: string): string {
   return enabled ? `\u001b[${code}m${text}\u001b[0m` : text;
@@ -41,4 +43,9 @@ export function detail(text: string): string {
 
 export function command(text: string): string {
   return colors.cyan(text);
+}
+
+/** Red error text for stderr, colored only on a real terminal. */
+export function errorText(text: string): string {
+  return errEnabled ? `\u001b[31m${text}\u001b[0m` : text;
 }
