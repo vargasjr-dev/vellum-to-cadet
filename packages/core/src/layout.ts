@@ -20,6 +20,24 @@
 export const LEGACY_INSTANCE_NAME = "vellum";
 
 /**
+ * Where the migrated tree lands THIS RUN, threaded through every path
+ * rewrite. Most migrations install the legacy instance name into a clear
+ * (or absent) cadet root, so the default matches the historical behavior;
+ * when the cadet root is already populated, the migrator resolves a fresh
+ * instance name (see `resolveMigrationTarget`) and threads it here so every
+ * rewrite points at the directory the files actually land in.
+ */
+export interface MigrationTargetCtx {
+  instanceName: string;
+  nested: boolean;
+}
+
+export const DEFAULT_TARGET_CTX: MigrationTargetCtx = {
+  instanceName: LEGACY_INSTANCE_NAME,
+  nested: false,
+};
+
+/**
  * Whole-path remaps for state-root gateway state. The cadet gateway reads
  * its database, guardian-init locks, and backup key ONLY from the gateway
  * security dir, and no longer relocates legacy paths itself (that recovery
@@ -111,11 +129,14 @@ export function dissolveProtectedDir(relPath: string): string {
  * and the protected-layout remap must run AFTER the path rules (it rewrites
  * the already-renamed `/protected` value tails per env var).
  */
-export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
+export function textSubstitutions(
+  ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+): ReadonlyArray<{
   name: string;
   pattern: RegExp;
   replace: string | ((match: string) => string);
-}> = [
+}> {
+  return [
   {
     name: "instance-state-paths",
     // Machine files record absolute state paths like
@@ -133,7 +154,12 @@ export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
     replace: (match: string) => {
       const suffix = match.match(/(-[A-Za-z0-9-]+)$/);
       const sep = match.includes("\\") ? "\\" : "/";
-      return `.local${sep}share${sep}cadet${suffix ? suffix[1] : ""}`;
+      const tail = suffix ? suffix[1] : "";
+      // When migrating into a fresh instance dir inside an existing cadet
+      // root, recorded state paths must point at the instance the files
+      // actually land in, not the bare cadet root.
+      const nested = ctx.nested ? `/assistants/${ctx.instanceName}` : "";
+      return `.local${sep}share${sep}cadet${tail}${nested}`;
     },
   },
   {
@@ -169,9 +195,10 @@ export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
     name: "paths-and-dotfiles",
     // Longest-first alternation built from PATH_RENAMES + the bare root.
     pattern: buildPathPattern(),
-    replace: replacePathToken,
+    replace: (match: string) => replacePathToken(match, ctx),
   },
-];
+  ];
+}
 
 function buildPathPattern(): RegExp {
   const tokens = [
@@ -186,7 +213,7 @@ function buildPathPattern(): RegExp {
   return new RegExp(tokens.join("|"), "g");
 }
 
-function replacePathToken(match: string): string {
+function replacePathToken(match: string, ctx: MigrationTargetCtx): string {
   const rename = PATH_RENAMES.find((r) => r.from === match);
   if (rename) return rename.to;
   if (match.startsWith(".vellum.lock")) {
@@ -200,7 +227,7 @@ function replacePathToken(match: string): string {
   const envSuffix = match.startsWith(".vellum-")
     ? match.slice(".vellum".length)
     : "";
-  return `.local/share/cadet${envSuffix}/assistants/${LEGACY_INSTANCE_NAME}`;
+  return `.local/share/cadet${envSuffix}/assistants/${ctx.instanceName}`;
 }
 
 function escapeRegex(s: string): string {

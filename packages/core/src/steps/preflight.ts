@@ -4,6 +4,7 @@ import { statfs as statfsPromises } from "node:fs/promises";
 import { promises as fs } from "node:fs";
 
 import { pathExists } from "./detect.js";
+import { formatBytes } from "../fs-utils.js";
 import type { DetectInfo, StepIssue, StepResult } from "../types.js";
 
 /**
@@ -25,39 +26,12 @@ export async function preflight(
     };
   }
 
-  if (detect.cadetRootExists && detect.cadetRootPopulated && !detect.previousManifest) {
-    return {
-      step: "preflight",
-      status: "failed",
-      summary: `${detect.cadetRoot} already exists and is populated (no prior migration manifest)`,
-      issues: [
-        {
-          severity: "error",
-          message:
-            "refusing to overwrite an existing cadet root; if this is a previous migration, re-run to verify instead",
-        },
-      ],
-      data: { conflict: true },
-    };
-  }
-
-  if (detect.previousManifest) {
-    return {
-      step: "preflight",
-      status: "skipped",
-      summary: "previous migration manifest found in cadet root — verify-only run",
-      data: { verifyOnly: true },
-    };
-  }
-
   if (!opts?.skipDiskSpaceCheck && detect.rootSizeBytes > 0) {
     const free = await freeBytesFor(detect.vellumRoot);
     if (free !== null && free < detect.rootSizeBytes * 1.2) {
       issues.push({
         severity: "error",
-        message: `insufficient disk space: need ~${Math.ceil(
-          (detect.rootSizeBytes * 1.2) / 1_000_000,
-        )}MB (copy + headroom), have ${Math.floor(free / 1_000_000)}MB`,
+        message: `insufficient disk space: need ~${formatBytes(Math.ceil(detect.rootSizeBytes * 1.2))} (copy + headroom), have ${formatBytes(Math.floor(free))}`,
       });
     } else if (free === null) {
       issues.push({ severity: "warning", message: "could not determine free disk space — continuing" });
@@ -87,7 +61,7 @@ export async function preflight(
     summary:
       errors.length > 0
         ? `${errors.length} preflight error(s)`
-        : `ready: vellum root ${(detect.rootSizeBytes / 1_000_000).toFixed(1)}MB, cadet root clear`,
+        : `ready: vellum root ${formatBytes(detect.rootSizeBytes)}, cadet root clear`,
     issues,
   };
 }

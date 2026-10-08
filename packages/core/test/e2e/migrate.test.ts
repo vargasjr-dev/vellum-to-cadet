@@ -4,16 +4,15 @@ import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import { migrate } from "../../src/runner.js";
-import type { ProcessKiller } from "../../src/types.js";
+import type { ProcessOps } from "../../src/types.js";
 import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
-/** A no-op killer: fixtures have no real processes to find. */
-const noopKiller: ProcessKiller = {
+/** No-op ops: fixtures have no real processes to find or stop. */
+const noopOps: ProcessOps = {
   async find() {
     return [];
   },
-  async terminate() {},
-  async kill() {},
+  async vellumSleep() {},
 };
 
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
@@ -29,7 +28,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const report = await migrate({
       vellumRoot: root,
       cadetRoot,
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
 
     expect(report.ok).toBe(true);
@@ -133,7 +132,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const report = await migrate({
       vellumRoot: root,
       cadetRoot: path.join(home, ".cadet"),
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
 
     const manifest = JSON.parse(await fs.readFile(path.join(report.backupPath!, "manifest.json"), "utf8"));
@@ -147,7 +146,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const { root, home } = await buildFullVellum0126();
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
-    const opts = { vellumRoot: root, cadetRoot, processKiller: noopKiller };
+    const opts = { vellumRoot: root, cadetRoot, processOps: noopOps };
 
     const first = await migrate(opts);
     expect(first.ok).toBe(true);
@@ -167,7 +166,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       vellumRoot: root,
       cadetRoot,
       dryRun: true,
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
 
     expect(report.ok).toBe(true);
@@ -178,18 +177,46 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(planStep?.files?.length).toBeGreaterThan(0);
   });
 
-  test("abort with code 8 when cadet root exists and is populated without a manifest", async () => {
+  test("an occupied default cadet root migrates into a fresh instance dir, leaving it untouched", async () => {
     const { root, home } = await buildFullVellum0126();
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
     await fs.mkdir(cadetRoot, { recursive: true });
     await fs.writeFile(path.join(cadetRoot, "unrelated.txt"), "not ours");
 
-    const report = await migrate({ vellumRoot: root, cadetRoot, processKiller: noopKiller });
+    const report = await migrate({ vellumRoot: root, cadetRoot, processOps: noopOps });
+
+    // Idempotent: the migration lands in a fresh instance dir instead of failing.
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
+    expect(await fs.readdir(cadetRoot)).toEqual(["unrelated.txt"]);
+
+    const freshRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum-2");
+    expect(report.detect.cadetRoot).toBe(freshRoot);
+    expect(await fs.readdir(freshRoot)).toContain("workspace");
+
+    // Machine files inside the migrated tree reference the fresh instance
+    // dir, not the bare cadet root.
+    const readme = await fs.readFile(path.join(freshRoot, "workspace/notes/vellum-history.md"), "utf8");
+    expect(readme).not.toContain(".local/share/vellum");
+  });
+
+  test("an explicit --cadet-root that is occupied is still a conflict (exit 8)", async () => {
+    const { root, home } = await buildFullVellum0126();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
+    await fs.mkdir(cadetRoot, { recursive: true });
+    await fs.writeFile(path.join(cadetRoot, "unrelated.txt"), "not ours");
+
+    const report = await migrate({
+      vellumRoot: root,
+      cadetRoot,
+      cadetRootExplicit: true,
+      processOps: noopOps,
+    });
 
     expect(report.ok).toBe(false);
     expect(report.exitCode).toBe(8);
-    // Nothing was written into the foreign cadet root.
     expect(await fs.readdir(cadetRoot)).toEqual(["unrelated.txt"]);
   });
 
@@ -198,7 +225,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const report = await migrate({
       vellumRoot: path.join(home, ".vellum"),
       cadetRoot: path.join(home, ".cadet"),
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
     expect(report.exitCode).toBe(2);
   });
@@ -211,7 +238,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const report = await migrate({
       vellumRoot: root,
       cadetRoot: path.join(home, ".cadet"),
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
 
     expect(report.ok).toBe(true);
@@ -226,35 +253,59 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
   });
 
-  test("stops running vellum processes before migrating (injected killer)", async () => {
+  test("stop step delegates to `vellum sleep` and never signals anything itself", async () => {
     const { root, home } = await buildFullVellum0126();
-    const terminated: number[] = [];
-    const killed: number[] = [];
-    const killer: ProcessKiller = {
+    const sleeps: number[] = [];
+    const ops: ProcessOps = {
       async find() {
-        // Two "running" vellum processes; the second survives TERM.
+        // Two "running" vellum processes that keep running after sleep.
         return [
           { pid: 111, command: "vellum-assistant daemon" },
           { pid: 222, command: "vellum-gateway" },
         ];
       },
-      async terminate(pid) {
-        terminated.push(pid);
-      },
-      async kill(pid) {
-        killed.push(pid);
+      async vellumSleep() {
+        sleeps.push(1);
       },
     };
 
-    const report = await migrate({ vellumRoot: root, cadetRoot: path.join(home, ".cadet"), processKiller: killer, termGraceMs: 0 });
+    const report = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: ops,
+      termGraceMs: 0,
+    });
 
-    // In the test the processes are always "still running" after TERM grace,
-    // so both get escalated to SIGKILL — and the run still succeeds because
-    // the injected killer reports them dead afterwards via find()... except
-    // find() always returns the same two. The stop step tolerates that:
-    // escalation happened, run proceeds.
-    expect(terminated).toEqual([111, 222]);
-    expect(killed).toEqual([111, 222]);
+    expect(sleeps.length).toBe(1);
+    const stop = report.steps.find((s) => s.step === "stop-assistant");
+    expect(stop?.status).toBe("failed");
+    expect(stop?.summary).toContain("2 vellum process(es) still running after `vellum sleep`");
+    expect(report.exitCode).toBe(4);
+  });
+
+  test("stop step completes when `vellum sleep` stops everything", async () => {
+    const { root, home } = await buildFullVellum0126();
+    let findCalls = 0;
+    const ops: ProcessOps = {
+      // First call = detect (processes running); after sleep, none remain.
+      async find() {
+        findCalls += 1;
+        return findCalls === 1
+          ? [{ pid: 111, command: "vellum-assistant daemon" }]
+          : [];
+      },
+      async vellumSleep() {},
+    };
+
+    const report = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: ops,
+      termGraceMs: 0,
+    });
+
+    const stop = report.steps.find((s) => s.step === "stop-assistant");
+    expect(stop?.status).toBe("completed");
     expect(report.ok).toBe(true);
   });
 
@@ -263,7 +314,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const report = await migrate({
       vellumRoot: root,
       cadetRoot: path.join(home, ".cadet"),
-      processKiller: noopKiller,
+      processOps: noopOps,
     });
 
     expect(report.ok).toBe(true);
@@ -322,7 +373,7 @@ describe("e2e: modern multi-instance layout", () => {
     );
 
     // No explicit cadetRoot — the tool derives it from the source shape.
-    const report = await migrate({ vellumRoot: root, processKiller: noopKiller });
+    const report = await migrate({ vellumRoot: root, processOps: noopOps });
     expect(report.ok).toBe(true);
 
     const cadetRoot = path.join(home, ".local", "share", "cadet");
@@ -375,7 +426,7 @@ describe("e2e: modern multi-instance layout", () => {
 
   test("env-suffixed roots derive a matching cadet root", async () => {
     const { root, home } = await buildModernVellum(undefined, "vellum-dev");
-    const report = await migrate({ vellumRoot: root, processKiller: noopKiller });
+    const report = await migrate({ vellumRoot: root, processOps: noopOps });
     expect(report.ok).toBe(true);
     expect(report.detect.cadetRoot).toBe(path.join(home, ".local", "share", "cadet-dev"));
     expect(await exists(path.join(home, ".local", "share", "cadet-dev", "assistants", "velly", "workspace", "notes", "README.md"))).toBe(true);

@@ -1,10 +1,11 @@
-import { detect as detectStep } from "./steps/detect.js";
+import { detect as detectStep, resolveMigrationTarget } from "./steps/detect.js";
 import { preflight } from "./steps/preflight.js";
 import { stopAssistant } from "./steps/stop-assistant.js";
 import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
 import { verify } from "./steps/verify.js";
-import { defaultProcessKiller } from "./process.js";
+import { defaultProcessOps } from "./process.js";
+import { DEFAULT_TARGET_CTX } from "./layout.js";
 import {
   EXIT_CODES,
   type DetectInfo,
@@ -23,14 +24,21 @@ function utcStamp(): string {
  */
 export async function migrate(options: MigrateOptions = {}): Promise<MigrationReport> {
   const startedAt = new Date().toISOString();
-  const killer = options.processKiller ?? defaultProcessKiller;
+  const ops = options.processOps ?? defaultProcessOps;
   const steps: StepResult[] = [];
+  const start = (step: string): void => options.onStepStart?.(step);
+  const done = (result: StepResult): StepResult => {
+    options.onStepDone?.(result);
+    steps.push(result);
+    return result;
+  };
   const log = (msg: string): void => {
     if (options.verbose) console.error(`[vellum-migrate] ${msg}`);
   };
 
-  const detect: DetectInfo = await detectStep(options, killer);
-  steps.push({
+  start("detect");
+  const detect: DetectInfo = await detectStep(options, ops);
+  done({
     step: "detect",
     status: "completed",
     summary: detect.vellumRootExists
@@ -51,25 +59,59 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.nothingToMigrate);
   }
 
+  // Resolve the destination idempotently: an occupied cadet root gets a
+  // fresh instance dir instead of a hard error.
+  const target = await resolveMigrationTarget(detect, options.cadetRootExplicit === true);
+  if (target.kind === "conflict") {
+    done({
+      step: "preflight",
+      status: "failed",
+      summary: `${target.occupied} already exists and is populated (no prior migration manifest)`,
+      issues: [
+        {
+          severity: "error",
+          message:
+            "refusing to overwrite an explicit --cadet-root; if this is a previous migration, re-run to verify instead, or pick a different root",
+        },
+      ],
+      data: { conflict: true },
+    });
+    return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.cadetRootConflict);
+  }
+  // Path rewrites must point at the directory the files actually land in.
+  const targetCtx =
+    target.kind === "fresh"
+      ? { instanceName: target.freshName, nested: true }
+      : DEFAULT_TARGET_CTX;
+  if (target.kind === "fresh") {
+    detect.cadetRoot = target.cadetRoot;
+    detect.cadetRootExists = false;
+    detect.cadetRootPopulated = false;
+  } else if (target.kind === "already-migrated") {
+    detect.cadetRoot = target.cadetRoot;
+  }
+
   // Already-migrated path: verify-only.
-  if (detect.previousManifest) {
+  if (target.kind === "already-migrated") {
+    start("verify");
     const v = await verify(detect.vellumRoot, detect.cadetRoot);
-    steps.push(v);
+    done(v);
     const code = v.status === "completed" ? EXIT_CODES.ok : EXIT_CODES.verifyFailed;
     return finish(detect, steps, "verify-only", startedAt, null, code);
   }
 
+  start("preflight");
   const pre = await preflight(detect, { skipDiskSpaceCheck: options.skipDiskSpaceCheck });
-  steps.push(pre);
+  done(pre);
   if (pre.status === "failed") {
-    const conflict = (pre.data as { conflict?: boolean } | undefined)?.conflict === true;
-    return finish(detect, steps, "plan", startedAt, null, conflict ? EXIT_CODES.cadetRootConflict : EXIT_CODES.preflightFailed);
+    return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.preflightFailed);
   }
 
   if (options.dryRun) {
+    start("plan-copy");
     const plan = await buildCopyPlan(detect.vellumRoot);
     const rewrites = plan.filter((p) => p.action === "rewrite").length;
-    steps.push({
+    done({
       step: "plan-copy",
       status: "planned",
       summary: `dry run: ${plan.length} entries would be migrated to ${detect.cadetRoot} (${rewrites} rewritten)`,
@@ -78,34 +120,38 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.ok);
   }
 
-  // 1. Put the vellum assistant to sleep.
+  // 1. Put the vellum assistant to sleep (its own CLI does the stopping).
   if (!options.skipStopAssistant) {
-    const stop = await stopAssistant(detect, killer, options.verbose, options.termGraceMs ?? 5_000);
-    steps.push(stop);
+    start("stop-assistant");
+    const stop = await stopAssistant(detect, ops, options.verbose, options.termGraceMs ?? 5_000);
+    done(stop);
     if (stop.status === "failed") {
       return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.processesUnstoppable);
     }
   }
 
   // 2. Full backup before any mutation.
+  start("backup");
   const timestamp = utcStamp();
   const bk = await backup(detect.vellumRoot, detect.cadetRoot, timestamp);
-  steps.push(bk);
+  done(bk);
   if (bk.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.backupFailed);
   }
   const backupPath = backupDirFor(detect.cadetRoot, timestamp);
 
   // 3. Migrate the layout (copy + renames + rewrites + manifest).
-  const mig = await migrateLayout(detect, timestamp);
-  steps.push(mig);
+  start("migrate-layout");
+  const mig = await migrateLayout(detect, timestamp, targetCtx);
+  done(mig);
   if (mig.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.migrationFailed);
   }
 
   // 4. Verify against the backup ground truth.
+  start("verify");
   const v = await verify(detect.vellumRoot, detect.cadetRoot);
-  steps.push(v);
+  done(v);
   if (v.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.verifyFailed);
   }

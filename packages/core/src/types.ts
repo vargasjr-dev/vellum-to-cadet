@@ -49,6 +49,8 @@ export interface MigrateOptions {
   vellumRoot?: string;
   /** Override the default ~/.cadet target root. */
   cadetRoot?: string;
+  /** True when cadetRoot came from an explicit --cadet-root flag. */
+  cadetRootExplicit?: boolean;
   /** Print the plan and touch nothing. */
   dryRun?: boolean;
   /** Non-interactive: never prompt, assume yes. */
@@ -57,19 +59,27 @@ export interface MigrateOptions {
   verbose?: boolean;
   /** Platform seam: skip the stop-assistant step (container-managed lifecycles). */
   skipStopAssistant?: boolean;
-  /** Test seam: override process discovery/termination. */
-  processKiller?: ProcessKiller;
+  /** Test seam: override process discovery and the stop command. */
+  processOps?: ProcessOps;
   /** Test seam: skip filesystem checks that need privileged statfs. */
   skipDiskSpaceCheck?: boolean;
-  /** Test seam: SIGTERM grace period before SIGKILL escalation. */
+  /** Test seam: grace period after `vellum sleep` before re-discovery. */
   termGraceMs?: number;
+  /** Live progress: called right before a step starts executing. */
+  onStepStart?: (step: string) => void;
+  /** Live progress: called with each step's result as it completes. */
+  onStepDone?: (result: StepResult) => void;
 }
 
-/** How the runner communicates with the outside world. */
-export interface ProcessKiller {
+/**
+ * How the runner talks to the outside world about vellum processes. The
+ * migrator never kills anything itself — stopping the assistant is the
+ * vellum CLI's job (`vellum sleep`); we only discover and report.
+ */
+export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
-  terminate(pid: number): Promise<void>;
-  kill(pid: number): Promise<void>;
+  /** Ask the vellum CLI to put its assistant to sleep. */
+  vellumSleep(): Promise<void>;
 }
 
 export interface MigrationReport {

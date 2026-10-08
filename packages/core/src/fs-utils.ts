@@ -4,15 +4,17 @@ import * as path from "node:path";
 
 import {
   DB_EXTENSIONS,
+  DEFAULT_TARGET_CTX,
   PATH_MOVES,
   PATH_RENAMES,
   REWRITE_EXACT_NAMES,
   REWRITE_EXTENSIONS,
-  TEXT_SUBSTITUTIONS,
   USER_WORKSPACE_DIR,
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
+  textSubstitutions,
+  type MigrationTargetCtx,
 } from "./layout.js";
 import type { FileAction } from "./types.js";
 
@@ -116,10 +118,11 @@ export function isUnderWorkspaceRuntime(relPath: string): boolean {
 /** Apply every text substitution, returning the new content and per-name counts. */
 export function applySubstitutions(
   content: string,
+  ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
 ): { text: string; counts: Record<string, number> } {
   const counts: Record<string, number> = {};
   let text = content;
-  for (const sub of TEXT_SUBSTITUTIONS) {
+  for (const sub of textSubstitutions(ctx)) {
     text = text.replace(sub.pattern, (...args) => {
       counts[sub.name] = (counts[sub.name] ?? 0) + 1;
       const matched = args[0] as string;
@@ -185,6 +188,7 @@ export async function executeCopyPlan(
   cadetRoot: string,
   plan: FileAction[],
   log: (msg: string) => void = () => {},
+  targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
 ): Promise<void> {
   await fs.mkdir(cadetRoot, { recursive: true });
 
@@ -204,7 +208,7 @@ export async function executeCopyPlan(
 
     if (f.action === "rewrite") {
       const raw = await fs.readFile(srcAbs, "utf8");
-      const { text, counts } = applySubstitutions(raw);
+      const { text, counts } = applySubstitutions(raw, targetCtx);
       await fs.writeFile(destAbs, text, "utf8");
       f.substitutions = counts;
     } else {
@@ -246,4 +250,16 @@ async function collectSymlinks(root: string): Promise<Array<{ absPath: string; r
   }
   await visit(root, "");
   return out;
+}
+
+/**
+ * Human-readable byte size. Decimal units (1 GB = 1000 MB) to match the
+ * `du`-style numbers users see elsewhere; 10.8 GB reads better than
+ * 10800.6 MB.
+ */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)}GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)}MB`;
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)}KB`;
+  return `${bytes}B`;
 }

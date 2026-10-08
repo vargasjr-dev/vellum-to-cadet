@@ -11,7 +11,7 @@ import {
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { USER_WORKSPACE_DIR } from "../layout.js";
+import { DEFAULT_TARGET_CTX, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
 
 /**
@@ -64,10 +64,11 @@ export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
 export async function migrateLayout(
   detect: DetectInfo,
   timestamp: string,
+  targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
 ): Promise<StepResult> {
   try {
     const plan = await buildCopyPlan(detect.vellumRoot);
-    await execute(detect, plan, timestamp);
+    await execute(detect, plan, timestamp, targetCtx);
 
     const fileCount = plan.filter((p) => p.bytes > 0 || p.action === "verbatim").length;
     const rewrites = plan.filter((p) => p.action === "rewrite");
@@ -97,7 +98,12 @@ export async function migrateLayout(
   }
 }
 
-async function execute(detect: DetectInfo, plan: FileAction[], timestamp: string): Promise<void> {
+async function execute(
+  detect: DetectInfo,
+  plan: FileAction[],
+  timestamp: string,
+  targetCtx: MigrationTargetCtx,
+): Promise<void> {
   const cadetRoot = detect.cadetRoot;
   await fs.mkdir(cadetRoot, { recursive: true });
 
@@ -113,7 +119,7 @@ async function execute(detect: DetectInfo, plan: FileAction[], timestamp: string
 
     if (f.action === "rewrite") {
       const raw = await fs.readFile(srcAbs, "utf8");
-      const { text, counts } = applySubstitutions(raw);
+      const { text, counts } = applySubstitutions(raw, targetCtx);
       f.substitutions = counts;
       await fs.writeFile(destAbs, text, "utf8");
     } else {

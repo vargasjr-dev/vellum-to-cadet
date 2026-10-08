@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { DetectInfo, MigrateOptions, ProcessKiller } from "../types.js";
+import type { DetectInfo, MigrateOptions, ProcessOps } from "../types.js";
 import { discoveryPatterns } from "../process.js";
 import { treeSize } from "../fs-utils.js";
 import { LEGACY_INSTANCE_NAME } from "../layout.js";
@@ -47,7 +47,7 @@ const EXTERNAL_REFERENCE_PROBES: ReadonlyArray<{ label: string; file: string }> 
   { label: "systemd unit", file: path.join(os.homedir(), ".config/systemd/user") },
 ];
 
-export async function detect(options: MigrateOptions, killer: ProcessKiller): Promise<DetectInfo> {
+export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<DetectInfo> {
   const vellumRoot = options.vellumRoot ?? DEFAULT_VELLUM_ROOT;
   const cadetRoot = options.cadetRoot ?? toCadetRoot(vellumRoot);
 
@@ -65,7 +65,7 @@ export async function detect(options: MigrateOptions, killer: ProcessKiller): Pr
   }
 
   const runningProcesses = vellumRootExists
-    ? await killer.find(discoveryPatterns())
+    ? await ops.find(discoveryPatterns())
     : [];
 
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
@@ -166,4 +166,97 @@ export async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** How the destination for this migration run was resolved. */
+export type TargetResolution =
+  | { kind: "clear"; cadetRoot: string }
+  | {
+      kind: "fresh";
+      cadetRoot: string;
+      /** The fresh instance name (e.g. "vellum-2") used for path rewrites. */
+      freshName: string;
+      /** The occupied target that was left untouched. */
+      occupied: string;
+    }
+  /** Verify-only: a previous migration's manifest was found at the target. */
+  | { kind: "already-migrated"; cadetRoot: string; manifestDir: string }
+  /** Explicit --cadet-root pointing at a populated root with no manifest —
+   * the user chose the path deliberately, so we refuse instead of inventing one. */
+  | { kind: "conflict"; cadetRoot: string; occupied: string };
+
+/**
+ * Resolve the directory the vellum root migrates into, idempotently.
+ *
+ * An occupied target (exists, populated, no migration manifest) is no longer
+ * a hard error: the migrated assistant moves into a FRESH instance dir under
+ * the cadet root's assistants/ tree (vellum, vellum-2, vellum-3, … — the
+ * first name with no directory at all), leaving the existing cadet data
+ * untouched. A previous migration's manifest anywhere in the candidates
+ * makes the run verify-only against that dir instead of double-migrating.
+ */
+export async function resolveMigrationTarget(
+  detect: DetectInfo,
+  cadetRootExplicit: boolean,
+): Promise<TargetResolution> {
+  const occupied = detect.cadetRootExists && detect.cadetRootPopulated && !detect.previousManifest;
+  if (!occupied) {
+    if (detect.previousManifest) {
+      return { kind: "already-migrated", cadetRoot: detect.cadetRoot, manifestDir: detect.cadetRoot };
+    }
+    return { kind: "clear", cadetRoot: detect.cadetRoot };
+  }
+
+  // The user picked this path on purpose — an auto-invented sibling would
+  // silently ignore their choice. Surface the conflict instead.
+  if (cadetRootExplicit) {
+    return { kind: "conflict", cadetRoot: detect.cadetRoot, occupied: detect.cadetRoot };
+  }
+
+  // Where do named instances live for this target shape?
+  //   legacy (~/.vellum): target IS the instance dir → siblings live beside it
+  //   modern (~/.local/share/vellum): target is the cadet root → instances
+  //     live under its assistants/ tree
+  const parent = path.basename(path.dirname(detect.cadetRoot)) === "assistants"
+    ? path.dirname(detect.cadetRoot)
+    : path.join(detect.cadetRoot, "assistants");
+  const baseName = path.basename(path.dirname(detect.cadetRoot)) === "assistants"
+    ? path.basename(detect.cadetRoot)
+    : LEGACY_INSTANCE_NAME;
+
+  // A previous run against this same shape may have landed in a suffixed
+  // instance already — its manifest makes this run verify-only.
+  try {
+    const entries = await fs.readdir(parent);
+    for (const name of [baseName, ...suffixedNames(baseName)]) {
+      if (!entries.includes(name)) continue;
+      const candidate = path.join(parent, name);
+      const files = await fs.readdir(candidate);
+      if (files.includes(".cadet-migration-manifest.json")) {
+        return { kind: "already-migrated", cadetRoot: candidate, manifestDir: candidate };
+      }
+    }
+  } catch {
+    // Parent unreadable — fall through to fresh-name resolution.
+  }
+
+  const freshName = await firstFreshInstanceName(parent, baseName);
+  return {
+    kind: "fresh",
+    cadetRoot: path.join(parent, freshName),
+    freshName,
+    occupied: detect.cadetRoot,
+  };
+}
+
+function suffixedNames(base: string): string[] {
+  return Array.from({ length: 50 }, (_, i) => `${base}-${i + 2}`);
+}
+
+async function firstFreshInstanceName(parent: string, base: string): Promise<string> {
+  for (const name of [base, ...suffixedNames(base)]) {
+    if (!(await pathExists(path.join(parent, name)))) return name;
+  }
+  // 50 suffixes deep is not a real scenario; fail loudly rather than guess.
+  throw new Error(`could not find a fresh instance directory under ${parent}`);
 }
