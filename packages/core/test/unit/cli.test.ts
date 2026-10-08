@@ -42,7 +42,6 @@ describe("cli", () => {
         "--vellum-root", path.join(home, ".vellum"),
         "--cadet-root", path.join(home, ".cadet"),
         "--json",
-        "--skip-stop-assistant",
       ],
     );
     expect(r.code).toBe(2);
@@ -53,18 +52,29 @@ describe("cli", () => {
     expect(report.steps[0].step).toBe("detect");
   });
 
+  test("removed flags are rejected", () => {
+    for (const flag of ["--remove-vellum-root", "--skip-stop-assistant"]) {
+      const r = runCli([flag]);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("unknown flag");
+    }
+  });
+
   test("full migration through the CLI: human output + exit 0", async () => {
     const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
     const { root, home } = await buildFullVellum0126();
     const r = runCli([
       "--vellum-root", root,
       "--cadet-root", path.join(home, ".cadet"),
-      "--skip-stop-assistant",
       "--yes",
     ]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Migration complete");
     expect(r.stdout).toContain(".cadet");
+    // Colorful success output carries an optional-next-steps section that
+    // includes the manual deletion of the (read-only) old root.
+    expect(r.stdout).toContain("Optional next steps");
+    expect(r.stdout).toContain(`rm -rf ${root}`);
   });
 });
 

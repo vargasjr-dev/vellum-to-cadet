@@ -89,12 +89,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   // 2. Full backup before any mutation.
   const timestamp = utcStamp();
-  const bk = await backup(detect.vellumRoot, timestamp);
+  const bk = await backup(detect.vellumRoot, detect.cadetRoot, timestamp);
   steps.push(bk);
   if (bk.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.backupFailed);
   }
-  const backupPath = backupDirFor(detect.vellumRoot, timestamp);
+  const backupPath = backupDirFor(detect.cadetRoot, timestamp);
 
   // 3. Migrate the layout (copy + renames + rewrites + manifest).
   const mig = await migrateLayout(detect, timestamp);
@@ -108,25 +108,6 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   steps.push(v);
   if (v.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.verifyFailed);
-  }
-
-  // 5. Opt-in old-root removal.
-  if (options.removeVellumRoot) {
-    try {
-      const { promises: fsp } = await import("node:fs");
-      await fsp.rm(detect.vellumRoot, { recursive: true, force: true });
-      steps.push({
-        step: "remove-vellum-root",
-        status: "completed",
-        summary: `removed ${detect.vellumRoot} (backup retained at ${backupPath})`,
-      });
-    } catch (err) {
-      steps.push({
-        step: "remove-vellum-root",
-        status: "failed",
-        summary: `could not remove old root: ${(err as Error).message} — it is safe to delete manually`,
-      });
-    }
   }
 
   return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.ok);

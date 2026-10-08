@@ -1,3 +1,4 @@
+import { discoveryPatterns } from "../process.js";
 import type { DetectInfo, ProcessKiller, StepResult } from "../types.js";
 
 /**
@@ -31,10 +32,8 @@ export async function stopAssistant(
   await sleep(termGraceMs);
 
   // Re-discover: whatever is still alive gets SIGKILL.
-  const stillRunning = await killer.find(
-    // Re-check with the same broad pattern set the detector used.
-    ["vellum"],
-  );
+  // Re-check with the same specific pattern set the detector used.
+  const stillRunning = await killer.find(discoveryPatterns());
 
   for (const proc of stillRunning) {
     if (!killed.includes(proc.pid)) continue;

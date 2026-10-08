@@ -146,6 +146,5 @@ export const VELLUM_PROCESS_PATTERNS: ReadonlyArray<string> = [
   "credential-executor",
 ];
 
-/** Broad fallback — never matches our own CLI (whose name contains "vellum"). */
-export const VELLUM_PROCESS_FALLBACK = "vellum";
+/** Marker present in every invocation of our own CLI (npx bin name). */
 export const MIGRATION_CLI_MARKER = "migrate-vellum";

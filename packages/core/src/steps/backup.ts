@@ -10,13 +10,17 @@ import type { StepResult } from "../types.js";
  * The backup lives OUTSIDE both roots, in a timestamped sibling directory,
  * with a sha256 manifest so verify and rollback have ground truth.
  */
-export function backupDirFor(vellumRoot: string, timestamp: string): string {
-  const parent = path.dirname(vellumRoot);
-  return path.join(parent, `.vellum-migration-backups`, timestamp);
+/**
+ * Backups live on the CAD side of the house: the vellum root is a read-only
+ * source of truth and is never written to — not even by our backup step.
+ */
+export function backupDirFor(cadetRoot: string, timestamp: string): string {
+  const parent = path.dirname(cadetRoot);
+  return path.join(parent, `.cadet-migration-backups`, timestamp);
 }
 
-export async function backup(vellumRoot: string, timestamp: string): Promise<StepResult> {
-  const backupRoot = backupDirFor(vellumRoot, timestamp);
+export async function backup(vellumRoot: string, cadetRoot: string, timestamp: string): Promise<StepResult> {
+  const backupRoot = backupDirFor(cadetRoot, timestamp);
   try {
     const entries = await walkTree(vellumRoot);
     let fileCount = 0;

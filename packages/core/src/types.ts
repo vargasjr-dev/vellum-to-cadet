@@ -55,9 +55,7 @@ export interface MigrateOptions {
   yes?: boolean;
   /** Verbose logging to stderr. */
   verbose?: boolean;
-  /** Opt-in: delete the old vellum root after a successful verify. */
-  removeVellumRoot?: boolean;
-  /** Skip the stop-assistant step (platform use only). */
+  /** Platform seam: skip the stop-assistant step (container-managed lifecycles). */
   skipStopAssistant?: boolean;
   /** Test seam: override process discovery/termination. */
   processKiller?: ProcessKiller;
@@ -94,6 +92,8 @@ export const EXIT_CODES = {
   migrationFailed: 6,
   verifyFailed: 7,
   cadetRootConflict: 8,
+  /** Discovery found multiple plausible vellum roots in a non-interactive run. */
+  ambiguousRoot: 9,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
