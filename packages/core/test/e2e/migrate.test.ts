@@ -71,9 +71,20 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(await exists(path.join(cadetRoot, ".vellum-assistant"))).toBe(false);
     expect(await exists(path.join(cadetRoot, ".cadet-skill-run/github-summary"))).toBe(true);
 
-    // ── Protected keys: verbatim. ──
-    const key = await fs.readFile(path.join(cadetRoot, "protected/actor-token-signing-key"), "utf8");
+    // ── Protected keys: verbatim, dissolved to the per-service dirs. ──
+    const key = await fs.readFile(
+      path.join(cadetRoot, "gateway-security/actor-token-signing-key"),
+      "utf8",
+    );
     expect(key).toContain("BEGIN PRIVATE KEY");
+    expect(await exists(path.join(cadetRoot, "protected"))).toBe(false);
+    // CES store → ces-security; CES local data root → ces-data.
+    const cesStore = await fs.readFile(
+      path.join(cadetRoot, "ces-security/keys.enc"),
+    );
+    expect(cesStore).toEqual(await fs.readFile(path.join(root, "protected/keys.enc")));
+    const grants = await fs.readFile(path.join(cadetRoot, "ces-data/grants.json"), "utf8");
+    expect(grants).toContain("grants");
 
     // ── DB artifacts copied verbatim. ──
     const db = await fs.readFile(path.join(cadetRoot, "workspace/data/db/assistant.db"));
@@ -308,9 +319,15 @@ describe("e2e: modern multi-instance layout", () => {
     expect(await exists(path.join(instance, ".cadetAssistant/version"))).toBe(true);
     expect(await exists(path.join(instance, ".vellum-assistant"))).toBe(false);
 
-    // Protected keys: verbatim.
-    const key = await fs.readFile(path.join(instance, "protected/actor-token-signing-key"), "utf8");
+    // Protected keys: verbatim, dissolved to the per-service dirs.
+    const key = await fs.readFile(
+      path.join(instance, "gateway-security/actor-token-signing-key"),
+      "utf8",
+    );
     expect(key).toContain("BEGIN PRIVATE KEY");
+    expect(await exists(path.join(instance, "protected"))).toBe(false);
+    expect(await exists(path.join(instance, "ces-security/keys.enc"))).toBe(true);
+    expect(await exists(path.join(instance, "ces-data/grants.json"))).toBe(true);
 
     // DB artifacts: verbatim.
     const db = await fs.readFile(path.join(instance, "workspace/data/db/assistant.db"));

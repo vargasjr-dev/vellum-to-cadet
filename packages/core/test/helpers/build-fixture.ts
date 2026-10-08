@@ -120,8 +120,11 @@ async function writeAssistantState(root: string): Promise<void> {
     "---\nname: github-summary\ndescription: Summarize commits\n---\n\nUse $VELLUM_ROOT_DIR to find the root.\n",
   );
 
-  // Protected key material — never rewritten.
+  // Protected key material — never rewritten; destinations dissolve to the
+  // per-service dirs (gateway-security / ces-security / ces-data).
   await write(root, "protected/actor-token-signing-key", "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n");
+  await write(root, "protected/keys.enc", "FAKEENCRYPTEDSTOREBYTES");
+  await write(root, "protected/store.key", "FAKESTOREKEYBYTES");
   await write(root, "protected/credential-executor/grants.json", JSON.stringify({ grants: [] }));
 
   // Device registry + daemon state.

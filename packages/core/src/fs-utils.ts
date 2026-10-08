@@ -11,6 +11,7 @@ import {
   USER_WORKSPACE_DIR,
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
+  dissolveProtectedDir,
 } from "./layout.js";
 import type { FileAction } from "./types.js";
 
@@ -51,10 +52,12 @@ export function stateRelativePath(relPath: string): string {
 
 /** Apply the full rename map to a relative path, segment by segment. */
 export function renameRelativePath(relPath: string): string {
-  return dissolveInstanceState(relPath)
-    .split("/")
-    .map(renameSegment)
-    .join("/");
+  return dissolveProtectedDir(
+    dissolveInstanceState(relPath)
+      .split("/")
+      .map(renameSegment)
+      .join("/"),
+  );
 }
 
 export function extensionOf(name: string): string {

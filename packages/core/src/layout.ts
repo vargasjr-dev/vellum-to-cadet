@@ -33,9 +33,59 @@ export const PATH_RENAMES: ReadonlyArray<{ from: string; to: string; note?: stri
 ];
 
 /**
+ * The vellum `protected/` directory dissolves in cadet: vellum 0.12.x
+ * combined gateway security material, CES state, and assistant sync state
+ * into one dir, while cadet splits them per service (the platform's
+ * `<instanceDir>/{gateway-security,ces-security,ces-data}` layout).
+ *
+ * Destination-only — file contents stay verbatim (keys, grants, audit logs
+ * are never rewritten).
+ */
+
+/** Files that move to the CES security dir (the encrypted credential store). */
+const CES_SECURITY_FILES = new Set(["keys.enc", "store.key"]);
+
+/** Dirs whose contents move to the CES data root (grants, audit, tool store). */
+const CES_DATA_DIRS = new Set(["credential-executor"]);
+
+/** Dirs whose contents move to the assistant sync-state dir. */
+const ASSISTANT_SYNC_DIRS = new Set(["platform-sync"]);
+
+/**
+ * Map a state-relative vellum path (`protected/...`, already dissolved of
+ * the `.vellum` instance level) to its cadet destination. Anything under
+ * `protected/` not claimed by CES or the assistant sync state is gateway
+ * security material (trust rules, signing keys, backup key, feature flags,
+ * device registry). Returns the path unchanged when it is not under
+ * `protected/`.
+ */
+export function dissolveProtectedDir(relPath: string): string {
+  const norm = relPath.split("\\").join("/");
+  // `protected` may sit at the state root or, after instance-state
+  // dissolution, directly inside an instance dir.
+  const m = norm.match(/^((?:assistants\/[^/]+\/)?)protected(?=$|\/)/);
+  if (!m) return relPath;
+
+  const rest = norm.slice(m[0].length).replace(/^\//, "");
+  if (rest === "") return `${m[1]}gateway-security`; // Bare dir: dominant tenant.
+
+  const base = rest.split("/")[0] ?? rest;
+  const mapped = CES_SECURITY_FILES.has(rest)
+    ? `ces-security/${rest}`
+    : CES_DATA_DIRS.has(base)
+      ? `ces-data/${rest.slice(base.length + 1)}`
+      : ASSISTANT_SYNC_DIRS.has(base)
+        ? `platform-sync/${rest.slice(base.length + 1)}`
+        : `gateway-security/${rest}`;
+  return `${m[1]}${mapped}`;
+}
+
+/**
  * Text substitutions applied inside machine-owned files (never inside the
  * user-facing workspace). Order matters: the path-name alternation is
- * longest-first so `.vellum-assistant` is never mangled by a bare `.vellum`.
+ * longest-first so `.vellum-assistant` is never mangled by a bare `.vellum`,
+ * and the protected-layout remap must run AFTER the path rules (it rewrites
+ * the already-renamed `/protected` value tails per env var).
  */
 export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
   name: string;
@@ -67,6 +117,24 @@ export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
     // VELLUM_DAEMON_NOAUTH → CADET_DAEMON_NOAUTH, etc.
     pattern: /\bVELLUM_/g,
     replace: "CADET_",
+  },
+  {
+    name: "protected-layout",
+    // Security-dir env values point at the old combined `protected` dir;
+    // cadet splits it per service. Line-scoped so the destination follows
+    // the variable: GATEWAY_SECURITY_DIR → gateway-security,
+    // CREDENTIAL_SECURITY_DIR → ces-security, and the CES local data root
+    // (…/protected/credential-executor — also where the bootstrap socket
+    // lived) → ces-data on any line. Runs after the path rules so it
+    // rewrites the already-renamed value tails.
+    pattern: /^[^\n]*(?:\b(?:CADET_)?(?:GATEWAY_SECURITY_DIR|CREDENTIAL_SECURITY_DIR)\b|\/protected\/credential-executor(?![\w-]))[^\n]*$/gm,
+    replace: (line: string) => {
+      const isCredential = /\b(?:CADET_)?CREDENTIAL_SECURITY_DIR\b/.test(line);
+      const dirName = isCredential ? "ces-security" : "gateway-security";
+      return line
+        .replace(/\/protected\/credential-executor(?![\w-])/g, "/ces-data")
+        .replace(/\/protected(?![\w-])/g, `/${dirName}`);
+    },
   },
   {
     name: "npm-scope",
