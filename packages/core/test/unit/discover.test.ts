@@ -75,3 +75,60 @@ describe("discoverVellumRoots", () => {
     expect(found.find((c) => c.root === empty)).toBeUndefined();
   });
 });
+
+describe("discover: modern multi-instance layout", () => {
+  test("finds ~/.local/share/vellum via its assistants' state dirs", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-modern-"));
+    process.env["HOME"] = tempHome;
+    const root = path.join(tempHome, ".local", "share", "vellum");
+    const state = path.join(root, "assistants", "velly", ".vellum");
+    await fs.mkdir(path.join(state, "workspace"), { recursive: true });
+    await fs.mkdir(path.join(state, ".vellum-assistant"), { recursive: true });
+
+    const found = await discoverVellumRoots();
+    const hit = found.find((c) => c.root === root);
+    expect(hit).toBeDefined();
+    expect(hit!.layout).toBe("modern");
+    expect(hit!.markers).toContain("assistants/*/.vellum");
+  });
+
+  test("finds env-suffixed roots and labels their env", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-modern-"));
+    process.env["HOME"] = tempHome;
+    const root = path.join(tempHome, ".local", "share", "vellum-dev");
+    const state = path.join(root, "assistants", "velly", ".vellum");
+    await fs.mkdir(path.join(state, "workspace"), { recursive: true });
+    await fs.mkdir(path.join(state, ".vellum-assistant"), { recursive: true });
+
+    const found = await discoverVellumRoots();
+    const hit = found.find((c) => c.root === root);
+    expect(hit).toBeDefined();
+    expect(hit!.layout).toBe("modern");
+    expect(hit!.origin).toContain("dev");
+  });
+
+  test("modern outranks legacy when both exist", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-modern-"));
+    process.env["HOME"] = tempHome;
+    const modern = path.join(tempHome, ".local", "share", "vellum");
+    const modernState = path.join(modern, "assistants", "velly", ".vellum");
+    await fs.mkdir(path.join(modernState, "workspace"), { recursive: true });
+    await fs.mkdir(path.join(modernState, ".vellum-assistant"), { recursive: true });
+    await fs.mkdir(path.join(tempHome, ".vellum", "workspace"), { recursive: true });
+    await fs.mkdir(path.join(tempHome, ".vellum", ".vellum-assistant"), { recursive: true });
+
+    const found = await discoverVellumRoots();
+    expect(found[0]!.root).toBe(modern);
+    expect(found[0]!.layout).toBe("modern");
+  });
+
+  test("a modern root whose .vellum dirs are empty is not trusted", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-modern-"));
+    process.env["HOME"] = tempHome;
+    const root = path.join(tempHome, ".local", "share", "vellum");
+    await fs.mkdir(path.join(root, "assistants", "velly", ".vellum"), { recursive: true });
+
+    const found = await discoverVellumRoots();
+    expect(found).toHaveLength(0);
+  });
+});

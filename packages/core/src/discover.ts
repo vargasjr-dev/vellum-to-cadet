@@ -20,6 +20,8 @@ export interface VellumRootCandidate {
   score: number;
   markers: string[];
   origin: string;
+  /** legacy: single root (~/.vellum). modern: multi-instance XDG layout. */
+  layout: "legacy" | "modern";
 }
 
 const MARKERS: ReadonlyArray<{ rel: string; weight: number }> = [
@@ -45,6 +47,26 @@ function home(): string {
   const fromEnv = process.env["HOME"];
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   return os.homedir();
+}
+
+/**
+ * Where modern (0.12.x) multi-instance roots live: ~/.local/share/vellum and
+ * its env-suffixed siblings (vellum-dev, …). Returned entries exist on disk.
+ */
+export async function modernRootCandidates(): Promise<Array<{ root: string; origin: string }>> {
+  const shareDir = path.join(home(), ".local", "share");
+  let names: string[];
+  try {
+    names = (await fs.readdir(shareDir)).filter((n) => /^vellum(-[a-z0-9-]+)?$/.test(n));
+  } catch {
+    return [];
+  }
+  return names
+    .sort()
+    .map((name) => ({
+      root: path.join(shareDir, name),
+      origin: name === "vellum" ? "default XDG data location" : `XDG data location (env: ${name.slice("vellum-".length)})`,
+    }));
 }
 
 /** Where the vellum 0.12.x assistant could plausibly live on this machine. */
@@ -79,9 +101,33 @@ function normalizeRoot(root: string): string {
 export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
   const found = new Map<string, VellumRootCandidate>();
 
-  for (const candidate of candidateRoots()) {
+  for (const candidate of [...candidateRoots(), ...(await modernRootCandidates())]) {
     const stat = await statOrNull(candidate.root);
     if (!stat?.isDirectory()) continue;
+
+    // Modern multi-instance layout: assistants/<name>/.vellum/ state dirs.
+    const modern = await modernAssistants(candidate.root);
+    if (modern.length > 0) {
+      const stateDir = path.join(candidate.root, "assistants", modern[0]!, ".vellum");
+      const innerMarkers: string[] = [];
+      let score = MODERN_LAYOUT_BONUS;
+      for (const marker of MARKERS) {
+        if (await exists(path.join(stateDir, marker.rel))) {
+          innerMarkers.push(marker.rel);
+          score += marker.weight;
+        }
+      }
+      // Same trust gate as legacy: a `.vellum` dir alone isn't enough —
+      // require a marker only the assistant creates inside it.
+      if (!innerMarkers.some((m) => STRONG_MARKERS.has(m))) continue;
+      const markers = ["assistants/*/.vellum", ...innerMarkers];
+      const key = await realpath(candidate.root);
+      const existing = found.get(key);
+      if (!existing || existing.score < score) {
+        found.set(key, { root: key, score, markers, origin: candidate.origin, layout: "modern" });
+      }
+      continue;
+    }
 
     const markers: string[] = [];
     let score = 0;
@@ -99,11 +145,32 @@ export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
     const key = await realpath(candidate.root);
     const existing = found.get(key);
     if (!existing || existing.score < score) {
-      found.set(key, { root: key, score, markers, origin: candidate.origin });
+      found.set(key, { root: key, score, markers, origin: candidate.origin, layout: "legacy" });
     }
   }
 
   return [...found.values()].sort((a, b) => b.score - a.score || a.root.localeCompare(b.root));
+}
+
+/** Modern roots outrank a coexisting legacy root: they are what current versions write. */
+const MODERN_LAYOUT_BONUS = 10;
+
+/** Assistant names with a `.vellum` state dir under a modern XDG root. */
+async function modernAssistants(root: string): Promise<string[]> {
+  const assistantsDir = path.join(root, "assistants");
+  let names: string[];
+  try {
+    names = (await fs.readdir(assistantsDir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names) {
+    if (await exists(path.join(assistantsDir, name, ".vellum"))) found.push(name);
+  }
+  return found;
 }
 
 async function statOrNull(p: string) {

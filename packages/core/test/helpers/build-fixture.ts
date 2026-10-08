@@ -21,7 +21,30 @@ export interface BuiltFixture {
 export async function buildFullVellum0126(home?: string): Promise<BuiltFixture> {
   const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "vellum-migrate-")));
   const root = path.join(tempHome, ".vellum");
+  await writeAssistantState(root);
+  return { root, home: tempHome };
+}
 
+/**
+ * The modern multi-instance layout: per-assistant state dirs at
+ * `~/.local/share/vellum[-env]/assistants/<name>/.vellum/`. Pass dirName to
+ * build an env-suffixed root (e.g. "vellum-dev").
+ */
+export async function buildModernVellum(
+  home?: string,
+  dirName = "vellum",
+): Promise<BuiltFixture> {
+  // Neutral prefix — the temp home shows up verbatim inside machine files
+  // that embed absolute state paths.
+  const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "cadet-migrate-")));
+  const root = path.join(tempHome, ".local", "share", dirName);
+  const state = path.join(root, "assistants", "velly", ".vellum");
+  await writeAssistantState(state);
+  return { root, home: tempHome };
+}
+
+/** Writes the full 0.12.6 assistant state tree into `root`. */
+async function writeAssistantState(root: string): Promise<void> {
   // User-facing workspace (a git repo — the assistant commits to it).
   await mkdirs(root, [
     "workspace",
@@ -112,8 +135,6 @@ export async function buildFullVellum0126(home?: string): Promise<BuiltFixture> 
 
   // A .env with vellum vars.
   await write(root, ".env", "VELLUM_PLATFORM_URL=https://api.vellum.example\nVELLUM_DATA_DIR=~/.vellum\n");
-
-  return { root, home: tempHome };
 }
 
 /** Bare minimum root: just a workspace. */

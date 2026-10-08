@@ -26,9 +26,32 @@ export function renameSegment(name: string): string {
   return out;
 }
 
+/**
+ * The modern multi-instance layout keeps each assistant's state at
+ * `assistants/<name>/.vellum/...`. Cadet flattens state into the instance
+ * dir (`assistants/<name>/workspace`, …), so the `.vellum` level dissolves
+ * in the destination path. A no-op for legacy single-root trees, which
+ * never had this shape.
+ */
+export function dissolveInstanceState(relPath: string): string {
+  const m = relPath.match(/^(assistants\/[^/]+)\/\.vellum(\/|$)/);
+  if (!m) return relPath;
+  return `${m[1]}${m[2]}${relPath.slice(m[0].length)}`;
+}
+
+/**
+ * Path relative to the assistant state root — for layout-agnostic rules
+ * (verbatim dirs, workspace runtime, db artifacts). Legacy paths are their
+ * own state-relative form.
+ */
+export function stateRelativePath(relPath: string): string {
+  const m = relPath.match(/^assistants\/[^/]+\/\.vellum(\/|$)/);
+  return m ? relPath.slice(m[0].length) : relPath;
+}
+
 /** Apply the full rename map to a relative path, segment by segment. */
 export function renameRelativePath(relPath: string): string {
-  return relPath
+  return dissolveInstanceState(relPath)
     .split("/")
     .map(renameSegment)
     .join("/");
