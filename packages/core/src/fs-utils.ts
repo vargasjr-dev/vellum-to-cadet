@@ -4,6 +4,7 @@ import * as path from "node:path";
 
 import {
   DB_EXTENSIONS,
+  PATH_MOVES,
   PATH_RENAMES,
   REWRITE_EXACT_NAMES,
   REWRITE_EXTENSIONS,
@@ -50,10 +51,29 @@ export function stateRelativePath(relPath: string): string {
   return m ? relPath.slice(m[0].length) : relPath;
 }
 
+/**
+ * Whole-path remap for state-root gateway state (see PATH_MOVES). Matched
+ * against the state-relative form (instance prefix stripped) so the modern
+ * per-instance layout (`assistants/<name>/.vellum/data/gateway.sqlite`)
+ * maps the same as the legacy single-root one, with the prefix re-applied.
+ */
+export function applyPathMoves(stateRel: string): string | null {
+  const norm = stateRel.split("\\").join("/");
+  const m = norm.match(/^(assistants\/[^/]+\/)(.+)$/);
+  const rel = m ? m[2] : norm;
+  for (const move of PATH_MOVES) {
+    if (rel === move.from) return (m ? m[1] : "") + move.to;
+  }
+  return null;
+}
+
 /** Apply the full rename map to a relative path, segment by segment. */
 export function renameRelativePath(relPath: string): string {
+  const stateRel = dissolveInstanceState(relPath);
+  const moved = applyPathMoves(stateRel);
+  if (moved) return moved;
   return dissolveProtectedDir(
-    dissolveInstanceState(relPath)
+    stateRel
       .split("/")
       .map(renameSegment)
       .join("/"),

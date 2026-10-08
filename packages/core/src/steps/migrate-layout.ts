@@ -11,6 +11,7 @@ import {
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
+import { USER_WORKSPACE_DIR } from "../layout.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
 
 /**
@@ -122,6 +123,8 @@ async function execute(detect: DetectInfo, plan: FileAction[], timestamp: string
     await fs.chmod(destAbs, srcStat.mode);
   }
 
+  await recoverLegacyBackupKey(cadetRoot);
+
   await preserveSymlinks(detect.vellumRoot, cadetRoot);
 
   // Write the migration manifest — the audit trail + idempotency marker.
@@ -147,6 +150,34 @@ async function execute(detect: DetectInfo, plan: FileAction[], timestamp: string
     "utf8",
   );
   void timestamp;
+}
+
+/**
+ * Recover the backup encryption key from its pre-XDG workspace location
+ * (vellum's migration 061 parked it at `workspace/.backup.key`; 0.12 moved
+ * it into the security dir). The workspace itself is user data and stays
+ * byte-for-byte, so this is a COPY, never a move — the cadet gateway reads
+ * the key only from `gateway-security/backup.key`, and a re-key here would
+ * make every pre-migration offsite backup unrestorable. Skipped when the
+ * dissolved `protected/backup.key` already landed there.
+ */
+export async function recoverLegacyBackupKey(cadetRoot: string): Promise<void> {
+  const source = path.join(cadetRoot, USER_WORKSPACE_DIR, ".backup.key");
+  const destDir = path.join(cadetRoot, "gateway-security");
+  const dest = path.join(destDir, "backup.key");
+  try {
+    await fs.access(source);
+  } catch {
+    return;
+  }
+  try {
+    await fs.access(dest);
+    return; // Dissolved protected/backup.key won — nothing to recover.
+  } catch {
+    // Target absent — recover.
+  }
+  await fs.mkdir(destDir, { recursive: true });
+  await fs.copyFile(source, dest);
 }
 
 async function preserveSymlinks(vellumRoot: string, cadetRoot: string): Promise<void> {
