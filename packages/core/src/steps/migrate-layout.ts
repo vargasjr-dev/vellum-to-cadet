@@ -8,6 +8,7 @@ import {
   isUnderWorkspaceRuntime,
   isVerbatimDir,
   renameRelativePath,
+  stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
@@ -26,6 +27,10 @@ export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
 
   for (const entry of entries) {
     const destRel = renameRelativePath(entry.relPath);
+    // Eligibility rules (verbatim dirs, workspace runtime, db artifacts) are
+    // defined relative to the assistant state root — in the modern layout
+    // that is assistants/<name>/.vellum/, which dissolves into the dest.
+    const stateRel = stateRelativePath(entry.relPath);
     if (entry.isDirectory) {
       plan.push({
         src: entry.relPath,
@@ -38,7 +43,7 @@ export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
 
     const stat = await fs.stat(entry.absPath);
     let action: FileAction["action"] = "verbatim";
-    if (isRewriteEligible(entry.relPath) && !isDbArtifact(entry.relPath)) {
+    if (isRewriteEligible(stateRel) && !isDbArtifact(stateRel)) {
       action = "rewrite";
     } else if (destRel !== entry.relPath) {
       action = "rename-only";
@@ -66,8 +71,8 @@ export async function migrateLayout(
     const fileCount = plan.filter((p) => p.bytes > 0 || p.action === "verbatim").length;
     const rewrites = plan.filter((p) => p.action === "rewrite");
     const renamed = plan.filter((p) => p.dest !== p.src);
-    const dbs = plan.filter((p) => isDbArtifact(p.src));
-    const runtimeData = plan.filter((p) => isUnderWorkspaceRuntime(p.src));
+    const dbs = plan.filter((p) => isDbArtifact(stateRelativePath(p.src)));
+    const runtimeData = plan.filter((p) => isUnderWorkspaceRuntime(stateRelativePath(p.src)));
 
     return {
       step: "migrate-layout",

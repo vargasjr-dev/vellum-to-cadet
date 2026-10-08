@@ -10,7 +10,7 @@ import { createInterface } from "node:readline/promises";
 import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon } from "./colors.js";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate } from "./runner.js";
-import { DEFAULT_CADET_ROOT } from "./steps/detect.js";
+import { toCadetRoot } from "./steps/detect.js";
 import { EXIT_CODES, type MigrationReport, type MigrateOptions } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
@@ -218,7 +218,7 @@ async function main(): Promise<number> {
     return EXIT_CODES.nothingToMigrate;
   }
   parsed.vellumRoot = resolved;
-  if (!parsed.cadetRoot) parsed.cadetRoot = DEFAULT_CADET_ROOT;
+  if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
 
   try {
     const report = await migrate(parsed);

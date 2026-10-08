@@ -10,6 +10,22 @@ export const DEFAULT_VELLUM_ROOT = path.join(os.homedir(), ".vellum");
 export const DEFAULT_CADET_ROOT = path.join(os.homedir(), ".cadet");
 
 /**
+ * The cadet root mirrors the vellum root's shape: ~/.vellum → ~/.cadet and
+ * ~/.local/share/vellum[-env] → ~/.local/share/cadet[-env]. Custom roots
+ * migrate to a sibling named `cadet`.
+ */
+export function toCadetRoot(vellumRoot: string): string {
+  const base = path.basename(vellumRoot);
+  if (base === "vellum" || base.startsWith("vellum-")) {
+    return path.join(path.dirname(vellumRoot), `cadet${base.slice("vellum".length)}`);
+  }
+  if (base === ".vellum" || base.startsWith(".vellum-")) {
+    return path.join(path.dirname(vellumRoot), `.cadet${base.slice(".vellum".length)}`);
+  }
+  return path.join(path.dirname(vellumRoot), "cadet");
+}
+
+/**
  * Known external places that may reference the vellum root without living
  * inside it. We detect and report these; touching them is a follow-up.
  */
@@ -20,7 +36,7 @@ const EXTERNAL_REFERENCE_PROBES: ReadonlyArray<{ label: string; file: string }> 
 
 export async function detect(options: MigrateOptions, killer: ProcessKiller): Promise<DetectInfo> {
   const vellumRoot = options.vellumRoot ?? DEFAULT_VELLUM_ROOT;
-  const cadetRoot = options.cadetRoot ?? DEFAULT_CADET_ROOT;
+  const cadetRoot = options.cadetRoot ?? toCadetRoot(vellumRoot);
 
   const [vellumRootExists, cadetRootExists] = await Promise.all([
     pathExists(vellumRoot),
@@ -58,10 +74,19 @@ export async function detect(options: MigrateOptions, killer: ProcessKiller): Pr
 
 async function detectVersion(vellumRoot: string): Promise<string | null> {
   // 0.12.x recorded its version in the desktop marker; best-effort read.
-  for (const candidate of [
+  // Modern layout: the marker lives inside each assistant's state dir.
+  const candidates = [
     path.join(vellumRoot, ".vellum-assistant", "version"),
     path.join(vellumRoot, "version"),
-  ]) {
+  ];
+  try {
+    for (const name of await fs.readdir(path.join(vellumRoot, "assistants"))) {
+      candidates.push(path.join(vellumRoot, "assistants", name, ".vellum", ".vellum-assistant", "version"));
+    }
+  } catch {
+    // Legacy single-root layout — nothing to add.
+  }
+  for (const candidate of candidates) {
     if (await pathExists(candidate)) {
       try {
         return (await fs.readFile(candidate, "utf8")).trim() || null;
@@ -83,6 +108,20 @@ async function detectDeploymentKind(
     )
   ) {
     return "desktop";
+  }
+  // Modern layout: the marker lives inside each assistant's state dir.
+  try {
+    for (const name of await fs.readdir(path.join(vellumRoot, "assistants"))) {
+      if (
+        await pathExists(
+          path.join(vellumRoot, "assistants", name, ".vellum", ".vellum-assistant"),
+        )
+      ) {
+        return "desktop";
+      }
+    }
+  } catch {
+    // Not a modern root.
   }
   return "unknown";
 }

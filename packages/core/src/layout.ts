@@ -35,6 +35,26 @@ export const TEXT_SUBSTITUTIONS: ReadonlyArray<{
   replace: string | ((match: string) => string);
 }> = [
   {
+    name: "instance-state-paths",
+    // Machine files record absolute state paths like
+    // ~/.local/share/vellum/assistants/velly/.vellum/workspace — the state
+    // dir level dissolves in cadet (state flattens into the instance dir),
+    // so drop the trailing `/.vellum` segment. Must run before the root
+    // rename below so `.vellum` is never rewritten to `.cadet` here.
+    pattern: /\bassistants([/\\])[^/\\\s"']+\1\.vellum(?![A-Za-z-])/g,
+    replace: (match: string) => match.replace(/[/\\]\.vellum$/, ""),
+  },
+  {
+    name: "xdg-root-paths",
+    // The modern XDG data root: .local/share/vellum[-env] → .local/share/cadet[-env].
+    pattern: /\.local([/\\])share\1vellum(-[A-Za-z0-9-]+)?(?![A-Za-z0-9-])/g,
+    replace: (match: string) => {
+      const suffix = match.match(/(-[A-Za-z0-9-]+)$/);
+      const sep = match.includes("\\") ? "\\" : "/";
+      return `.local${sep}share${sep}cadet${suffix ? suffix[1] : ""}`;
+    },
+  },
+  {
     name: "env-prefix",
     // VELLUM_DAEMON_NOAUTH → CADET_DAEMON_NOAUTH, etc.
     pattern: /\bVELLUM_/g,

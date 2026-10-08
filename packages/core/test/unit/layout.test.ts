@@ -65,3 +65,33 @@ describe("layout: rewrite eligibility", () => {
     expect(isRewriteEligible(".env")).toBe(true);
   });
 });
+
+describe("layout: modern instance-state paths", () => {
+  test("absolute state paths dissolve the .vellum level and rename the root", () => {
+    const { text, counts } = applySubstitutions(
+      "dir: ~/.local/share/vellum/assistants/velly/.vellum/workspace/data",
+    );
+    expect(text).toBe("dir: ~/.local/share/cadet/assistants/velly/workspace/data");
+    expect(counts["instance-state-paths"]).toBe(1);
+    expect(counts["xdg-root-paths"]).toBe(1);
+  });
+
+  test("env-suffixed roots keep their suffix", () => {
+    const { text } = applySubstitutions(
+      "dir: /home/u/.local/share/vellum-dev/assistants/velly/.vellum/workspace",
+    );
+    expect(text).toBe("dir: /home/u/.local/share/cadet-dev/assistants/velly/workspace");
+  });
+
+  test("relative state paths dissolve too", () => {
+    const { text } = applySubstitutions(
+      'log: "assistants/velly/.vellum/workspace/data/logs"',
+    );
+    expect(text).toBe('log: "assistants/velly/workspace/data/logs"');
+  });
+
+  test("prose mentioning vellum is untouched", () => {
+    const { text } = applySubstitutions("I used vellum before it was cadet");
+    expect(text).toBe("I used vellum before it was cadet");
+  });
+});

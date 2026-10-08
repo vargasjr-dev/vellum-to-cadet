@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import { migrate } from "../../src/runner.js";
 import type { ProcessKiller } from "../../src/types.js";
-import { buildFullVellum0126 } from "../helpers/build-fixture.js";
+import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
 /** A no-op killer: fixtures have no real processes to find. */
 const noopKiller: ProcessKiller = {
@@ -266,3 +266,72 @@ async function exists(p: string): Promise<boolean> {
     return false;
   }
 }
+
+describe("e2e: modern multi-instance layout", () => {
+  test("dissolves assistants/<name>/.vellum into the instance dir and maps the XDG root", async () => {
+    const { root, home } = await buildModernVellum();
+    // Modern vellum resolves absolute state paths into machine files.
+    const state = path.join(root, "assistants", "velly", ".vellum");
+    await fs.writeFile(
+      path.join(state, "config.json"),
+      JSON.stringify(
+        { hooks: [{ name: "on-wake", command: `bash ${state}/hooks/on-wake.sh` }] },
+        null,
+        2,
+      ),
+    );
+
+    // No explicit cadetRoot — the tool derives it from the source shape.
+    const report = await migrate({ vellumRoot: root, processKiller: noopKiller });
+    expect(report.ok).toBe(true);
+
+    const cadetRoot = path.join(home, ".local", "share", "cadet");
+    expect(report.detect.cadetRoot).toBe(cadetRoot);
+    const instance = path.join(cadetRoot, "assistants", "velly");
+
+    // State dissolved: workspace/protected live directly in the instance dir,
+    // no redundant `.vellum` (or `.cadet`) level anywhere in the tree.
+    const userNote = await fs.readFile(path.join(instance, "workspace/notes/vellum-history.md"), "utf8");
+    expect(userNote).toContain("I used vellum before it was cadet");
+    expect(await exists(path.join(instance, ".vellum"))).toBe(false);
+    expect(await exists(path.join(instance, ".cadet"))).toBe(false);
+
+    // Markers renamed at the instance level.
+    expect(await exists(path.join(instance, ".cadetAssistant/version"))).toBe(true);
+    expect(await exists(path.join(instance, ".vellum-assistant"))).toBe(false);
+
+    // Protected keys: verbatim.
+    const key = await fs.readFile(path.join(instance, "protected/actor-token-signing-key"), "utf8");
+    expect(key).toContain("BEGIN PRIVATE KEY");
+
+    // DB artifacts: verbatim.
+    const db = await fs.readFile(path.join(instance, "workspace/data/db/assistant.db"));
+    expect(db.toString()).toContain("SQLite format 3");
+
+    // Machine files: XDG root renamed, state level dissolved, env vars renamed.
+    const config = await fs.readFile(path.join(instance, "config.json"), "utf8");
+    expect(config).toContain(".local/share/cadet/assistants/velly/hooks/on-wake.sh");
+    expect(config).not.toContain("vellum");
+    expect(config).not.toContain(".cadet");
+    expect(config).not.toContain(".vellum");
+
+    const env = await fs.readFile(path.join(instance, ".env"), "utf8");
+    expect(env).toContain("CADET_DATA_DIR=~/.cadet");
+    expect(env).not.toContain("VELLUM_");
+
+    // Source untouched; manifest records the modern source shape.
+    expect(await exists(path.join(root, "assistants/velly/.vellum/workspace/notes/README.md"))).toBe(true);
+    const migManifest = JSON.parse(
+      await fs.readFile(path.join(cadetRoot, ".cadet-migration-manifest.json"), "utf8"),
+    );
+    expect(migManifest.files.some((f: { src: string }) => f.src === "assistants/velly/.vellum/workspace/notes/README.md")).toBe(true);
+  });
+
+  test("env-suffixed roots derive a matching cadet root", async () => {
+    const { root, home } = await buildModernVellum(undefined, "vellum-dev");
+    const report = await migrate({ vellumRoot: root, processKiller: noopKiller });
+    expect(report.ok).toBe(true);
+    expect(report.detect.cadetRoot).toBe(path.join(home, ".local", "share", "cadet-dev"));
+    expect(await exists(path.join(home, ".local", "share", "cadet-dev", "assistants", "velly", "workspace", "notes", "README.md"))).toBe(true);
+  });
+});
