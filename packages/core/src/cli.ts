@@ -23,9 +23,6 @@ function parseArgs(argv: string[]): ParsedArgs {
   for (let i = 0; i < argv.length; i++) {
     const arg: string = argv[i]!;
     switch (arg) {
-      case "--vellum-root":
-        parsed.vellumRoot = requireValue(argv[++i], arg);
-        break;
       case "--cadet-root":
         parsed.cadetRoot = requireValue(argv[++i], arg);
         break;
@@ -71,8 +68,6 @@ Usage:
   npx migrate-vellum-assistant-to-cadet [flags]
 
 Flags:
-  --vellum-root <path>     Override source root (discovered automatically
-                           when omitted)
   --cadet-root <path>      Target root (default: ~/.cadet)
   --dry-run                Print the plan and touch nothing
   --yes                    Non-interactive; assume yes
@@ -96,37 +91,41 @@ Exit codes:
   9  multiple candidate roots found in a non-interactive run
 `;
 
-async function resolveRoot(parsed: ParsedArgs): Promise<string | { ambiguous: string[] }> {
-  if (parsed.vellumRoot) return parsed.vellumRoot;
-
+async function resolveRoot(): Promise<string> {
   const candidates = await discoverVellumRoots();
   if (candidates.length === 0) return "";
   if (candidates.length === 1) return candidates[0]!.root;
-
-  // Multiple plausible roots: ask when interactive, fail loudly otherwise.
-  if (!parsed.json && process.stdin.isTTY) {
-    return await promptForRoot(candidates);
-  }
-  return { ambiguous: candidates.map((c) => c.root) };
+  return await promptForRoot(candidates);
 }
 
 async function promptForRoot(
   candidates: Awaited<ReturnType<typeof discoverVellumRoots>>,
 ): Promise<string> {
-  console.log(header("\n  Found multiple vellum installations:"));
+  // Everything here goes to stderr so --json keeps stdout machine-readable.
+  console.error(header("\n  Found multiple vellum installations:"));
   candidates.forEach((c, i) => {
-    console.log(`    ${i + 1}. ${c.root} ${detail(`(${c.markers.slice(0, 3).join(", ")})`)}`);
+    console.error(`    ${i + 1}. ${c.root} ${detail(`(${c.markers.slice(0, 3).join(", ")})`)}`);
   });
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  // readline never resolves question() when stdin closes without input —
+  // race it against close so piped/closed stdin fails fast instead of hanging.
+  const closed = new Promise<never>((_, reject) => {
+    rl.on("close", () => reject(new Error("stdin closed before a choice was made")));
+  });
   try {
     for (;;) {
-      const answer = (await rl.question(command("\n  Which one should be migrated? [1] "))).trim();
+      const answer = (
+        await Promise.race([
+          rl.question(command("\n  Which one should be migrated? [1] ")),
+          closed,
+        ])
+      ).trim();
       if (answer === "") return candidates[0]!.root;
       const idx = Number(answer);
       if (Number.isInteger(idx) && idx >= 1 && idx <= candidates.length) {
         return candidates[idx - 1]!.root;
       }
-      console.log(colors.yellow("    Enter a number from the list."));
+      console.error(colors.yellow("    Enter a number from the list."));
     }
   } finally {
     rl.close();
@@ -191,25 +190,24 @@ async function main(): Promise<number> {
     return EXIT_CODES.ok;
   }
 
-  // Discover the vellum root unless explicitly overridden.
-  const resolved = await resolveRoot(parsed);
-  if (typeof resolved !== "string") {
-    const message = [
-      "multiple vellum installations found — pass --vellum-root with one of:",
-      ...resolved.ambiguous.map((r) => `  ${r}`),
-    ].join("\n");
+  // Discover the vellum root.
+  let resolved: string;
+  try {
+    resolved = await resolveRoot();
+  } catch (err) {
+    // No way to ask the user which root to migrate.
     if (parsed.json) {
       process.stdout.write(
-        `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.ambiguousRoot, candidates: resolved.ambiguous }, null, 2)}\n`,
+        `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.ambiguousRoot, error: (err as Error).message }, null, 2)}\n`,
       );
     } else {
-      console.error(message);
+      console.error(`could not determine which vellum installation to migrate: ${(err as Error).message}`);
     }
     return EXIT_CODES.ambiguousRoot;
   }
   if (resolved === "") {
     const searched = candidateRoots().map((c) => c.root).join(", ");
-    const message = `no vellum installation found (searched: ${searched}). Docker users: pass --vellum-root pointing at your mounted .vellum directory.`;
+    const message = `no vellum installation found (searched: ${searched}). Docker users: mount your .vellum directory at /data/.vellum or set VELLUM_DATA_DIR.`;
     if (parsed.json) {
       process.stdout.write(
         `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched: candidateRoots() }, null, 2)}\n`,
