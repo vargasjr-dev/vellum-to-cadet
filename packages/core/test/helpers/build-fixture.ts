@@ -120,9 +120,26 @@ async function writeAssistantState(root: string): Promise<void> {
     "---\nname: github-summary\ndescription: Summarize commits\n---\n\nUse $VELLUM_ROOT_DIR to find the root.\n",
   );
 
+  // Gateway state at the STATE ROOT (vellum 0.12.6): the gateway DB lived
+  // at <root>/data/gateway.sqlite and cadet's gateway reads it only from
+  // gateway-security — the migrator owns the relocation.
+  await write(root, "data/gateway.sqlite", `${SQLITE_MAGIC}fake-gateway-db`);
+  await write(root, "data/gateway.sqlite-wal", "gateway-wal-bytes");
+
+  // Root-level guardian-init lock (pre-0.12 straggler; 0.12 kept it in
+  // protected/ which dissolves there anyway).
+  await write(root, "guardian-init.lock", "{}");
+  await write(root, "guardian-init-consumed.json", "{}");
+
+  // Pre-XDG backup key straggler (vellum migration 061 parked it in the
+  // workspace). The workspace stays byte-for-byte; the migrator copies it
+  // into gateway-security.
+  await write(root, "workspace/.backup.key", "0123456789abcdef0123456789abcdef");
+
   // Protected key material — never rewritten; destinations dissolve to the
   // per-service dirs (gateway-security / ces-security / ces-data).
   await write(root, "protected/actor-token-signing-key", "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n");
+  await write(root, "protected/backup.key", "fedcba9876543210fedcba9876543210");
   await write(root, "protected/keys.enc", "FAKEENCRYPTEDSTOREBYTES");
   await write(root, "protected/store.key", "FAKESTOREKEYBYTES");
   await write(root, "protected/credential-executor/grants.json", JSON.stringify({ grants: [] }));

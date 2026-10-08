@@ -78,6 +78,27 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     );
     expect(key).toContain("BEGIN PRIVATE KEY");
     expect(await exists(path.join(cadetRoot, "protected"))).toBe(false);
+
+    // ── Gateway state: relocated to gateway-security (the cadet gateway no
+    // longer self-migrates legacy paths — the migrator owns relocations). ──
+    expect(
+      await fs.readFile(path.join(cadetRoot, "gateway-security/gateway.sqlite"), "utf8"),
+    ).toContain("fake-gateway-db");
+    expect(
+      await fs.readFile(path.join(cadetRoot, "gateway-security/gateway.sqlite-wal"), "utf8"),
+    ).toBe("gateway-wal-bytes");
+    expect(await exists(path.join(cadetRoot, "data/gateway.sqlite"))).toBe(false);
+    // Root-level guardian-init locks relocate too (a stray one would make
+    // the migrated gateway re-run guardian init on an installed instance).
+    expect(await exists(path.join(cadetRoot, "gateway-security/guardian-init.lock"))).toBe(true);
+    expect(await exists(path.join(cadetRoot, "guardian-init.lock"))).toBe(false);
+    // Dissolved protected/backup.key wins over the workspace straggler.
+    expect(
+      await fs.readFile(path.join(cadetRoot, "gateway-security/backup.key"), "utf8"),
+    ).toBe("fedcba9876543210fedcba9876543210");
+    expect(
+      await fs.readFile(path.join(cadetRoot, "workspace/.backup.key"), "utf8"),
+    ).toBe("0123456789abcdef0123456789abcdef");
     // CES store → ces-security; CES local data root → ces-data.
     const cesStore = await fs.readFile(
       path.join(cadetRoot, "ces-security/keys.enc"),

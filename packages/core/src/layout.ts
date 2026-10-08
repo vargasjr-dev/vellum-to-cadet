@@ -19,6 +19,30 @@
  */
 export const LEGACY_INSTANCE_NAME = "vellum";
 
+/**
+ * Whole-path remaps for state-root gateway state. The cadet gateway reads
+ * its database, guardian-init locks, and backup key ONLY from the gateway
+ * security dir, and no longer relocates legacy paths itself (that recovery
+ * machinery was deleted from the gateway — the migrator owns relocations).
+ * Vellum 0.12.6 kept the gateway DB at the state root's `data/` dir and the
+ * guardian-init locks at the state root, so both must move to
+ * `gateway-security/` or a migrated instance would silently lose trust
+ * rules, guardian state, and channel registrations (fresh DB + re-init).
+ *
+ * Checked after instance-state dissolution and BEFORE segment renames, so
+ * both the legacy single-root and the modern per-instance forms match.
+ */
+export const PATH_MOVES: ReadonlyArray<{ from: string; to: string }> = [
+  { from: "data/gateway.sqlite", to: "gateway-security/gateway.sqlite" },
+  { from: "data/gateway.sqlite-wal", to: "gateway-security/gateway.sqlite-wal" },
+  { from: "data/gateway.sqlite-shm", to: "gateway-security/gateway.sqlite-shm" },
+  { from: "guardian-init.lock", to: "gateway-security/guardian-init.lock" },
+  {
+    from: "guardian-init-consumed.json",
+    to: "gateway-security/guardian-init-consumed.json",
+  },
+];
+
 /** Directory/file names that must be renamed, applied to every path segment. */
 export const PATH_RENAMES: ReadonlyArray<{ from: string; to: string; note?: string }> = [
   { from: ".vellum-assistant-ios", to: ".cadet-assistant-ios", note: "iOS helper; removed in cadet but renamed for parity if present" },

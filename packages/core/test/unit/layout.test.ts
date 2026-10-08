@@ -25,6 +25,32 @@ describe("layout: path renames", () => {
   });
 });
 
+describe("layout: gateway-state relocations", () => {
+  test("the state-root gateway DB relocates into gateway-security", () => {
+    expect(renameRelativePath("data/gateway.sqlite")).toBe("gateway-security/gateway.sqlite");
+    expect(renameRelativePath("data/gateway.sqlite-wal")).toBe("gateway-security/gateway.sqlite-wal");
+    expect(renameRelativePath("data/gateway.sqlite-shm")).toBe("gateway-security/gateway.sqlite-shm");
+  });
+
+  test("root-level guardian-init locks relocate", () => {
+    expect(renameRelativePath("guardian-init.lock")).toBe("gateway-security/guardian-init.lock");
+    expect(renameRelativePath("guardian-init-consumed.json")).toBe("gateway-security/guardian-init-consumed.json");
+  });
+
+  test("relocations match the modern per-instance form too", () => {
+    expect(renameRelativePath("assistants/velly/.vellum/data/gateway.sqlite")).toBe(
+      "assistants/velly/gateway-security/gateway.sqlite",
+    );
+    expect(renameRelativePath("assistants/velly/.vellum/guardian-init.lock")).toBe(
+      "assistants/velly/gateway-security/guardian-init.lock",
+    );
+  });
+
+  test("the workspace data dir is NOT relocated (assistant DBs stay there)", () => {
+    expect(renameRelativePath("workspace/data/db/assistant.db")).toBe("workspace/data/db/assistant.db");
+  });
+});
+
 describe("layout: text substitutions", () => {
   test("env prefix, npm scope, and paths all rewrite", () => {
     const { text, counts } = applySubstitutions(
