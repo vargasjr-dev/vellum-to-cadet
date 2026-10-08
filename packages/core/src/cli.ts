@@ -7,7 +7,7 @@
  */
 import { createInterface } from "node:readline/promises";
 
-import { colors, command, detail, failIcon, header, skipIcon, successIcon } from "./colors.js";
+import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon } from "./colors.js";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate } from "./runner.js";
 import { DEFAULT_CADET_ROOT } from "./steps/detect.js";
@@ -180,7 +180,7 @@ async function main(): Promise<number> {
   try {
     parsed = parseArgs(process.argv.slice(2));
   } catch (err) {
-    console.error(String((err as Error).message));
+    console.error(errorText(String((err as Error).message)));
     console.error(HELP);
     return EXIT_CODES.preflightFailed;
   }
@@ -201,19 +201,19 @@ async function main(): Promise<number> {
         `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.ambiguousRoot, error: (err as Error).message }, null, 2)}\n`,
       );
     } else {
-      console.error(`could not determine which vellum installation to migrate: ${(err as Error).message}`);
+      console.error(errorText(`could not determine which vellum installation to migrate: ${(err as Error).message}`));
     }
     return EXIT_CODES.ambiguousRoot;
   }
   if (resolved === "") {
     const searched = candidateRoots().map((c) => c.root).join(", ");
-    const message = `no vellum installation found (searched: ${searched}). Docker users: mount your .vellum directory at /data/.vellum or set VELLUM_DATA_DIR.`;
+    const message = `no vellum installation found (searched: ${searched})`;
     if (parsed.json) {
       process.stdout.write(
         `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched: candidateRoots() }, null, 2)}\n`,
       );
     } else {
-      console.error(message);
+      console.error(errorText(message));
     }
     return EXIT_CODES.nothingToMigrate;
   }
@@ -229,7 +229,7 @@ async function main(): Promise<number> {
     }
     return report.exitCode;
   } catch (err) {
-    console.error(`migration crashed: ${(err as Error).message}`);
+    console.error(errorText(`migration crashed: ${(err as Error).message}`));
     if (parsed.verbose && (err as Error).stack) {
       console.error((err as Error).stack);
     }

@@ -9,7 +9,6 @@ import * as path from "node:path";
  *   1. legacy env overrides the assistant itself honored
  *      (VELLUM_DATA_DIR / VELLUM_WORKSPACE_DIR → workspace dir's parent)
  *   2. the default home location (~/.vellum)
- *   3. docker bind-mount conventions (/data/.vellum, /volumes/…)
  *
  * A candidate is CONFIRMED when it contains at least one vellum marker
  * (workspace dir, desktop marker, device registry, protected keys). Scores
@@ -61,7 +60,6 @@ export function candidateRoots(): Array<{ root: string; origin: string }> {
       origin: "VELLUM_WORKSPACE_DIR",
     },
     { root: path.join(homeDir, ".vellum"), origin: "default home location" },
-    { root: "/data/.vellum", origin: "docker volume convention" },
   ];
   return candidates
     .filter((c): c is { root: string; origin: string } => typeof c.root === "string" && c.root.length > 0)
