@@ -7,8 +7,10 @@ import {
 } from "../../src/fs-utils.js";
 import {
   isPluginSource,
+  isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
+  rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
 } from "../../src/layout.js";
 
@@ -121,7 +123,9 @@ describe("layout: text substitutions", () => {
 describe("layout: rewrite eligibility", () => {
   test("never rewrites the user workspace — except named machine files", () => {
     expect(isRewriteEligible("workspace/notes/README.md")).toBe(false);
-    expect(isRewriteEligible("workspace/skills/github-summary/SKILL.md")).toBe(false);
+    // The frontmatter metadata block is a machine contract (its own substep);
+    // the notes file is user content.
+    expect(isRewriteEligible("workspace/skills/github-summary/SKILL.md")).toBe(true);
     // The gateway-facing config contract carries vellum provider ids.
     expect(isRewriteEligible("workspace/config.json")).toBe(true);
   });
@@ -253,5 +257,62 @@ describe("layout: workspace machine files", () => {
   test("rewriteWorkspaceJsonValues is a no-op when nothing matches", () => {
     const raw = JSON.stringify({ provider: "anthropic" }, null, 2);
     expect(rewriteWorkspaceJsonValues(raw)).toEqual({ text: raw, changed: 0 });
+  });
+});
+
+describe("layout: skill frontmatter rewrites", () => {
+  const FRONTMATTER = [
+    "---",
+    "name: github-summary",
+    "description: Summarize commits",
+    "metadata:",
+    '  emoji: "octopus"',
+    "  vellum:",
+    '    display-name: GitHub Summary',
+    "    category: productivity",
+    "---",
+    "",
+    "# GitHub summary",
+    "",
+    "From the vellum catalog.",
+    "",
+  ].join("\n");
+
+  test("flips the metadata.vellum key to cadet, leaving everything else", () => {
+    const { text, changed } = rewriteSkillFrontmatter(FRONTMATTER);
+    expect(changed).toBe(1);
+    expect(text).toContain("  cadet:\n    display-name: GitHub Summary");
+    expect(text).not.toContain("  vellum:");
+    // Prose below the frontmatter is untouched.
+    expect(text).toContain("From the vellum catalog.");
+    // Other frontmatter keys keep their values verbatim.
+    expect(text).toContain('  emoji: "octopus"');
+    expect(text).toContain("name: github-summary");
+  });
+
+  test("isSkillFrontmatter matches workspace skills only", () => {
+    // State-relative input — the executor normalizes via stateRelativePath
+    // first (modern instance layouts dissolve to this shape).
+    expect(isSkillFrontmatter("workspace/skills/github-summary/SKILL.md")).toBe(true);
+    expect(isSkillFrontmatter("skills/github-summary/SKILL.md")).toBe(false); // state-root skills: generic substitutions
+    expect(isSkillFrontmatter("workspace/skills/github-summary/install-meta.json")).toBe(false);
+    expect(isSkillFrontmatter("workspace/notes/SKILL.md")).toBe(false);
+  });
+
+  test("a SKILL.md without frontmatter passes through unchanged", () => {
+    const raw = "# Just prose\n\nmentions vellum freely\n";
+    expect(rewriteSkillFrontmatter(raw)).toEqual({ text: raw, changed: 0 });
+  });
+
+  test("frontmatter without a metadata.vellum key is a no-op", () => {
+    const raw = "---\nname: x\ndescription: y\nmetadata:\n  emoji: \"a\"\n---\n\nbody\n";
+    expect(rewriteSkillFrontmatter(raw)).toEqual({ text: raw, changed: 0 });
+  });
+
+  test("a nested vellum key under a non-metadata top-level key is untouched", () => {
+    const raw = "---\nname: x\nsomething:\n  vellum:\n    deep: 1\nmetadata:\n  cadet:\n    category: t\n---\n";
+    const { text, changed } = rewriteSkillFrontmatter(raw);
+    expect(changed).toBe(0);
+    expect(text).toBe(raw);
   });
 });

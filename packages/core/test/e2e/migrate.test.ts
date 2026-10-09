@@ -88,12 +88,16 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     );
     expect(Object.keys(pluginPkg.dependencies)[0]).toBe("@mycadet/plugin-api");
 
-    // ── User content inside the workspace stays byte-for-byte. ──
+    // ── User content inside the workspace stays byte-for-byte — EXCEPT the
+    // skill frontmatter contract (metadata.vellum → metadata.cadet), its own
+    // reported substep; prose below the frontmatter survives. ──
     const skillDoc = await fs.readFile(
       path.join(cadetRoot, "workspace/skills/github-summary/SKILL.md"),
       "utf8",
     );
     expect(skillDoc).toContain("From the vellum catalog.");
+    expect(skillDoc).toContain("  cadet:\n    display-name: GitHub Summary");
+    expect(skillDoc).not.toContain("  vellum:");
     const history = await fs.readFile(
       path.join(cadetRoot, "workspace/notes/vellum-history.md"),
       "utf8",
@@ -109,14 +113,27 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(await exists(path.join(cadetRoot, "protected"))).toBe(false);
 
     // ── Gateway state: relocated to gateway-security (the cadet gateway no
-    // longer self-migrates legacy paths — the migrator owns relocations). ──
-    expect(
-      await fs.readFile(path.join(cadetRoot, "gateway-security/gateway.sqlite"), "utf8"),
-    ).toContain("fake-gateway-db");
-    expect(
-      await fs.readFile(path.join(cadetRoot, "gateway-security/gateway.sqlite-wal"), "utf8"),
-    ).toBe("gateway-wal-bytes");
+    // longer self-migrates legacy paths — the migrator owns relocations) and
+    // value-migrated (the gateway's own channel-branded rows). The fake
+    // -wal sidecar folds away on the step's checkpoint — asserted BEFORE
+    // the readonly inspection below, which re-creates the sidecars (any
+    // open of a wal-mode db does, even readonly). ──
+    expect(await exists(path.join(cadetRoot, "gateway-security/gateway.sqlite-wal"))).toBe(false);
     expect(await exists(path.join(cadetRoot, "data/gateway.sqlite"))).toBe(false);
+    const gwStep = report.steps.find((s) => s.step === "migrate-gateway-db");
+    expect(gwStep?.status).toBe("completed");
+    const gwDb = new Database(path.join(cadetRoot, "gateway-security/gateway.sqlite"), {
+      readonly: true,
+    });
+    const gwChannelTypes = gwDb.query(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
+    expect(gwChannelTypes).toEqual([{ t: "cadet" }, { t: "telegram" }]);
+    const gwInvites = gwDb.query(`SELECT source_channel AS c FROM ingress_invites`).all();
+    expect(gwInvites).toEqual([{ c: "cadet" }]);
+    const gwOverrides = gwDb
+      .query(`SELECT channel_type AS t FROM channel_permission_overrides ORDER BY id`)
+      .all();
+    expect(gwOverrides).toEqual([{ t: "cadet" }, { t: "slack" }]);
+    gwDb.close();
     // Root-level guardian-init locks relocate too (a stray one would make
     // the migrated gateway re-run guardian init on an installed instance).
     expect(await exists(path.join(cadetRoot, "gateway-security/guardian-init.lock"))).toBe(true);
@@ -493,9 +510,24 @@ describe("e2e: modern multi-instance layout", () => {
     expect(await exists(path.join(instance, "ces-security/keys.enc"))).toBe(true);
     expect(await exists(path.join(instance, "ces-data/grants.json"))).toBe(true);
 
-    // DB artifacts: verbatim.
+    // DB artifacts: copied, then value-migrated (assistant + gateway dbs).
     const db = await fs.readFile(path.join(instance, "workspace/data/db/assistant.db"));
     expect(db.toString()).toContain("SQLite format 3");
+    const gwDb = new Database(path.join(instance, "gateway-security/gateway.sqlite"), {
+      readonly: true,
+    });
+    const gwChannelTypes = gwDb.query(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
+    expect(gwChannelTypes).toEqual([{ t: "cadet" }, { t: "telegram" }]);
+    gwDb.close();
+    expect(
+      await exists(path.join(instance, "workspace/skills/github-summary/SKILL.md")),
+    ).toBe(true);
+    const modernSkillDoc = await fs.readFile(
+      path.join(instance, "workspace/skills/github-summary/SKILL.md"),
+      "utf8",
+    );
+    expect(modernSkillDoc).toContain("  cadet:");
+    expect(modernSkillDoc).not.toContain("  vellum:");
 
     // Machine files: XDG root renamed, state level dissolved, env vars renamed.
     const config = await fs.readFile(path.join(instance, "config.json"), "utf8");

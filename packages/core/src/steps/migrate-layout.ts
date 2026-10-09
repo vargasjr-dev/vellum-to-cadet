@@ -14,8 +14,10 @@ import {
 import {
   DEFAULT_TARGET_CTX,
   isPluginSource,
+  isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
+  rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
   USER_WORKSPACE_DIR,
   type MigrationTargetCtx,
@@ -166,6 +168,13 @@ async function execute(
         text = values.text;
         if (values.changed > 0) counts["json-values"] = values.changed;
         bump("skills renames", values.changed);
+      } else if (isSkillFrontmatter(stateRel)) {
+        // "skill frontmatter rewrites": metadata.vellum → metadata.cadet in
+        // the SKILL.md frontmatter block only — prose below stays verbatim.
+        const values = rewriteSkillFrontmatter(raw);
+        text = values.text;
+        if (values.changed > 0) counts["frontmatter-metadata-key"] = values.changed;
+        bump("skill frontmatter rewrites", values.changed);
       } else if (isPluginSource(stateRel)) {
         // "plugin import rewrites": the npm-scope rule ONLY — never touch
         // user-authored code beyond the renamed package specifier.

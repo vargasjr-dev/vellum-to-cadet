@@ -301,6 +301,49 @@ export function isPluginSource(relPath: string): boolean {
 }
 
 /**
+ * Installed-skill frontmatter (`workspace/skills/<name>/SKILL.md`). The
+ * frontmatter's `metadata:` block is a machine contract: cadet reads
+ * `metadata.cadet.*` (display-name, category, activation-hints, avoid-when,
+ * feature-flag, includes) and has no legacy `vellum` tolerance — a skill
+ * installed by the old product keeps its `metadata.vellum` block and silently
+ * loses all of it. The prose BELOW the frontmatter stays verbatim.
+ */
+export function isSkillFrontmatter(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  const ws = `${USER_WORKSPACE_DIR}/`;
+  if (!norm.startsWith(ws)) return false;
+  return /^skills\/[^/]+\/SKILL\.md$/.test(norm.slice(ws.length));
+}
+
+/**
+ * Frontmatter-only rewrite: inside the leading `---` block, the `vellum:`
+ * key nested directly under `metadata:` becomes `cadet:`. Everything else —
+ * prose, other keys, deeper nesting — is untouched.
+ */
+export function rewriteSkillFrontmatter(content: string): { text: string; changed: number } {
+  if (!content.startsWith("---\n")) return { text: content, changed: 0 };
+  const end = content.indexOf("\n---", 4);
+  if (end === -1) return { text: content, changed: 0 };
+  const head = content.slice(4, end);
+  const tail = content.slice(end);
+  let changed = 0;
+  let topKey = "";
+  const rewritten = head
+    .split("\n")
+    .map((line) => {
+      if (/^[A-Za-z][A-Za-z0-9_-]*:/.test(line)) topKey = line.slice(0, line.indexOf(":"));
+      if (topKey === "metadata" && /^[ ]{2}vellum:\s*$/.test(line)) {
+        changed++;
+        return `${line.slice(0, 2)}cadet:`;
+      }
+      return line;
+    })
+    .join("\n");
+  if (changed === 0) return { text: content, changed: 0 };
+  return { text: `---\n${rewritten}${tail}`, changed };
+}
+
+/**
  * JSON-value rewrites for machine-owned workspace files: any string value
  * exactly equal to "vellum" becomes "cadet" (provider ids, skill origins).
  * JSON-aware on purpose — a textual vellum→cadet sweep would mangle user

@@ -6,22 +6,33 @@ import { USER_WORKSPACE_DIR } from "../layout.js";
 import type { DetectInfo, StepIssue, StepResult } from "../types.js";
 
 /**
- * Rewrite vellum-branded VALUES inside the migrated assistant SQLite DB.
- * The old product persisted channel ids as `'vellum'` (the desktop client
- * channel), `vellum://` attachment links in message content, and the managed
- * provider connection under the name/provider `vellum`. The renamed product
- * only reads `cadet` spellings, and its own migrations can't heal them (its
- * migration numbering already marks those versions applied — see the
+ * Rewrite vellum-branded VALUES inside the migrated SQLite DBs. The old
+ * product persisted channel ids as `'vellum'` (the desktop client channel),
+ * `vellum://` attachment links in message content, and the managed provider
+ * connection under the name/provider `vellum`. The renamed product only reads
+ * `cadet` spellings, and its own migrations can't heal them (its migration
+ * numbering already marks those versions applied — see the
  * provider-connections normalization note below).
  *
- * Every case is an explicit substep, mirroring the old product's own
- * channel-value rename migration (its 144) table-for-table. Each UPDATE is
- * guarded by a table-exists check so older DBs without a table are fine, and
- * only rows still spelling `vellum` are touched (idempotent). Runs on the
- * DESTINATION copy — the vellum root (and its backup) stay byte-identical.
+ * Two databases carry vellum-branded values, each an explicit step with an
+ * explicit column list:
+ *
+ * - `migrate-assistant-db` — the assistant DB. Channel columns mirror the old
+ *   product's own channel-rename migration (its 144) table-for-table, plus
+ *   message content/metadata and the managed connection row.
+ * - `migrate-gateway-db` — the gateway DB (relocated to `gateway-security/`
+ *   by the layout step). The gateway owns its own channel-branded tables —
+ *   its contact_channels copy (guardian-bootstrap finds the owner's contact
+ *   with `type = 'vellum'`), its invite/request/delivery/seen-event channel
+ *   columns, and the per-channel-type policy/identity tables.
+ *
+ * Every UPDATE is guarded by a table-exists check so older DBs without a
+ * table are fine, and only rows still spelling `vellum` are touched
+ * (idempotent). Runs on the DESTINATION copy — the vellum root (and its
+ * backup) stay byte-identical.
  */
 
-/** Every table+column that stores a channel id, from the old product's own rename migration. */
+/** Every assistant-db table+column that stores a channel id, from the old product's own rename migration. */
 export const CHANNEL_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
   { table: "contact_channels", column: "type" },
   { table: "conversations", column: "origin_channel" },
@@ -51,8 +62,35 @@ export const CHANNEL_COLUMNS: ReadonlyArray<{ table: string; column: string }> =
   { table: "followups", column: "channel" },
 ];
 
+/**
+ * Every gateway-db table+column that stores a channel id, read off the
+ * gateway's own schema (gateway/src/db/schema.ts). The gateway db's
+ * `contact_channels` is the gateway's OWN copy (not the assistant's proxied
+ * table) — guardian-bootstrap resolves the owner's contact with
+ * `type = 'vellum'`, so an unrewritten row makes the migrated gateway treat
+ * the guardian as unknown. External chat ids (Slack `channel_id`,
+ * `channel_external_id`) and webhook route kinds are a different vocabulary —
+ * deliberately not touched.
+ */
+export const GATEWAY_CHANNEL_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
+  { table: "contact_channels", column: "type" },
+  { table: "ingress_invites", column: "source_channel" },
+  { table: "channel_denial_reply_log", column: "channel" },
+  { table: "guardian_requests", column: "source_channel" },
+  { table: "guardian_request_deliveries", column: "destination_channel" },
+  { table: "inbound_seen_events", column: "source_channel" },
+  { table: "channel_bot_identity", column: "channel_type" },
+  { table: "channel_admission_policy", column: "channel_type" },
+  { table: "channel_permission_overrides", column: "channel_type" },
+  { table: "channel_verification_sessions", column: "channel" },
+  { table: "channel_guardian_rate_limits", column: "channel" },
+];
+
 /** State-relative path of the assistant db — how the copy plan addresses it. */
 export const ASSISTANT_DB_STATE_REL = `${USER_WORKSPACE_DIR}/data/db/assistant.db`;
+
+/** State-relative path of the gateway db (pre-relocation, vellum 0.12.6). */
+export const GATEWAY_DB_STATE_REL = "data/gateway.sqlite";
 
 export async function migrateAssistantDb(
   detect: DetectInfo,
@@ -66,25 +104,69 @@ export async function migrateAssistantDb(
       summary: "no assistant db in the migrated workspace",
     };
   }
+  return migrateDbValues({
+    detect,
+    destRel,
+    step: "migrate-assistant-db",
+    label: "assistant db",
+    columns: CHANNEL_COLUMNS,
+    rewriteMessages: true,
+    rewriteConnections: true,
+  });
+}
+
+export async function migrateGatewayDb(
+  detect: DetectInfo,
+  /** Destination-relative path of the gateway db, derived from the copy plan. */
+  destRel: string | undefined,
+): Promise<StepResult> {
+  if (!destRel) {
+    return {
+      step: "migrate-gateway-db",
+      status: "skipped",
+      summary: "no gateway db in the migrated workspace",
+    };
+  }
+  return migrateDbValues({
+    detect,
+    destRel,
+    step: "migrate-gateway-db",
+    label: "gateway db",
+    columns: GATEWAY_CHANNEL_COLUMNS,
+  });
+}
+
+type DbValuesOptions = {
+  detect: DetectInfo;
+  destRel: string;
+  step: StepResult["step"];
+  label: string;
+  columns: ReadonlyArray<{ table: string; column: string }>;
+  /** Assistant-only: message metadata JSON refs + `vellum://` content links. */
+  rewriteMessages?: boolean;
+  /** Assistant-only: the managed provider connection row. */
+  rewriteConnections?: boolean;
+};
+
+async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
+  const { detect, destRel, step, label, columns } = options;
   const dbPath = path.join(detect.cadetRoot, destRel);
 
   if (!(await fileExists(dbPath))) {
-    return {
-      step: "migrate-assistant-db",
-      status: "skipped",
-      summary: "no assistant db in the migrated workspace",
-    };
+    return { step, status: "skipped", summary: `no ${label} in the migrated workspace` };
   }
 
   let db: Database;
   try {
-    // Opening recovers/checkpoints any copied -wal sidecar.
+    // Opening recovers/checkpoints any copied -wal sidecar: committed frames
+    // still sitting in the WAL are replayed into the main db BEFORE the
+    // rewrites below run, so WAL-resident vellum rows are rewritten too.
     db = new Database(dbPath);
   } catch (err) {
     return {
-      step: "migrate-assistant-db",
+      step,
       status: "skipped",
-      summary: `assistant db is not a readable sqlite file — left verbatim (${(err as Error).message})`,
+      summary: `${label} is not a readable sqlite file — left verbatim (${(err as Error).message})`,
     };
   }
 
@@ -104,13 +186,13 @@ export async function migrateAssistantDb(
 
     // "channel values": every channel-id column, 'vellum' → 'cadet'.
     let channelRows = 0;
-    for (const { table, column } of CHANNEL_COLUMNS) {
+    for (const { table, column } of columns) {
       if (!tableExists(table)) continue;
       channelRows += runCounted(
         `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
       );
     }
-    if (tableExists("messages")) {
+    if (options.rewriteMessages && tableExists("messages")) {
       // Message metadata records channel refs as JSON string values.
       channelRows += runCounted(
         `UPDATE messages SET metadata = REPLACE(metadata, '"vellum"', '"cadet"')
@@ -119,33 +201,37 @@ export async function migrateAssistantDb(
     }
     substeps["channel values"] = channelRows;
 
-    // "attachment links": vellum:// attachment URIs in message content.
-    let linkRows = 0;
-    if (tableExists("messages")) {
-      linkRows += runCounted(
-        `UPDATE messages SET content = REPLACE(content, 'vellum://', 'cadet://')
-         WHERE content LIKE '%vellum://%'`,
-      );
+    if (options.rewriteMessages) {
+      // "attachment links": vellum:// attachment URIs in message content.
+      let linkRows = 0;
+      if (tableExists("messages")) {
+        linkRows += runCounted(
+          `UPDATE messages SET content = REPLACE(content, 'vellum://', 'cadet://')
+           WHERE content LIKE '%vellum://%'`,
+        );
+      }
+      substeps["attachment links"] = linkRows;
     }
-    substeps["attachment links"] = linkRows;
 
-    // "provider connections": the managed platform connection was named and
-    // typed `vellum`. The renamed product's own normalizer can't revisit it
-    // (its migration version is already marked applied), so the rename is
-    // ours. The name only moves when `cadet` is free (a re-seeded cadet row
-    // would make the PK collide).
-    let connectionRows = 0;
-    if (tableExists("provider_connections")) {
-      connectionRows += runCounted(
-        `UPDATE provider_connections SET provider = 'cadet' WHERE provider = 'vellum'`,
-      );
-      connectionRows += runCounted(
-        `UPDATE provider_connections SET name = 'cadet'
-         WHERE name = 'vellum'
-           AND NOT EXISTS (SELECT 1 FROM provider_connections WHERE name = 'cadet')`,
-      );
+    if (options.rewriteConnections) {
+      // "provider connections": the managed platform connection was named and
+      // typed `vellum`. The renamed product's own normalizer can't revisit it
+      // (its migration version is already marked applied), so the rename is
+      // ours. The name only moves when `cadet` is free (a re-seeded cadet row
+      // would make the PK collide).
+      let connectionRows = 0;
+      if (tableExists("provider_connections")) {
+        connectionRows += runCounted(
+          `UPDATE provider_connections SET provider = 'cadet' WHERE provider = 'vellum'`,
+        );
+        connectionRows += runCounted(
+          `UPDATE provider_connections SET name = 'cadet'
+           WHERE name = 'vellum'
+             AND NOT EXISTS (SELECT 1 FROM provider_connections WHERE name = 'cadet')`,
+        );
+      }
+      substeps["provider connections"] = connectionRows;
     }
-    substeps["provider connections"] = connectionRows;
 
     db.close();
 
@@ -153,14 +239,14 @@ export async function migrateAssistantDb(
       .filter(([, n]) => n > 0)
       .map(([name, n]) => `${name}: ${n} row(s)`);
     return {
-      step: "migrate-assistant-db",
+      step,
       status: "completed",
-      summary: parts.length > 0 ? `assistant db — ${parts.join(", ")}` : "assistant db — nothing to rewrite",
+      summary: parts.length > 0 ? `${label} — ${parts.join(", ")}` : `${label} — nothing to rewrite`,
       data: { substeps, dbPath: destRel },
     };
   } catch (err) {
     const issues: StepIssue[] = [
-      { severity: "error", message: `assistant db value migration failed: ${(err as Error).message}` },
+      { severity: "error", message: `${label} value migration failed: ${(err as Error).message}` },
     ];
     try {
       db.close();
@@ -168,9 +254,9 @@ export async function migrateAssistantDb(
       // already closed
     }
     return {
-      step: "migrate-assistant-db",
+      step,
       status: "failed",
-      summary: `assistant db value migration failed: ${(err as Error).message}`,
+      summary: `${label} value migration failed: ${(err as Error).message}`,
       issues,
     };
   }

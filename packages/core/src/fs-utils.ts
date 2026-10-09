@@ -14,6 +14,7 @@ import {
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
   isPluginSource,
+  isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
   rewriteWorkspaceJsonValues,
@@ -96,12 +97,16 @@ export function extensionOf(name: string): string {
 export function isRewriteEligible(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
   // Never rewrite the user-facing workspace or protected keys — except the
-  // three explicit machine-owned targets inside it (the config contract,
-  // skill install metadata, plugin sources), each its own reported substep.
+  // explicit machine-owned targets inside it (the config contract, skill
+  // install metadata, skill frontmatter, plugin sources), each its own
+  // reported substep.
   if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) {
     if (isDbArtifact(norm)) return false;
     return (
-      isWorkspaceConfigContract(norm) || isSkillInstallMeta(norm) || isPluginSource(norm)
+      isWorkspaceConfigContract(norm) ||
+      isSkillInstallMeta(norm) ||
+      isSkillFrontmatter(norm) ||
+      isPluginSource(norm)
     );
   }
   for (const dir of VERBATIM_DIRS) {
