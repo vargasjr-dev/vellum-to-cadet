@@ -50,23 +50,19 @@ function home(): string {
 }
 
 /**
- * Where modern (0.12.x) multi-instance roots live: ~/.local/share/vellum and
- * its env-suffixed siblings (vellum-dev, …). Returned entries exist on disk.
+ * Where the modern (0.12.x) multi-instance production root lives:
+ * ~/.local/share/vellum. The migrator targets production assistants only —
+ * env siblings (vellum-dev, vellum-staging, …) are never candidates.
+ * Returned entries exist on disk.
  */
 export async function modernRootCandidates(): Promise<Array<{ root: string; origin: string }>> {
   const shareDir = path.join(home(), ".local", "share");
-  let names: string[];
   try {
-    names = (await fs.readdir(shareDir)).filter((n) => /^vellum(-[a-z0-9-]+)?$/.test(n));
+    await fs.stat(path.join(shareDir, "vellum"));
   } catch {
     return [];
   }
-  return names
-    .sort()
-    .map((name) => ({
-      root: path.join(shareDir, name),
-      origin: name === "vellum" ? "default XDG data location" : `XDG data location (env: ${name.slice("vellum-".length)})`,
-    }));
+  return [{ root: path.join(shareDir, "vellum"), origin: "default XDG data location" }];
 }
 
 /** Where the vellum 0.12.x assistant could plausibly live on this machine. */
@@ -191,4 +187,53 @@ async function realpath(p: string): Promise<string> {
   } catch {
     return p;
   }
+}
+
+/**
+ * Cadet-root discovery for repair mode. Repair never takes a path
+ * argument — it finds every cadet root this migrator created and fixes
+ * them all. The migrator targets production assistants only, so the
+ * candidates are the production roots: the bare home root (~/.cadet) and
+ * the modern XDG root (~/.local/share/cadet) with its assistants/<name>
+ * instance dirs — env-suffixed siblings (cadet-dev, …) are never
+ * candidates. A candidate qualifies only when it carries the migration
+ * manifest — the migrator's own audit trail — so foreign or hand-made
+ * cadet roots are never touched.
+ */
+export async function discoverCadetRoots(): Promise<string[]> {
+  const homeDir = home();
+  const candidates = new Set<string>();
+
+  const bare = await fs.readdir(homeDir).catch(() => []);
+  for (const name of bare) {
+    if (name === ".cadet") {
+      candidates.add(path.join(homeDir, name));
+    }
+  }
+
+  const shareDir = path.join(homeDir, ".local", "share");
+  const share = await fs.readdir(shareDir).catch(() => []);
+  for (const name of share) {
+    if (name !== "cadet") continue;
+    const root = path.join(shareDir, name);
+    candidates.add(root);
+    const instances = await fs
+      .readdir(path.join(root, "assistants"))
+      .catch(() => []);
+    for (const instance of instances) {
+      candidates.add(path.join(root, "assistants", instance));
+    }
+  }
+
+  const qualified: string[] = [];
+  for (const candidate of [...candidates].sort()) {
+    try {
+      if ((await fs.stat(path.join(candidate, ".cadet-migration-manifest.json"))).isFile()) {
+        qualified.push(candidate);
+      }
+    } catch {
+      // Not a migrated cadet root.
+    }
+  }
+  return qualified;
 }

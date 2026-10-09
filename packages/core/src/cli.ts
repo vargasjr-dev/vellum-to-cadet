@@ -17,7 +17,7 @@ interface ParsedArgs extends MigrateOptions {
   help: boolean;
   json: boolean;
   cadetRootExplicit: boolean;
-  /** True when invoked as `repair [cadetRoot]` (post-migration fix-up mode). */
+  /** True when invoked as `repair [flags]` (post-migration fix-up mode). */
   repair: boolean;
 }
 
@@ -48,9 +48,6 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--verbose":
         parsed.verbose = true;
-        break;
-      case "--skip-stop":
-        parsed.skipStopAssistant = true;
         break;
       case "--help":
       case "-h":
@@ -91,7 +88,7 @@ Steps: discover → detect → preflight → stop assistant → backup → migra
 
 Usage:
   npx migrate-vellum-assistant-to-cadet [flags]
-  npx migrate-vellum-assistant-to-cadet repair <cadetRoot> [flags]
+  npx migrate-vellum-assistant-to-cadet repair [flags]
 
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
@@ -99,15 +96,14 @@ Flags:
   --yes                    Non-interactive; assume yes
   --json                   Machine-readable JSON report on stdout
   --verbose                Log every step to stderr
-  --skip-stop              Repair only: skip \`cadet sleep\` (repair mode never
-                           signals processes; the re-discovery still reports survivors)
   -h, --help               Show this help
 
 Repair mode re-runs the idempotent value steps (content rewrites + db value
-migrations) against an ALREADY-MIGRATED cadet root — for when a migration
-bug is found after the cadet assistant has been in use. It requires the
-migration manifest (it only repairs roots this migrator created), stops the
-cadet assistant, takes a fresh timestamped backup of the cadet root, then
+migrations) against EVERY migrated cadet root on the machine — for when a
+migration bug is found after the cadet assistants have been in use. It takes
+no path: the roots self-discover via their migration manifests (it only
+repairs roots this migrator created), stops all cadet assistants with
+\`cadet sleep --all\`, takes a fresh timestamped backup of each root, then
 verifies in place. No layout copy, no renames, no vellum-root involvement.
 
 The vellum root is a read-only source of truth: nothing in it is ever
@@ -284,14 +280,15 @@ async function main(): Promise<number> {
     return EXIT_CODES.ok;
   }
 
-  // Repair mode: re-run the idempotent value steps against an already-
+  // Repair mode: re-run the idempotent value steps against every already-
   // migrated cadet root. Deliberately SKIPS all vellum-root discovery —
-  // the cadet root is explicit, and the vellum root may not even exist.
+  // and takes NO path: the roots self-discover via their migration
+  // manifests, so there is no root argument to get wrong.
   if (parsed.repair) {
-    if (!parsed.cadetRoot) {
+    if (parsed.cadetRoot) {
       console.error(
         errorText(
-          "repair requires the cadet root to fix: `migrate-vellum-assistant-to-cadet repair <cadetRoot>`",
+          "repair self-discovers migrated cadet roots; pass no root — every root the migrator created is repaired",
         ),
       );
       return EXIT_CODES.preflightFailed;
@@ -300,10 +297,8 @@ async function main(): Promise<number> {
     const progress = createLiveProgress();
     try {
       const report = await repair({
-        cadetRoot: parsed.cadetRoot,
         dryRun: parsed.dryRun,
         verbose: parsed.verbose,
-        skipStopAssistant: parsed.skipStopAssistant,
         onStepStart: live ? progress.onStepStart : undefined,
         onStepDone: live ? progress.onStepDone : undefined,
       });

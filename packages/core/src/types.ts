@@ -58,8 +58,6 @@ export interface MigrateOptions {
   yes?: boolean;
   /** Verbose logging to stderr. */
   verbose?: boolean;
-  /** Platform seam: skip the stop-assistant step (container-managed lifecycles). */
-  skipStopAssistant?: boolean;
   /** Test seam: override process discovery and the stop command. */
   processOps?: ProcessOps;
   /** Test seam: skip filesystem checks that need privileged statfs. */
@@ -79,9 +77,18 @@ export interface MigrateOptions {
  */
 export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
-  /** Ask the vellum CLI to put its assistant to sleep. */
-  vellumSleep(): Promise<void>;
-  /** Ask the cadet CLI to put its assistant to sleep (repair mode). */
+  /**
+   * Ask the vellum CLI to put an assistant to sleep. The vellum CLI has no
+   * sleep-all flag, so the migrator iterates the lockfile and calls this
+   * once per tracked assistant (`vellum sleep <assistant>`); pass no
+   * argument for the CLI's own default resolution.
+   */
+  vellumSleep(assistant?: string): Promise<void>;
+  /**
+   * Ask the cadet CLI to put its assistants to sleep (repair mode).
+   * `cadet sleep --all` stops every assistant the cadet lockfiles know
+   * about — a cadet root can have several running at once.
+   */
   cadetSleep(): Promise<void>;
 }
 

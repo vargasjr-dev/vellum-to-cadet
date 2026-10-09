@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import { migrate, repair } from "../../src/runner.js";
-import type { ProcessOps } from "../../src/types.js";
+import { stopAssistant } from "../../src/steps/stop-assistant.js";
+import type { DetectInfo, ProcessOps } from "../../src/types.js";
 import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
 /** No-op ops: fixtures have no real processes to find or stop. */
@@ -700,7 +701,7 @@ describe("e2e: legacy home-level lockfile move", () => {
 });
 
 describe("e2e: repair mode", () => {
-  test("re-runs the idempotent value steps against the migrated cadet root", async () => {
+  test("self-discovers the migrated cadet root and re-runs the idempotent value steps", async () => {
     const { root, home } = await buildFullVellum0126();
     const migrateReport = await migrate({
       vellumRoot: root,
@@ -730,54 +731,103 @@ describe("e2e: repair mode", () => {
 
     let cadetSleeps = 0;
     let vellumSleeps = 0;
-    const report = await repair({
-      cadetRoot,
-      processOps: {
-        async find() {
-          return [];
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const report = await repair({
+        processOps: {
+          async find() {
+            return [];
+          },
+          async vellumSleep() {
+            vellumSleeps++;
+          },
+          async cadetSleep() {
+            cadetSleeps++;
+          },
         },
-        async vellumSleep() {
-          vellumSleeps++;
-        },
-        async cadetSleep() {
-          cadetSleeps++;
-        },
-      },
-      termGraceMs: 0,
+        termGraceMs: 0,
+      });
+
+      expect(report.mode).toBe("repair");
+      expect(report.ok).toBe(true);
+      expect(report.exitCode).toBe(0);
+      expect(vellumSleeps).toBe(0); // repair never touches the vellum CLI
+      // No running cadet processes in the fixture → sleep skipped.
+      expect(cadetSleeps).toBe(0);
+      const stop = report.steps.find((s) => s.step === "stop-cadet");
+      expect(stop?.status).toBe("skipped");
+      // The root was self-discovered via its manifest, not passed in.
+      const discovery = report.steps.find((s) => s.step === "discover-cadet-roots");
+      expect(discovery?.status).toBe("completed");
+      expect(discovery?.summary).toContain(cadetRoot);
+      expect(report.detect.cadetRoot).toBe(cadetRoot);
+
+      const log = await fs.readFile(logPath, "utf8");
+      expect(log).toContain("cadet://workspace/data/attachments/late.txt");
+      const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+      expect(config.services.stt.provider).toBe("cadet");
+      const soul = await fs.readFile(soulPath, "utf8");
+      expect(soul).toContain("comes with the Cadet harness again.");
+      const checked = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
+        readonly: true,
+      });
+      const leftover = checked
+        .query("SELECT COUNT(*) AS n FROM messages WHERE user_message_channel = 'vellum'")
+        .all();
+      expect(leftover).toEqual([{ n: 0 }]);
+
+      // A timestamped backup of the cadet root itself, beside it.
+      expect(report.backupPath).toContain(".cadet-migration-backups");
+      expect(report.backupPath!.startsWith(home)).toBe(true);
+
+      // Second repair: everything already clean → still ok, no rewrites.
+      const second = await repair({ processOps: noopOps, termGraceMs: 0 });
+      expect(second.ok).toBe(true);
+      const rewrite = second.steps.find((s) => s.step === "rewrite-content");
+      expect(rewrite?.summary).toContain("already matches its sanctioned transform");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+
+  test("repairs every discovered root, not just one", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const first = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: noopOps,
     });
-
-    expect(report.mode).toBe("repair");
-    expect(report.ok).toBe(true);
-    expect(report.exitCode).toBe(0);
-    expect(vellumSleeps).toBe(0); // repair never touches the vellum CLI
-    // No running cadet processes in the fixture → sleep skipped.
-    expect(cadetSleeps).toBe(0);
-    const stop = report.steps.find((s) => s.step === "stop-cadet");
-    expect(stop?.status).toBe("skipped");
-
-    const log = await fs.readFile(logPath, "utf8");
-    expect(log).toContain("cadet://workspace/data/attachments/late.txt");
-    const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-    expect(config.services.stt.provider).toBe("cadet");
-    const soul = await fs.readFile(soulPath, "utf8");
-    expect(soul).toContain("comes with the Cadet harness again.");
-    const checked = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
-      readonly: true,
+    expect(first.ok).toBe(true);
+    // A second migrated root: the modern XDG instance layout.
+    const secondRoot = path.join(home, ".local/share/cadet/assistants/velly");
+    const second = await migrate({
+      vellumRoot: root,
+      cadetRoot: secondRoot,
+      processOps: noopOps,
     });
-    const leftover = checked
-      .query("SELECT COUNT(*) AS n FROM messages WHERE user_message_channel = 'vellum'")
-      .all();
-    expect(leftover).toEqual([{ n: 0 }]);
-
-    // A timestamped backup of the cadet root itself, beside it.
-    expect(report.backupPath).toContain(".cadet-migration-backups");
-    expect(report.backupPath!.startsWith(home)).toBe(true);
-
-    // Second repair: everything already clean → still ok, no rewrites.
-    const second = await repair({ cadetRoot, processOps: noopOps, termGraceMs: 0 });
     expect(second.ok).toBe(true);
-    const rewrite = second.steps.find((s) => s.step === "rewrite-content");
-    expect(rewrite?.summary).toContain("already matches its sanctioned transform");
+
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const report = await repair({ processOps: noopOps, termGraceMs: 0 });
+      expect(report.ok).toBe(true);
+      expect(report.exitCode).toBe(0);
+      const discovery = report.steps.find((s) => s.step === "discover-cadet-roots");
+      expect(discovery?.summary).toContain("2 migrated cadet root(s)");
+      // Every value step ran once per root.
+      expect(report.steps.filter((s) => s.step === "backup")).toHaveLength(2);
+      expect(report.steps.filter((s) => s.step === "rewrite-content")).toHaveLength(2);
+      expect(report.steps.filter((s) => s.step === "verify")).toHaveLength(2);
+      expect(report.steps.filter((s) => s.step === "verify").every((s) => s.status === "completed")).toBe(true);
+      // Backups are per-root and distinct (sibling instances share an anchor).
+      expect(new Set(report.steps.filter((s) => s.step === "backup").map((s) => s.summary)).size).toBe(2);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
   });
 
   test("dry run reports pending work, touches nothing, stops nothing", async () => {
@@ -794,37 +844,119 @@ describe("e2e: repair mode", () => {
     await fs.appendFile(logPath, "2026-10-09T14:00:00.000Z INFO pending vellum://workspace/data/attachments/x.txt\n");
 
     let cadetSleeps = 0;
-    const report = await repair({
-      cadetRoot,
-      dryRun: true,
-      processOps: {
-        async find() {
-          return [];
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const report = await repair({
+        dryRun: true,
+        processOps: {
+          async find() {
+            return [];
+          },
+          async vellumSleep() {},
+          async cadetSleep() {
+            cadetSleeps++;
+          },
         },
-        async vellumSleep() {},
-        async cadetSleep() {
-          cadetSleeps++;
-        },
-      },
-    });
+      });
 
-    expect(report.mode).toBe("repair");
-    expect(report.ok).toBe(true);
-    expect(report.steps.find((s) => s.step === "repair-plan")?.status).toBe("planned");
-    expect(report.steps.find((s) => s.step === "stop-cadet")).toBeUndefined();
-    expect(cadetSleeps).toBe(0);
-    expect(await fs.readFile(logPath, "utf8")).toContain("vellum://workspace/data/attachments/x.txt");
-    expect(report.backupPath).toBeNull();
+      expect(report.mode).toBe("repair");
+      expect(report.ok).toBe(true);
+      expect(report.steps.find((s) => s.step === "repair-plan")?.status).toBe("planned");
+      expect(report.steps.find((s) => s.step === "stop-cadet")).toBeUndefined();
+      expect(cadetSleeps).toBe(0);
+      expect(await fs.readFile(logPath, "utf8")).toContain("vellum://workspace/data/attachments/x.txt");
+      expect(report.backupPath).toBeNull();
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
   });
 
-  test("refuses to run on a cadet root this migrator did not create", async () => {
+  test("finds nothing to repair when no root was migrated by this tool", async () => {
     const { home } = await buildFullVellum0126();
-    const bare = path.join(home, ".cadet-not-ours");
-    await fs.mkdir(bare, { recursive: true });
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const bare = path.join(home, ".cadet-not-ours");
+      await fs.mkdir(bare, { recursive: true });
 
-    const report = await repair({ cadetRoot: bare, processOps: noopOps });
-    expect(report.ok).toBe(false);
-    expect(report.exitCode).toBe(3);
-    expect(report.steps.find((s) => s.step === "preflight-repair")?.status).toBe("failed");
+      const report = await repair({ processOps: noopOps });
+      expect(report.ok).toBe(false);
+      expect(report.exitCode).toBe(2);
+      expect(report.steps.find((s) => s.step === "discover-cadet-roots")?.status).toBe("failed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
   });
 });
+
+describe("stop-assistant: vellum lockfile iteration", () => {
+  test("sleeps every lockfile-tracked assistant by id — no bare sleep", async () => {
+    const { home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            { assistantId: "velly", cloud: "local" },
+            { assistantId: "velly-2", cloud: "local" },
+          ],
+        }),
+      );
+      const slept: Array<string | undefined> = [];
+      const result = await stopAssistant(
+        { runningProcesses: [{ pid: 1, command: "vellum-assistant" }] } as unknown as DetectInfo,
+        {
+          async find() {
+            return [];
+          },
+          async vellumSleep(assistant) {
+            slept.push(assistant);
+          },
+          async cadetSleep() {},
+        },
+        false,
+        0,
+      );
+      expect(slept).toEqual(["velly", "velly-2"]);
+      expect(result.status).toBe("completed");
+      expect(result.summary).toContain("2 lockfile-tracked assistant(s)");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+
+  test("falls back to one bare sleep when the lockfile is absent", async () => {
+    const { home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const slept: Array<string | undefined> = [];
+      const result = await stopAssistant(
+        { runningProcesses: [{ pid: 1, command: "vellum-assistant" }] } as unknown as DetectInfo,
+        {
+          async find() {
+            return [];
+          },
+          async vellumSleep(assistant) {
+            slept.push(assistant);
+          },
+          async cadetSleep() {},
+        },
+        false,
+        0,
+      );
+      expect(slept).toEqual([undefined]);
+      expect(result.status).toBe("completed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+});
+

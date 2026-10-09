@@ -75,15 +75,19 @@ describe("readDockerLockfileEvidence", () => {
     }
   });
 
-  test("reads env-scoped XDG config dirs too", async () => {
+  test("reads the production XDG config dir; env-scoped dirs are ignored", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "docker-detect-"));
     await withHome(home, async () => {
-      await fs.mkdir(path.join(home, ".config", "vellum-dev"), { recursive: true });
-      await fs.writeFile(
-        path.join(home, ".config", "vellum-dev", "lockfile.json"),
-        JSON.stringify({ assistants: [{ assistantId: "dev-bot", cloud: "docker" }] }),
-      );
-      expect((await readDockerLockfileEvidence()).instances).toEqual(["dev-bot"]);
+      for (const dir of ["vellum", "vellum-dev"]) {
+        await fs.mkdir(path.join(home, ".config", dir), { recursive: true });
+        await fs.writeFile(
+          path.join(home, ".config", dir, "lockfile.json"),
+          JSON.stringify({
+            assistants: [{ assistantId: `${dir}-bot`, cloud: "docker" }],
+          }),
+        );
+      }
+      expect((await readDockerLockfileEvidence()).instances).toEqual(["vellum-bot"]);
     });
   });
 

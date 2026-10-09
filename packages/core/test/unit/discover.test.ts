@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { discoverVellumRoots } from "../../src/discover.js";
+import { discoverCadetRoots, discoverVellumRoots } from "../../src/discover.js";
 
 const ENV_KEYS = ["VELLUM_DATA_DIR", "VELLUM_WORKSPACE_DIR"] as const;
 const ambientEnv = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -92,7 +92,7 @@ describe("discover: modern multi-instance layout", () => {
     expect(hit!.markers).toContain("assistants/*/.vellum");
   });
 
-  test("finds env-suffixed roots and labels their env", async () => {
+  test("ignores env-suffixed roots — the migrator targets production only", async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-modern-"));
     process.env["HOME"] = tempHome;
     const root = path.join(tempHome, ".local", "share", "vellum-dev");
@@ -101,10 +101,7 @@ describe("discover: modern multi-instance layout", () => {
     await fs.mkdir(path.join(state, ".vellum-assistant"), { recursive: true });
 
     const found = await discoverVellumRoots();
-    const hit = found.find((c) => c.root === root);
-    expect(hit).toBeDefined();
-    expect(hit!.layout).toBe("modern");
-    expect(hit!.origin).toContain("dev");
+    expect(found.find((c) => c.root === root)).toBeUndefined();
   });
 
   test("modern outranks legacy when both exist", async () => {
@@ -130,5 +127,40 @@ describe("discover: modern multi-instance layout", () => {
 
     const found = await discoverVellumRoots();
     expect(found).toHaveLength(0);
+  });
+});
+
+
+describe("discoverCadetRoots — production roots only", () => {
+  const MANIFEST = ".cadet-migration-manifest.json";
+
+  test("finds the bare home root and the XDG root's instance dirs when they carry the manifest", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cadet-"));
+    process.env["HOME"] = tempHome;
+    const bare = path.join(tempHome, ".cadet");
+    await fs.mkdir(bare, { recursive: true });
+    await fs.writeFile(path.join(bare, MANIFEST), "{}");
+    const instance = path.join(tempHome, ".local", "share", "cadet", "assistants", "velly");
+    await fs.mkdir(instance, { recursive: true });
+    await fs.writeFile(path.join(instance, MANIFEST), "{}");
+
+    expect(await discoverCadetRoots()).toEqual([bare, instance]);
+  });
+
+  test("ignores env-suffixed cadet roots even when they carry the manifest", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cadet-"));
+    process.env["HOME"] = tempHome;
+    for (const dir of [
+      path.join(tempHome, ".cadet-dev"),
+      path.join(tempHome, ".local", "share", "cadet-dev", "assistants", "velly"),
+    ]) {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, MANIFEST), "{}");
+    }
+    const production = path.join(tempHome, ".local", "share", "cadet", "assistants", "velly");
+    await fs.mkdir(production, { recursive: true });
+    await fs.writeFile(path.join(production, MANIFEST), "{}");
+
+    expect(await discoverCadetRoots()).toEqual([production]);
   });
 });
