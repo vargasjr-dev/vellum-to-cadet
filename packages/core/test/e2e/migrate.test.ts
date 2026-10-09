@@ -324,19 +324,38 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(compose).toContain(".vellum"); // never rewritten — reported instead
   });
 
-  test("a docker-compose deployment is discovered and migrated", async () => {
-    const { root, home } = await buildDockerFull();
-    const report = await migrate({
-      vellumRoot: root,
-      cadetRoot: path.join(home, ".cadet"),
-      processOps: noopOps,
-    });
+  test("a lockfile-tracked docker deployment is detected as docker", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      // A hatch-docker install: the CLI records the topology in its lockfile.
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            {
+              assistantId: "velly",
+              cloud: "docker",
+              containerInfo: { assistantImage: "vellumai/vellum-assistant" },
+            },
+          ],
+        }),
+      );
+      const report = await migrate({
+        vellumRoot: root,
+        cadetRoot: path.join(home, ".cadet"),
+        processOps: noopOps,
+      });
 
-    expect(report.ok).toBe(true);
-    expect(report.detect.deploymentKind).toBe("docker");
-    expect(report.detect.docker.composeFiles).toEqual([path.join(home, "docker-compose.yml")]);
-    // The data itself migrates like any bind-mounted root.
-    expect(await exists(path.join(home, ".cadet", "workspace", "notes", "README.md"))).toBe(true);
+      expect(report.ok).toBe(true);
+      expect(report.detect.deploymentKind).toBe("docker");
+      expect(report.detect.docker.instances).toEqual(["velly"]);
+      expect(report.detect.docker.images).toEqual(["vellumai/vellum-assistant"]);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
   });
 });
 

@@ -80,7 +80,7 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     : [];
 
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
-  const docker = await detectDockerDeployment(vellumRoot, ops);
+  const docker = await readDockerLockfileEvidence();
 
   return {
     vellumRoot,
@@ -129,13 +129,7 @@ async function detectDeploymentKind(
   docker: DetectInfo["docker"],
 ): Promise<DetectInfo["deploymentKind"]> {
   if (await pathExists("/.dockerenv")) return "docker";
-  if (
-    docker.instances.length > 0 ||
-    docker.runningContainers.length > 0 ||
-    docker.composeFiles.length > 0
-  ) {
-    return "docker";
-  }
+  if (docker.instances.length > 0) return "docker";
   if (
     await pathExists(
       path.join(vellumRoot, ".vellum-assistant"),
@@ -160,23 +154,7 @@ async function detectDeploymentKind(
   return "unknown";
 }
 
-/** Container names the vellum CLI derives for an instance's service group. */
-export function dockerContainerNames(instanceName: string): string[] {
-  return [
-    `${instanceName}-assistant`,
-    `${instanceName}-gateway`,
-    `${instanceName}-credential-executor`,
-  ];
-}
-
 const VELLUM_LOCKFILE_NAMES = [".vellum.lock.json", ".vellum.lockfile.json"];
-
-const COMPOSE_FILE_NAMES = [
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  "compose.yml",
-  "compose.yaml",
-];
 
 function homeDir(): string {
   return process.env.HOME?.trim() || os.homedir();
@@ -196,7 +174,10 @@ interface RawLockfileEntry {
 /**
  * Read the vellum lockfile (the same file `vellum ps` is derived from) and
  * return the instances it records as docker-deployed, plus their images.
- * Best-effort: a missing, malformed, or lockless install yields no evidence.
+ * Only lockfile-tracked assistants matter — the vellum CLI's own `sleep`
+ * command stops their containers, so the migrator never touches docker
+ * itself. Best-effort: a missing, malformed, or lockless install yields
+ * no evidence.
  */
 export async function readDockerLockfileEvidence(): Promise<{
   instances: string[];
@@ -249,57 +230,6 @@ export async function readDockerLockfileEvidence(): Promise<{
     }
   }
   return { instances: [...instances], images: [...images] };
-}
-
-/**
- * Compose files near the root (its parent dir or the home dir) that bind-mount
- * it — the self-hosted-docker record when no lockfile containerInfo exists.
- */
-export async function findComposeFiles(vellumRoot: string): Promise<string[]> {
-  const found: string[] = [];
-  const dirs = new Set([path.dirname(vellumRoot), homeDir()]);
-  for (const dir of dirs) {
-    for (const name of COMPOSE_FILE_NAMES) {
-      const candidate = path.join(dir, name);
-      let raw: string;
-      try {
-        raw = await fs.readFile(candidate, "utf8");
-      } catch {
-        continue;
-      }
-      if (raw.includes(vellumRoot)) found.push(candidate);
-    }
-  }
-  return found;
-}
-
-async function detectDockerDeployment(
-  vellumRoot: string,
-  ops: ProcessOps,
-): Promise<DetectInfo["docker"]> {
-  const lockfile = await readDockerLockfileEvidence();
-  const composeFiles = await findComposeFiles(vellumRoot);
-
-  // Only trust container discovery when an instance is known from the
-  // lockfile — a bare `docker ps` would surface unrelated containers.
-  let runningContainers: string[] = [];
-  if (ops.dockerPs && lockfile.instances.length > 0) {
-    try {
-      const running = new Set(await ops.dockerPs());
-      runningContainers = lockfile.instances
-        .flatMap(dockerContainerNames)
-        .filter((name) => running.has(name));
-    } catch {
-      runningContainers = [];
-    }
-  }
-
-  return {
-    instances: lockfile.instances,
-    runningContainers,
-    composeFiles,
-    images: lockfile.images,
-  };
 }
 
 async function detectExternalReferences(vellumRoot: string): Promise<string[]> {

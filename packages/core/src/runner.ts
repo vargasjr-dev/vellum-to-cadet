@@ -42,9 +42,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   const dockerNote =
     detect.docker.instances.length > 0
       ? `, docker instances: ${detect.docker.instances.join(", ")}`
-      : detect.docker.composeFiles.length > 0
-        ? `, compose: ${detect.docker.composeFiles.join(", ")}`
-        : "";
+      : "";
   done({
     step: "detect",
     status: "completed",

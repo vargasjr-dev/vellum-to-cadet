@@ -52,29 +52,6 @@ export const defaultProcessOps: ProcessOps = {
     // hit unrelated processes before.
     await execFileAsync("vellum", ["sleep"]);
   },
-
-  async dockerPs() {
-    try {
-      const { stdout } = await execFileAsync("docker", [
-        "ps",
-        "--format",
-        "{{.Names}}",
-      ]);
-      return stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    } catch {
-      // No docker CLI or no reachable daemon — a host without docker.
-      return [];
-    }
-  },
-
-  async dockerStop(names) {
-    // The same mechanism the vellum CLI's own sleep uses for docker
-    // assistants — a sanctioned stop, never a remove.
-    await execFileAsync("docker", ["stop", ...names]);
-  },
 };
 
 /** Patterns used for discovery (specific assistant process signatures). */
