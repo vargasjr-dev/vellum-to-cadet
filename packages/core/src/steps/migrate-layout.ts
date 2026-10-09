@@ -11,7 +11,15 @@ import {
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { DEFAULT_TARGET_CTX, isWorkspaceMachineFile, rewriteWorkspaceJsonValues, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
+import {
+  DEFAULT_TARGET_CTX,
+  isPluginSource,
+  isSkillInstallMeta,
+  isWorkspaceConfigContract,
+  rewriteWorkspaceJsonValues,
+  USER_WORKSPACE_DIR,
+  type MigrationTargetCtx,
+} from "../layout.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
 
 /**
@@ -68,7 +76,7 @@ export async function migrateLayout(
 ): Promise<StepResult> {
   try {
     const plan = await buildCopyPlan(detect.vellumRoot);
-    await execute(detect, plan, timestamp, targetCtx);
+    const { substeps } = await execute(detect, plan, timestamp, targetCtx);
 
     const fileCount = plan.filter((p) => p.bytes > 0 || p.action === "verbatim").length;
     const rewrites = plan.filter((p) => p.action === "rewrite");
@@ -76,16 +84,21 @@ export async function migrateLayout(
     const dbs = plan.filter((p) => isDbArtifact(stateRelativePath(p.src)));
     const runtimeData = plan.filter((p) => isUnderWorkspaceRuntime(stateRelativePath(p.src)));
 
+    const substepSummary = Object.entries(substeps)
+      .map(([name, s]) => `${name}: ${s.changes} change(s) in ${s.files} file(s)`)
+      .join(", ");
+
     return {
       step: "migrate-layout",
       status: "completed",
-      summary: `migrated ${fileCount} entries → ${detect.cadetRoot} (${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim)`,
+      summary: `migrated ${fileCount} entries → ${detect.cadetRoot} (${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim)${substepSummary ? ` — ${substepSummary}` : ""}`,
       files: plan,
       data: {
         rewritten: rewrites.length,
         renamed: renamed.length,
         dbArtifactsVerbatim: dbs.map((d) => d.src),
         workspaceRuntimeVerbatim: runtimeData.length,
+        substeps,
       },
     };
   } catch (err) {
@@ -98,14 +111,27 @@ export async function migrateLayout(
   }
 }
 
+interface LayoutSubsteps {
+  files: number;
+  changes: number;
+}
+
 async function execute(
   detect: DetectInfo,
   plan: FileAction[],
   timestamp: string,
   targetCtx: MigrationTargetCtx,
-): Promise<void> {
+): Promise<{ substeps: Record<string, LayoutSubsteps> }> {
   const cadetRoot = detect.cadetRoot;
   await fs.mkdir(cadetRoot, { recursive: true });
+
+  // Explicit per-target accounting — each workspace case reports separately.
+  const substeps: Record<string, { files: number; changes: number }> = {};
+  const bump = (name: string, changes: number): void => {
+    const s = (substeps[name] ??= { files: 0, changes: 0 });
+    s.files++;
+    s.changes += changes;
+  };
 
   for (const f of plan) {
     const destAbs = path.join(cadetRoot, f.dest);
@@ -119,15 +145,38 @@ async function execute(
 
     if (f.action === "rewrite") {
       const raw = await fs.readFile(srcAbs, "utf8");
-      let { text, counts } = applySubstitutions(raw, targetCtx);
-      if (isWorkspaceMachineFile(stateRelativePath(f.src)) && f.src.endsWith(".json")) {
-        // config.json + install-meta.json: value-level vellum→cadet
-        // (provider ids, skill origins) that the path/env rules miss.
+      const stateRel = stateRelativePath(f.src);
+      let text = raw;
+      let counts: Record<string, number> = {};
+      if (isWorkspaceConfigContract(stateRel)) {
+        // "config.json rewrite": path/env substitutions PLUS JSON value
+        // rewrites (provider: "vellum" → "cadet").
+        const applied = applySubstitutions(raw, targetCtx);
+        text = applied.text;
+        counts = applied.counts;
         const values = rewriteWorkspaceJsonValues(text);
         if (values.changed > 0) {
           text = values.text;
-          counts["workspace-json-values"] = values.changed;
+          counts["json-values"] = values.changed;
         }
+        bump("config.json rewrite", values.changed);
+      } else if (isSkillInstallMeta(stateRel)) {
+        // "skills renames": origin: "vellum" → "cadet", JSON-aware only.
+        const values = rewriteWorkspaceJsonValues(raw);
+        text = values.text;
+        if (values.changed > 0) counts["json-values"] = values.changed;
+        bump("skills renames", values.changed);
+      } else if (isPluginSource(stateRel)) {
+        // "plugin import rewrites": the npm-scope rule ONLY — never touch
+        // user-authored code beyond the renamed package specifier.
+        text = raw.replace(/@vellumai\//g, "@mycadet/");
+        const changed = raw !== text ? 1 : 0;
+        if (changed) counts["npm-scope"] = 1;
+        bump("plugin import rewrites", changed);
+      } else {
+        const applied = applySubstitutions(raw, targetCtx);
+        text = applied.text;
+        counts = applied.counts;
       }
       f.substitutions = counts;
       await fs.writeFile(destAbs, text, "utf8");
@@ -165,6 +214,7 @@ async function execute(
     "utf8",
   );
   void timestamp;
+  return { substeps };
 }
 
 /**

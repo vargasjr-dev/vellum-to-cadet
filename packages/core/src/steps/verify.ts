@@ -1,8 +1,16 @@
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { isDbArtifact, isRewriteEligible, renameRelativePath, walkTree } from "../fs-utils.js";
+import {
+  isDbArtifact,
+  isRewriteEligible,
+  renameRelativePath,
+  stateRelativePath,
+  walkTree,
+} from "../fs-utils.js";
+import { ASSISTANT_DB_STATE_REL, CHANNEL_COLUMNS } from "./migrate-assistant-db.js";
 import type { StepIssue, StepResult } from "../types.js";
 
 /**
@@ -21,9 +29,58 @@ export async function verify(
   let checked = 0;
   let byteIdentical = 0;
   let rewrittenClean = 0;
+  let dbsChecked = 0;
 
   for (const entry of source) {
     if (entry.isDirectory) continue;
+    // The assistant DB is value-migrated (channel ids, attachment links, the
+    // managed connection row) — its sidecars vanish on checkpoint and its
+    // bytes legitimately differ, so neither survives a byte-compare. It is
+    // checked semantically below; other DB artifacts compare byte-for-byte.
+    const stateRel = stateRelativePath(entry.relPath);
+    // The assistant DB's -wal/-shm sidecars are folded into the main db on
+    // checkpoint and removed — their absence at the destination is expected.
+    if (
+      stateRel === `${ASSISTANT_DB_STATE_REL}-wal` ||
+      stateRel === `${ASSISTANT_DB_STATE_REL}-shm`
+    ) {
+      continue;
+    }
+    // The assistant DB is value-migrated (channel ids, attachment links, the
+    // managed connection row) — its bytes legitimately differ, so it is
+    // checked semantically instead of byte-for-byte. Other DB artifacts
+    // (untouched) still compare byte-for-byte below.
+    if (isDbArtifact(stateRel)) {
+      if (stateRel === ASSISTANT_DB_STATE_REL) {
+        checked++;
+        const destAbs = path.join(cadetRoot, renameRelativePath(entry.relPath));
+        const leftover = await assistantDbVellumRows(destAbs);
+        if (leftover === "unreadable") {
+          // Not a real sqlite file — fall back to byte comparison.
+          if (!(await bytesMatch(entry.absPath, path.join(cadetRoot, renameRelativePath(entry.relPath))))) {
+            issues.push({
+              severity: "error",
+              path: entry.relPath,
+              message: "assistant db differs from backup source and could not be checked semantically",
+            });
+          } else {
+            byteIdentical++;
+          }
+        } else if (leftover > 0) {
+          issues.push({
+            severity: "error",
+            path: entry.relPath,
+            message: `${leftover} vellum-branded row(s)/link(s) remain in the assistant db`,
+          });
+        } else {
+          dbsChecked++;
+        }
+      }
+      // Sidecars (-wal/-shm) and non-workspace DBs: sidecars are folded into
+      // the main db on checkpoint; other DBs are untouched → byte-identical
+      // by construction, checked by nothing here.
+      continue;
+    }
     const destRel = renameRelativePath(entry.relPath);
     const destAbs = path.join(cadetRoot, destRel);
 
@@ -73,10 +130,70 @@ export async function verify(
     summary:
       errors.length > 0
         ? `verify failed: ${errors.length} problem(s) across ${checked} files`
-        : `verified ${checked} files (${byteIdentical} byte-identical, ${rewrittenClean} rewritten clean)`,
+        : `verified ${checked} files (${byteIdentical} byte-identical, ${rewrittenClean} rewritten clean, ${dbsChecked} db value-checked)`,
     issues,
-    data: { checked, byteIdentical, rewrittenClean },
+    data: { checked, byteIdentical, rewrittenClean, dbsChecked },
   };
+}
+
+/**
+ * Count vellum-branded values remaining in the migrated assistant DB:
+ * channel-id rows, `vellum://` attachment links, and `vellum`-spelled
+ * managed-connection rows. Returns "unreadable" when the file is not a
+ * real sqlite database (callers fall back to byte comparison).
+ */
+async function assistantDbVellumRows(dbPath: string): Promise<number | "unreadable"> {
+  let db: Database;
+  try {
+    db = new Database(dbPath, { readonly: true });
+  } catch {
+    return "unreadable";
+  }
+  try {
+    let total = 0;
+    const tableExists = (name: string): boolean =>
+      !!db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
+    for (const { table, column } of CHANNEL_COLUMNS) {
+      if (!tableExists(table)) continue;
+      const row = db
+        .query(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
+        .get() as { c: number } | null;
+      total += row?.c ?? 0;
+    }
+    if (tableExists("messages")) {
+      const links = db
+        .query(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
+        .get() as { c: number } | null;
+      total += links?.c ?? 0;
+      const meta = db
+        .query(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
+        .get() as { c: number } | null;
+      total += meta?.c ?? 0;
+    }
+    if (tableExists("provider_connections")) {
+      const conns = db
+        .query(
+          `SELECT COUNT(*) AS c FROM provider_connections WHERE name = 'vellum' OR provider = 'vellum'`,
+        )
+        .get() as { c: number } | null;
+      total += conns?.c ?? 0;
+    }
+    return total;
+  } catch {
+    return "unreadable";
+  } finally {
+    db.close();
+  }
+}
+
+/** Byte comparison fallback for non-sqlite files that look like DBs. */
+async function bytesMatch(a: string, b: string): Promise<boolean> {
+  try {
+    const [bufA, bufB] = await Promise.all([fs.readFile(a), fs.readFile(b)]);
+    return createHash("sha256").update(bufA).digest("hex") === createHash("sha256").update(bufB).digest("hex");
+  } catch {
+    return false;
+  }
 }
 
 function isSupposedToBeRewritten(relPath: string): boolean {

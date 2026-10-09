@@ -13,7 +13,9 @@ import {
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
-  isWorkspaceMachineFile,
+  isPluginSource,
+  isSkillInstallMeta,
+  isWorkspaceConfigContract,
   rewriteWorkspaceJsonValues,
   textSubstitutions,
   type MigrationTargetCtx,
@@ -94,11 +96,13 @@ export function extensionOf(name: string): string {
 export function isRewriteEligible(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
   // Never rewrite the user-facing workspace or protected keys — except the
-  // named machine-owned files inside it (config.json, skill install meta,
-  // plugin sources), which carry vellum-branded values the renamed product
-  // no longer reads.
+  // three explicit machine-owned targets inside it (the config contract,
+  // skill install metadata, plugin sources), each its own reported substep.
   if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) {
-    return isWorkspaceMachineFile(norm) && !isDbArtifact(norm);
+    if (isDbArtifact(norm)) return false;
+    return (
+      isWorkspaceConfigContract(norm) || isSkillInstallMeta(norm) || isPluginSource(norm)
+    );
   }
   for (const dir of VERBATIM_DIRS) {
     if (norm === dir || norm.startsWith(`${dir}/`)) return false;

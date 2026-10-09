@@ -260,29 +260,44 @@ export const USER_WORKSPACE_DIR = "workspace";
 export const WORKSPACE_RUNTIME_DIR = "data";
 
 /**
- * Machine-owned files INSIDE the user workspace that carry vellum-branded
- * *values* the renamed product no longer reads:
+ * Explicit rewrite targets INSIDE the user workspace. The workspace is
+ * otherwise never touched by the generic substitution machinery — each of
+ * these is its own reported substep with its own transform:
  *
- * - `workspace/config.json` — the gateway-facing contract (written by the
- *   CLI, not the user). LLM/speech profiles record `provider: "vellum"`;
- *   cadet dispatches only the "cadet" managed provider.
- * - `workspace/skills/<name>/install-meta.json` — skill install metadata
- *   records `origin: "vellum"` for catalog-installed skills; cadet's origin
- *   enum has no "vellum".
- * - `workspace/plugins/**` — user-authored plugin sources importing
- *   `@vellumai/plugin-api`; the renamed package is `@mycadet/plugin-api`.
+ * - `workspace/config.json` ("config.json rewrite") — the gateway-facing
+ *   contract (written by the CLI, not the user). LLM/speech profiles record
+ *   `provider: "vellum"`; cadet dispatches only the "cadet" managed
+ *   provider. Gets path/env substitutions PLUS JSON value rewrites.
+ * - `workspace/skills/<name>/install-meta.json` ("skills renames") — skill
+ *   install metadata records `origin: "vellum"`; cadet's origin enum has no
+ *   "vellum". Gets JSON value rewrites.
+ * - `workspace/plugins/**` ("plugin import rewrites") — user-authored
+ *   plugin sources importing `@vellumai/plugin-api`; the renamed package is
+ *   `@mycadet/plugin-api`. Gets the npm-scope substitution only.
  *
  * User-authored skill/docs content stays verbatim, as does everything in
- * `workspace/data` (the runtime state dir, including the SQLite DBs).
+ * `workspace/data` (the runtime state dir — its SQLite values are handled
+ * by the explicit assistant-db step, not text rewrites).
  */
-export function isWorkspaceMachineFile(relPath: string): boolean {
+
+/** The gateway-facing config contract inside the workspace. */
+export function isWorkspaceConfigContract(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  return norm === `${USER_WORKSPACE_DIR}/config.json`;
+}
+
+/** Per-skill install metadata (`workspace/skills/<name>/install-meta.json`). */
+export function isSkillInstallMeta(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
   const ws = `${USER_WORKSPACE_DIR}/`;
   if (!norm.startsWith(ws)) return false;
-  if (norm === `${ws}config.json`) return true;
-  if (/^skills\/[^/]+\/install-meta\.json$/.test(norm.slice(ws.length))) return true;
-  if (norm.startsWith(`${ws}plugins/`)) return true;
-  return false;
+  return /^skills\/[^/]+\/install-meta\.json$/.test(norm.slice(ws.length));
+}
+
+/** User-installed plugin sources (`workspace/plugins/**`). */
+export function isPluginSource(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  return norm.startsWith(`${USER_WORKSPACE_DIR}/plugins/`);
 }
 
 /**
@@ -291,8 +306,8 @@ export function isWorkspaceMachineFile(relPath: string): boolean {
  * JSON-aware on purpose — a textual vellum→cadet sweep would mangle user
  * prose and URLs. Malformed JSON is left untouched. Values that merely
  * CONTAIN "vellum" (URLs, ids like "vellum:assistant_api_key") are not
- * touched here: connection names live in the assistant DB (healed by the
- * product's own boot migrations) and URLs are machine-refreshed.
+ * touched here: the managed connection rows live in the assistant DB
+ * (handled by the assistant-db step) and URLs are machine-refreshed.
  */
 export function rewriteWorkspaceJsonValues(content: string): {
   text: string;

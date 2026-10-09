@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -135,9 +136,37 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const grants = await fs.readFile(path.join(cadetRoot, "ces-data/grants.json"), "utf8");
     expect(grants).toContain("grants");
 
-    // ── DB artifacts copied verbatim. ──
+    // ── DB artifacts copied, then the assistant DB value-migrated. ──
     const db = await fs.readFile(path.join(cadetRoot, "workspace/data/db/assistant.db"));
     expect(db.toString()).toContain("SQLite format 3");
+    const dbStep = report.steps.find((s) => s.step === "migrate-assistant-db");
+    expect(dbStep?.status).toBe("completed");
+    const migratedDb = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
+      readonly: true,
+    });
+    const convChannels = migratedDb
+      .query(`SELECT origin_channel AS c FROM conversations ORDER BY id`)
+      .all();
+    expect(convChannels).toEqual([{ c: "cadet" }, { c: "telegram" }]);
+    const msg = migratedDb
+      .query(
+        `SELECT content, user_message_channel, assistant_message_channel, metadata
+         FROM messages WHERE id = 'm1'`,
+      )
+      .get() as { content: string; user_message_channel: string; assistant_message_channel: string; metadata: string };
+    expect(msg.content).toContain("cadet://workspace/report.md");
+    expect(msg.content).not.toContain("vellum://");
+    expect(msg.user_message_channel).toBe("cadet");
+    expect(msg.assistant_message_channel).toBe("cadet");
+    expect(JSON.parse(msg.metadata).channel).toBe("cadet");
+    const conns = migratedDb
+      .query(`SELECT name, provider FROM provider_connections ORDER BY name`)
+      .all();
+    expect(conns).toEqual([
+      { name: "cadet", provider: "cadet" },
+      { name: "openai", provider: "openai" },
+    ]);
+    migratedDb.close();
 
     // ── Backup exists with manifest, source untouched. ──
     expect(report.backupPath).toBeTruthy();
