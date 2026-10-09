@@ -96,7 +96,8 @@ describe("cli", () => {
     // Colorful success output carries an optional-next-steps section that
     // includes the manual deletion of the (read-only) old root.
     expect(r.stdout).toContain("Optional next steps");
-    expect(r.stdout).toContain(`rm -rf ${root}`);
+    expect(r.stdout).toContain("npx migrate-vellum-assistant-to-cadet uninstall");
+    expect(r.stdout).not.toContain(`rm -rf ${root}`);
   });
 
   test("multiple discovered roots: the user picks interactively", async () => {
@@ -116,7 +117,8 @@ describe("cli", () => {
     // The interactive picker listed both and honored the choice.
     expect(r.stderr).toContain("Found multiple vellum installations");
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain(`rm -rf ${full.root}`);
+    expect(r.stdout).toContain("npx migrate-vellum-assistant-to-cadet uninstall");
+    expect(r.stdout).not.toContain(`rm -rf ${full.root}`);
     expect(r.stdout).not.toContain(`rm -rf ${minimal.root}`);
   });
 });
