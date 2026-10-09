@@ -1,8 +1,10 @@
 import { DatabaseSync as Database } from "node:sqlite";
+import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { describe, test } from "node:test";
 
 import { migrate, repair } from "../../src/runner.js";
@@ -499,13 +501,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(gw?.summary).not.toContain("no gateway db");
   });
 
-  test("db value migrations survive unexpected schemas as nested warnings", async () => {
+  test("db value migrations skip missing columns silently and keep going", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-db-warn-"));
     const cadetRoot = path.join(home, ".cadet");
     const dbDir = path.join(cadetRoot, "workspace", "data", "db");
     await fs.mkdir(dbDir, { recursive: true });
-    // A messages table WITHOUT the expected channel columns — the exact
-    // schema surprise from a real run ("no such column: user_message_channel").
+    // A messages table WITHOUT the expected channel columns: the schema
+    // drift the old product's own migration 120 introduced when it rebuilt
+    // messages — expected for newer DBs, so skipped silently, not a ⚠.
     const db = new Database(path.join(dbDir, "assistant.db"));
     db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)");
     db.exec("INSERT INTO messages (content) VALUES ('see vellum://attachment-1')");
@@ -513,13 +516,39 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
     const result = await migrateAssistantDbAt(cadetRoot, "workspace/data/db/assistant.db");
 
-    // The step keeps going: completed, with the weird column as a nested ⚠.
+    // The step keeps going: completed, no warnings, nothing about columns.
     expect(result.status).toBe("completed");
-    const warn = (result.issues ?? []).find((i) => i.severity === "warning");
-    expect(warn?.message).toContain("messages.user_message_channel");
-    expect(warn?.message).toContain("no such column");
+    expect(result.issues ?? []).toEqual([]);
+    expect(result.summary).not.toContain("no such column");
     // The phase that COULD run (attachment links) still ran.
     expect(result.summary).toContain("attachment links: 1 row(s)");
+  });
+
+  test("a newer-vellum assistant db (schema 120+ shape) verifies semantically", async () => {
+    const { root, home } = await buildFullVellum0126();
+    // The old product's migration 120 rebuilt messages WITHOUT the channel
+    // columns (content/metadata survived). Its channel-value UPDATEs skip
+    // silently, and verify must still check the db semantically — falling
+    // back to a byte diff would flag the value migration as an error.
+    const dbPath = path.join(root, "workspace", "data", "db", "assistant.db");
+    const db = new Database(dbPath);
+    db.exec(`DROP TABLE messages`);
+    db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT, metadata TEXT)");
+    db.exec("INSERT INTO messages (content, metadata) VALUES ('see vellum://a.png', NULL)");
+    db.close();
+
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
+    const report = await migrate({ vellumRoot: root, cadetRoot, processOps: noopOps });
+
+    expect(report.ok).toBe(true);
+    const verifyStep = report.steps.find((s) => s.step === "verify");
+    expect(verifyStep?.status).toBe("completed");
+    // Semantically checked (not the byte-diff fallback).
+    expect((verifyStep?.data as { dbsChecked: number } | undefined)?.dbsChecked ?? 0).toBeGreaterThan(0);
+    expect(
+      (verifyStep?.issues ?? []).some((i) => i.message.includes("could not be checked semantically")),
+    ).toBe(false);
   });
 
   test("reports external references (launchd/compose) without touching them", async () => {
@@ -1048,5 +1077,100 @@ describe("stop-assistant: vellum lockfile iteration", () => {
       else process.env.HOME = prevHome;
     }
   });
+});
+
+describe("e2e: retired archives", () => {
+  const run = promisify(execFileCb);
+
+  test("retired archives are untarred, migrated, and re-tarred; a corrupt one only warns", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const retiredDir = path.join(root, "retired");
+    await fs.mkdir(retiredDir, { recursive: true });
+
+    // ── Archive 1: a finished retire — a tar of a workspace tree with the
+    //    same branded shapes as the live tree (logs, config, a db).
+    const staging1 = path.join(retiredDir, "grand-assistant.staging");
+    await fs.mkdir(path.join(staging1, "workspace", "data", "db"), { recursive: true });
+    await fs.mkdir(path.join(staging1, "workspace", "data", "logs"), { recursive: true });
+    await fs.writeFile(
+      path.join(staging1, "workspace", "data", "logs", "2026-01-01.log"),
+      "session start; attachment vellum://a.png; root /Users/x/.local/share/vellum\n",
+    );
+    await fs.writeFile(
+      path.join(staging1, "workspace", "config.json"),
+      JSON.stringify({ services: { stt: { provider: "vellum" } } }, null, 2),
+    );
+    const db = new Database(path.join(staging1, "workspace", "data", "db", "assistant.db"));
+    db.exec("CREATE TABLE conversations (id INTEGER PRIMARY KEY, origin_channel TEXT)");
+    db.exec("INSERT INTO conversations (origin_channel) VALUES ('vellum')");
+    db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)");
+    db.exec("INSERT INTO messages (content) VALUES ('see vellum://a.png')");
+    db.close();
+    await run("tar", ["-czf", path.join(retiredDir, "grand-assistant.tar.gz"), "-C", staging1, "."]);
+    await fs.rm(staging1, { recursive: true, force: true });
+
+    // ── Archive 2: an interrupted retire — a staging tree, never tarred.
+    const staging2 = path.join(retiredDir, "interrupted.tar.gz.staging");
+    await fs.mkdir(path.join(staging2, "workspace", "data", "logs"), { recursive: true });
+    await fs.writeFile(path.join(staging2, "workspace", "data", "logs", "day.log"), "vellum://x\n");
+
+    // ── Archive 3: a corrupt tar — must warn and never fail the run.
+    await fs.writeFile(path.join(retiredDir, "broken.tar.gz"), Buffer.from("not a tar at all"));
+
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
+
+    const report = await migrate({ vellumRoot: root, cadetRoot, processOps: noopOps });
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
+
+    const retired = report.steps.find((s) => s.step === "migrate-retired");
+    expect(retired?.status).toBe("completed");
+
+    // Finished archive: re-tarred with migrated content inside.
+    const extracted = path.join(retiredDir, "check-grand");
+    await fs.mkdir(extracted, { recursive: true });
+    await run("tar", ["-xzf", path.join(cadetRoot, "retired", "grand-assistant.tar.gz"), "-C", extracted]);
+    const log = await fs.readFile(path.join(extracted, "workspace/data/logs/2026-01-01.log"), "utf8");
+    expect(log).toContain("cadet://");
+    expect(log).not.toContain("vellum://");
+    const config = await fs.readFile(path.join(extracted, "workspace/config.json"), "utf8");
+    expect(config).not.toContain('"vellum"');
+    const migratedDb = new Database(path.join(extracted, "workspace/data/db/assistant.db"));
+    const channel = migratedDb.prepare("SELECT origin_channel FROM conversations").get() as {
+      origin_channel: string;
+    };
+    expect(channel.origin_channel).toBe("cadet");
+    const link = migratedDb.prepare("SELECT content FROM messages").get() as { content: string };
+    expect(link.content).toContain("cadet://");
+    migratedDb.close();
+
+    // Interrupted retire: completed into a tar, staging consumed.
+    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz"))).toBe(true);
+    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz.staging"))).toBe(false);
+
+    // Corrupt archive: byte-identical, warned, run still ok.
+    expect((await fs.readFile(path.join(cadetRoot, "retired", "broken.tar.gz"))).toString()).toBe(
+      "not a tar at all",
+    );
+    const broken = (retired?.issues ?? []).filter((i) => i.message.includes("'broken'"));
+    expect(broken.length).toBe(1);
+    expect(broken[0]?.severity).toBe("warning");
+
+    // No staging litter left behind anywhere.
+    const litter = (await fs.readdir(path.join(cadetRoot, "retired"))).filter((n) =>
+      n.endsWith(".staging"),
+    );
+    expect(litter.length).toBe(0);
+  });
+
+  async function exists(p: string): Promise<boolean> {
+    try {
+      await fs.stat(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 });
 

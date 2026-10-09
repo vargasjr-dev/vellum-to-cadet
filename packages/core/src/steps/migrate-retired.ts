@@ -1,0 +1,229 @@
+import { execFile as execFileCb } from "node:child_process";
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
+import { promisify } from "node:util";
+
+import {
+  isDbArtifact,
+  isRewriteEligible,
+  sanctionedContentTransform,
+  stateRelativePath,
+  walkTree,
+} from "../fs-utils.js";
+import { DEFAULT_TARGET_CTX, type MigrationTargetCtx } from "../layout.js";
+import type { StepIssue, StepResult } from "../types.js";
+import {
+  isGatewayDbStateRel,
+  migrateAssistantDbAt,
+  migrateGatewayDbAt,
+} from "./migrate-assistant-db.js";
+
+const execFile = promisify(execFileCb);
+
+/**
+ * Retired-assistant archives (`retired/<name>.tar.gz`, plus the
+ * `<name>.tar.gz.staging` trees an interrupted retire leaves behind) ride
+ * along in the vellum root and land in the cadet root verbatim. They hold
+ * the same vellum-branded paths, tokens, and dbs as the live tree, so each
+ * one is untarred, run through the same assistant-logic migration, and
+ * re-tarred.
+ *
+ * Success here is OPTIONAL by design: a retired archive is cold storage,
+ * not a live assistant. Any archive that fails (corrupt tar, unreadable
+ * entries, unsupported layout) is reported as a warning and left exactly
+ * as it was — the migration never fails because of one.
+ */
+
+const STAGING_SUFFIX = ".tar.gz.staging";
+
+/** Archive inventory: finished tars + leftover staging trees. */
+interface RetiredTarget {
+  name: string;
+  tarPath: string | null;
+  stagingPath: string | null;
+  /** We created the staging dir this run — safe to remove on failure. */
+  stagingIsOurs: boolean;
+}
+
+export async function migrateRetiredArchives(
+  cadetRoot: string,
+  targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+): Promise<StepResult> {
+  const step = "migrate-retired";
+  const retiredDir = path.join(cadetRoot, "retired");
+  let entries;
+  try {
+    entries = await fs.readdir(retiredDir, { withFileTypes: true });
+  } catch {
+    return { step, status: "skipped", summary: "no retired directory in the migrated root" };
+  }
+
+  const targets: RetiredTarget[] = [];
+  // Leftover staging trees first (an interrupted retire): they may be the
+  // only extracted copy, so they are migrated before any tar overwrites the
+  // staging location, and finished into a tar when none ever landed.
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.endsWith(STAGING_SUFFIX)) {
+      const name = entry.name.slice(0, -STAGING_SUFFIX.length);
+      const tarPath = path.join(retiredDir, `${name}.tar.gz`);
+      targets.push({
+        name,
+        tarPath: (await fileExists(tarPath)) ? tarPath : null,
+        stagingPath: path.join(retiredDir, entry.name),
+        stagingIsOurs: false,
+      });
+    }
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".tar.gz")) {
+      const name = entry.name.slice(0, -".tar.gz".length);
+      const existing = targets.find((t) => t.name === name);
+      if (existing) {
+        existing.tarPath = path.join(retiredDir, entry.name);
+        continue;
+      }
+      targets.push({
+        name,
+        tarPath: path.join(retiredDir, entry.name),
+        stagingPath: null,
+        stagingIsOurs: false,
+      });
+    }
+  }
+
+  if (targets.length === 0) {
+    return { step, status: "skipped", summary: "no retired archives to migrate" };
+  }
+
+  const issues: StepIssue[] = [];
+  let migrated = 0;
+  let failed = 0;
+  let contentChanges = 0;
+  let dbRows = 0;
+
+  for (const target of targets) {
+    try {
+      const result = await migrateOneArchive(retiredDir, target, targetCtx, issues);
+      migrated++;
+      contentChanges += result.contentChanges;
+      dbRows += result.dbRows;
+    } catch (err) {
+      failed++;
+      issues.push({
+        severity: "warning",
+        message: `retired archive '${target.name}': ${(err as Error).message} — left as-is, continuing`,
+      });
+      // Our scratch staging dir goes; anything pre-existing stays untouched.
+      if (target.stagingIsOurs && target.stagingPath) {
+        await fs.rm(target.stagingPath, { recursive: true, force: true });
+      }
+    }
+  }
+
+  const summary =
+    failed > 0
+      ? `retired archives: ${migrated} migrated, ${failed} left as-is (optional by design — see ⚠)`
+      : `retired archives: ${migrated} migrated (${contentChanges} content change(s), ${dbRows} db row(s))`;
+  return { step, status: "completed", summary, issues, data: { migrated, failed, contentChanges, dbRows } };
+}
+
+async function migrateOneArchive(
+  retiredDir: string,
+  target: RetiredTarget,
+  ctx: MigrationTargetCtx,
+  issues: StepIssue[],
+): Promise<{ contentChanges: number; dbRows: number }> {
+  const stagingPath = path.join(retiredDir, `${target.name}${STAGING_SUFFIX}`);
+
+  // No finished tar = an interrupted retire: the staging tree IS the
+  // archive-in-progress — migrate it and finish the tar.
+  if (!target.tarPath) {
+    const result = await migrateExtractedTree(target.stagingPath!, ctx, issues);
+    const tarOut = path.join(retiredDir, `${target.name}.tar.gz`);
+    await execFile("tar", ["-czf", tarOut, "-C", target.stagingPath!, "."]);
+    await fs.rm(target.stagingPath!, { recursive: true, force: true });
+    return result;
+  }
+
+  // Finished tar: extract, migrate the tree, re-tar atomically (a failed
+  // re-tar must never destroy the original), clean up.
+  await fs.rm(stagingPath, { recursive: true, force: true });
+  target.stagingPath = stagingPath;
+  target.stagingIsOurs = true;
+  await fs.mkdir(stagingPath, { recursive: true });
+  await execFile("tar", ["-xzf", target.tarPath, "-C", stagingPath]);
+
+  const result = await migrateExtractedTree(stagingPath, ctx, issues);
+
+  const tarNew = `${target.tarPath}.new`;
+  await execFile("tar", ["-czf", tarNew, "-C", stagingPath, "."]);
+  await fs.rename(tarNew, target.tarPath);
+  await fs.rm(stagingPath, { recursive: true, force: true });
+  return result;
+}
+
+/** Run the live-tree migration logic over an extracted archive, in place. */
+async function migrateExtractedTree(
+  treeRoot: string,
+  ctx: MigrationTargetCtx,
+  issues: StepIssue[],
+): Promise<{ contentChanges: number; dbRows: number }> {
+  const tree = await walkTree(treeRoot);
+  let contentChanges = 0;
+  let dbRows = 0;
+
+  for (const entry of tree) {
+    if (entry.isDirectory) continue;
+    const stateRel = stateRelativePath(entry.relPath);
+
+    // dbs: same value migration as the live tree, aimed at this tree.
+    if (isDbArtifact(stateRel)) {
+      const isAssistantDb = stateRel === "workspace/data/db/assistant.db";
+      const isGatewayDb = isGatewayDbStateRel(stateRel.replace(/^workspace\//, ""));
+      if (!isAssistantDb && !isGatewayDb) continue;
+      const result = isAssistantDb
+        ? await migrateAssistantDbAt(treeRoot, entry.relPath)
+        : await migrateGatewayDbAt(treeRoot, entry.relPath);
+      dbRows += countDbRows(result);
+      for (const issue of result.issues ?? []) {
+        issues.push({ ...issue, message: `${entry.relPath}: ${issue.message}` });
+      }
+      continue;
+    }
+
+    // Content: same sanctioned rewrites as the live tree.
+    if (!isRewriteEligible(stateRel)) continue;
+    try {
+      const raw = await fs.readFile(entry.absPath, "utf8");
+      const sanctioned = sanctionedContentTransform(stateRel, raw, ctx);
+      if (!sanctioned) continue;
+      const total = Object.values(sanctioned.counts).reduce((a, b) => a + b, 0);
+      if (total > 0) {
+        await fs.writeFile(entry.absPath, sanctioned.text, "utf8");
+        contentChanges += total;
+      }
+    } catch (err) {
+      issues.push({
+        severity: "warning",
+        message: `${entry.relPath}: ${(err as Error).message} — skipped, continuing`,
+      });
+    }
+  }
+  return { contentChanges, dbRows };
+}
+
+/** Total rows a migrateDbValues result reports across its substeps. */
+function countDbRows(result: StepResult): number {
+  const substeps = (result.data as { substeps?: Record<string, number> } | undefined)?.substeps;
+  if (!substeps) return 0;
+  return Object.values(substeps).reduce((a, b) => a + b, 0);
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
