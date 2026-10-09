@@ -1,45 +1,39 @@
-import { cadetDiscoveryPatterns, discoveryPatterns } from "../process.js";
 import { readLockfileAssistants } from "./detect.js";
-import type { DetectInfo, ProcessOps, StepResult } from "../types.js";
+import type { ProcessOps, StepResult } from "../types.js";
 
 /**
  * Put the vellum assistants to sleep before touching their data.
  *
- * The migrator has no custom stop logic: it asks the vellum CLI to sleep
- * its own assistants and hopes. A previous custom SIGTERM/SIGKILL
- * implementation killed unrelated processes matching the discovery
- * patterns — never again. Whatever survives the sleep is reported and
- * fails the run; we never signal processes ourselves.
+ * The migrator has no custom stop logic and no post-sleep validation: it
+ * asks the vellum CLI to sleep its own assistants and trusts that. We
+ * never signal processes ourselves, and we deliberately do NOT re-discover
+ * survivors afterward — pattern-matching process lists cannot tell the
+ * assistant's own components from look-alikes (a browser's bundled
+ * credential-executor helpers matched and failed runs on a machine where
+ * the assistant was long asleep).
  *
  * The vellum CLI has no sleep-all flag, so the migrator iterates the
  * lockfile — the same record `vellum ps` is derived from — and sleeps
- * each tracked assistant individually. A cadet root's assistants can be
- * running in several instances at once; leaving one awake would fail the
- * re-check below.
+ * each tracked assistant individually. A lockless or unreadable install
+ * falls back to the CLI's own default resolution (one bare sleep).
  */
 export async function stopAssistant(
-  detect: DetectInfo,
   ops: ProcessOps,
   verbose = false,
   graceMs = 5_000,
 ): Promise<StepResult> {
-  const running = detect.runningProcesses;
-  if (running.length === 0) {
-    return { step: "stop-assistant", status: "skipped", summary: "no running vellum processes" };
-  }
-
   const issues: Array<{ severity: "warning" | "error"; message: string }> = [];
   const targets = await readLockfileAssistants();
   if (targets.length === 0) {
     // Lockless or unreadable install — the CLI's own default resolution
-    // is the best we can do; the re-check below decides.
+    // is the best we can do.
     try {
       await ops.vellumSleep();
     } catch (err) {
       const message = (err as NodeJS.ErrnoException).message ?? String(err);
       issues.push({
         severity: "warning",
-        message: `\`vellum sleep\` failed (${message}) — is the vellum CLI on PATH? Continuing; the re-check below decides.`,
+        message: `\`vellum sleep\` failed (${message}) — is the vellum CLI on PATH? Continuing.`,
       });
       if (verbose) console.error(`vellum sleep failed: ${message}`);
     }
@@ -51,58 +45,38 @@ export async function stopAssistant(
         const message = (err as NodeJS.ErrnoException).message ?? String(err);
         issues.push({
           severity: "warning",
-          message: `\`vellum sleep ${identifier}\` failed (${message}) — continuing with the remaining assistants; the re-check below decides.`,
+          message: `\`vellum sleep ${identifier}\` failed (${message}) — continuing with the remaining assistants.`,
         });
         if (verbose) console.error(`vellum sleep ${identifier} failed: ${message}`);
       }
     }
   }
 
+  // Give the CLI's own drain a moment before we start copying files.
   await sleep(graceMs);
-
-  const stillRunning = await ops.find(discoveryPatterns());
-  if (stillRunning.length > 0) {
-    return {
-      step: "stop-assistant",
-      status: "failed",
-      summary: `${stillRunning.length} vellum process(es) still running after \`vellum sleep\` — stop the assistant and retry`,
-      issues: [
-        ...issues,
-        ...stillRunning.map((p) => ({
-          severity: "error" as const,
-          message: `pid ${p.pid}: ${p.command}`,
-        })),
-      ],
-    };
-  }
 
   return {
     step: "stop-assistant",
     status: "completed",
     summary:
       targets.length > 0
-        ? `\`vellum sleep\` accepted for ${targets.length} lockfile-tracked assistant(s); no vellum processes remain`
-        : "`vellum sleep` accepted; no vellum processes remain",
+        ? `\`vellum sleep\` accepted for ${targets.length} lockfile-tracked assistant(s)`
+        : "`vellum sleep` accepted",
     issues,
   };
 }
 
 /**
  * Repair-mode counterpart: stop every CADET assistant before mutating the
- * cadet roots. Same contract — the cadet CLI's own sleep command does the
- * stopping (`cadet sleep --all` covers every assistant under the root); we
- * only re-discover and report survivors.
+ * cadet roots — `cadet sleep --all` covers every assistant under the root.
+ * Same contract: the cadet CLI's own sleep command does the stopping and
+ * we trust it, with no survivor re-check.
  */
 export async function stopCadet(
   ops: ProcessOps,
   verbose = false,
   graceMs = 5_000,
 ): Promise<StepResult> {
-  const running = await ops.find(cadetDiscoveryPatterns());
-  if (running.length === 0) {
-    return { step: "stop-cadet", status: "skipped", summary: "no running cadet processes" };
-  }
-
   const issues: Array<{ severity: "warning" | "error"; message: string }> = [];
   try {
     await ops.cadetSleep();
@@ -110,33 +84,17 @@ export async function stopCadet(
     const message = (err as NodeJS.ErrnoException).message ?? String(err);
     issues.push({
       severity: "warning",
-      message: `\`cadet sleep --all\` failed (${message}) — is the cadet CLI on PATH? Continuing; the re-check below decides.`,
+      message: `\`cadet sleep --all\` failed (${message}) — is the cadet CLI on PATH? Continuing.`,
     });
     if (verbose) console.error(`cadet sleep --all failed: ${message}`);
   }
 
   await sleep(graceMs);
 
-  const stillRunning = await ops.find(cadetDiscoveryPatterns());
-  if (stillRunning.length > 0) {
-    return {
-      step: "stop-cadet",
-      status: "failed",
-      summary: `${stillRunning.length} cadet process(es) still running after \`cadet sleep --all\` — stop the assistants and retry`,
-      issues: [
-        ...issues,
-        ...stillRunning.map((p) => ({
-          severity: "error" as const,
-          message: `pid ${p.pid}: ${p.command}`,
-        })),
-      ],
-    };
-  }
-
   return {
     step: "stop-cadet",
     status: "completed",
-    summary: "`cadet sleep --all` accepted; no cadet processes remain",
+    summary: "`cadet sleep --all` accepted",
     issues,
   };
 }

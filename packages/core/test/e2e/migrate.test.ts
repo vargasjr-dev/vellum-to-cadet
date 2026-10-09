@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 
 import { migrate, repair } from "../../src/runner.js";
 import { stopAssistant } from "../../src/steps/stop-assistant.js";
-import type { DetectInfo, ProcessOps } from "../../src/types.js";
+import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
 import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
@@ -385,15 +385,17 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
   });
 
-  test("stop step delegates to `vellum sleep` and never signals anything itself", async () => {
+  test("stop step delegates to `vellum sleep` and proceeds even when pgrep reports look-alike processes", async () => {
     const { root, home } = await buildFullVellum0126();
     const sleeps: number[] = [];
     const ops: ProcessOps = {
       async find() {
-        // Two "running" vellum processes that keep running after sleep.
+        // pgrep pattern matches are untrustworthy: a browser's bundled
+        // credential-executor helpers matched here on a real migration.
+        // Whatever find reports, the migration proceeds — no re-check.
         return [
           { pid: 111, command: "vellum-assistant daemon" },
-          { pid: 222, command: "vellum-gateway" },
+          { pid: 222, command: "Arc Browser Helper (Renderer)" },
         ];
       },
       async vellumSleep() {
@@ -411,21 +413,18 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
     expect(sleeps.length).toBe(1);
     const stop = report.steps.find((s) => s.step === "stop-assistant");
-    expect(stop?.status).toBe("failed");
-    expect(stop?.summary).toContain("2 vellum process(es) still running after `vellum sleep`");
-    expect(report.exitCode).toBe(4);
+    expect(stop?.status).toBe("completed");
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
   });
 
-  test("stop step completes when `vellum sleep` stops everything", async () => {
+  test("the stop step never re-discovers processes after sleeping", async () => {
     const { root, home } = await buildFullVellum0126();
     let findCalls = 0;
     const ops: ProcessOps = {
-      // First call = detect (processes running); after sleep, none remain.
       async find() {
         findCalls += 1;
-        return findCalls === 1
-          ? [{ pid: 111, command: "vellum-assistant daemon" }]
-          : [];
+        return [{ pid: 111, command: "vellum-assistant daemon" }];
       },
       async vellumSleep() {},
       async cadetSleep() {},
@@ -438,6 +437,9 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       termGraceMs: 0,
     });
 
+    // find is detect's informational probe only — the stop step trusts
+    // the sleep and does not re-discover.
+    expect(findCalls).toBe(1);
     const stop = report.steps.find((s) => s.step === "stop-assistant");
     expect(stop?.status).toBe("completed");
     expect(report.ok).toBe(true);
@@ -754,10 +756,10 @@ describe("e2e: repair mode", () => {
       expect(report.ok).toBe(true);
       expect(report.exitCode).toBe(0);
       expect(vellumSleeps).toBe(0); // repair never touches the vellum CLI
-      // No running cadet processes in the fixture → sleep skipped.
-      expect(cadetSleeps).toBe(0);
+      // The sleep runs unconditionally — pgrep can't be trusted to gate it.
+      expect(cadetSleeps).toBe(1);
       const stop = report.steps.find((s) => s.step === "stop-cadet");
-      expect(stop?.status).toBe("skipped");
+      expect(stop?.status).toBe("completed");
       // The root was self-discovered via its manifest, not passed in.
       const discovery = report.steps.find((s) => s.step === "discover-cadet-roots");
       expect(discovery?.status).toBe("completed");
@@ -910,7 +912,6 @@ describe("stop-assistant: vellum lockfile iteration", () => {
       );
       const slept: Array<string | undefined> = [];
       const result = await stopAssistant(
-        { runningProcesses: [{ pid: 1, command: "vellum-assistant" }] } as unknown as DetectInfo,
         {
           async find() {
             return [];
@@ -939,7 +940,6 @@ describe("stop-assistant: vellum lockfile iteration", () => {
     try {
       const slept: Array<string | undefined> = [];
       const result = await stopAssistant(
-        { runningProcesses: [{ pid: 1, command: "vellum-assistant" }] } as unknown as DetectInfo,
         {
           async find() {
             return [];

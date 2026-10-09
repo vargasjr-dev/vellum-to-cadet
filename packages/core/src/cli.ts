@@ -114,7 +114,6 @@ Exit codes:
   0  success (or already migrated + verified)
   2  no vellum root found
   3  preflight failed
-  4  vellum processes still running after \`vellum sleep\`
   5  backup failed
   6  migration failed
   7  verification failed
