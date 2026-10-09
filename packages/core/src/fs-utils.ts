@@ -15,6 +15,7 @@ import {
   dissolveProtectedDir,
   isConversationLog,
   isPersonaPrompt,
+  consolidateDefaultProvider,
   isPluginSource,
   isRuntimeLog,
   isSkillFrontmatter,
@@ -368,7 +369,16 @@ export function sanctionedContentTransform(
     const values = rewriteWorkspaceJsonValues(applied.text);
     const counts = { ...applied.counts };
     if (values.changed > 0) counts["json-values"] = values.changed;
-    return { substep: "config.json rewrite", text: values.text, counts };
+    let text = values.text;
+    // The retired `llm.defaultProvider` key stamps the `llm.default` blob
+    // and is deleted (see consolidateDefaultProvider) — same conversion the
+    // runtime's ensure pass would perform on first boot.
+    const consolidated = consolidateDefaultProvider(text);
+    if (consolidated !== null) {
+      text = consolidated;
+      counts["default-provider consolidation"] = 1;
+    }
+    return { substep: "config.json rewrite", text, counts };
   }
   if (isSkillInstallMeta(stateRel)) {
     const values = rewriteWorkspaceJsonValues(raw);

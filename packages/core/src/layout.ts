@@ -433,6 +433,64 @@ export function rewriteWorkspaceJsonValues(content: string): {
   return { text: JSON.stringify(rewritten, null, 2) + "\n", changed };
 }
 
+/**
+ * The default-provider selection consolidates into the `llm.default` blob:
+ * cadet's runtime reads the blob's `provider` (clamped to a matrix column)
+ * plus its `provider_connection` pin, and the retired `llm.defaultProvider`
+ * key is dead weight the runtime ensure pass would re-stamp on first boot.
+ * Mirror of that pass's key-wins rule: the key is newer intent, so it stamps
+ * the blob — preserving the blob's other fields, carrying an explicit
+ * `connectionName` as the pin, and dropping a pin that named the OLD
+ * provider when the provider changes (it would mis-pin the new column) —
+ * and the key is deleted. Idempotent: with the key gone there is nothing to
+ * consolidate. Returns the rewritten text, or null when there was nothing
+ * to do (unparseable content, no key, or a key with no usable provider).
+ */
+export function consolidateDefaultProvider(content: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const llm = root.llm;
+  if (llm === null || typeof llm !== "object" || Array.isArray(llm)) {
+    return null;
+  }
+  const llmRecord = llm as Record<string, unknown>;
+  const key = llmRecord.defaultProvider;
+  if (key === null || typeof key !== "object" || Array.isArray(key)) {
+    return null;
+  }
+  const provider = (key as Record<string, unknown>).provider;
+  if (typeof provider !== "string" || provider === "") {
+    return null;
+  }
+  const connectionName = (key as Record<string, unknown>).connectionName;
+
+  const blob = llmRecord.default;
+  const existing =
+    blob !== null && typeof blob === "object" && !Array.isArray(blob)
+      ? { ...(blob as Record<string, unknown>) }
+      : {};
+  const previousProvider = existing.provider;
+  existing.provider = provider;
+  const hasPin = typeof connectionName === "string" && connectionName !== "";
+  if (hasPin) {
+    existing.provider_connection = connectionName;
+  } else if (previousProvider !== provider) {
+    delete existing.provider_connection;
+  }
+
+  llmRecord.default = existing;
+  delete llmRecord.defaultProvider;
+  return JSON.stringify(root, null, 2) + "\n";
+}
+
 /** Database artifacts are copied verbatim and recorded for later inspection. */
 export const DB_EXTENSIONS = new Set([".db", ".sqlite", ".sqlite3", ".wal", ".shm"]);
 
