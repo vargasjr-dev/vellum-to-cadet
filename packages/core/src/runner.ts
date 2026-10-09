@@ -39,11 +39,15 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   start("detect");
   const detect: DetectInfo = await detectStep(options, ops);
+  const dockerNote =
+    detect.docker.instances.length > 0
+      ? `, docker instances: ${detect.docker.instances.join(", ")}`
+      : "";
   done({
     step: "detect",
     status: "completed",
     summary: detect.vellumRootExists
-      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind}, version ${detect.version ?? "unknown"})`
+      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind}, version ${detect.version ?? "unknown"}${dockerNote})`
       : `no vellum root at ${detect.vellumRoot}`,
     data: {
       vellumRoot: detect.vellumRoot,
@@ -53,6 +57,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       runningProcessCount: detect.runningProcesses.length,
       rootSizeBytes: detect.rootSizeBytes,
       externalReferences: detect.externalReferences,
+      docker: detect.docker,
     },
   });
 

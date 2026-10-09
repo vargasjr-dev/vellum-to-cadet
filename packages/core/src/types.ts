@@ -39,6 +39,7 @@ export interface DetectInfo {
   previousManifest: boolean;
   version: string | null;
   deploymentKind: "desktop" | "docker" | "unknown";
+  docker: DockerDeployment;
   runningProcesses: Array<{ pid: number; command: string }>;
   rootSizeBytes: number;
   externalReferences: string[];
@@ -80,6 +81,19 @@ export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
   /** Ask the vellum CLI to put its assistant to sleep. */
   vellumSleep(): Promise<void>;
+}
+
+/**
+ * Evidence that a vellum root belongs to a docker deployment, read from
+ * the vellum lockfile — the same record `vellum ps` is derived from. Only
+ * lockfile-tracked assistants matter; the CLI's own sleep command stops
+ * their containers, so no docker APIs are touched.
+ */
+export interface DockerDeployment {
+  /** Instance ids whose lockfile entry records docker topology. */
+  instances: string[];
+  /** Docker images recorded in the lockfile's containerInfo. */
+  images: string[];
 }
 
 export interface MigrationReport {
