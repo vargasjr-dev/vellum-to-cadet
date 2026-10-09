@@ -405,7 +405,7 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
     previousManifest: false,
     version: null,
     assistantHandles: [],
-    deploymentKind: "host",
+    deploymentKind: "local",
     docker: { instances: [], images: [] },
     runningProcesses: [],
     rootSizeBytes: 0,

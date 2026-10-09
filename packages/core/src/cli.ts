@@ -9,6 +9,9 @@ import { createInterface } from "node:readline/promises";
 
 import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon, warnText } from "./colors.js";
 import { errPath } from "./steps/migrate-layout.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync as fsExistsSync } from "node:fs";
+import * as os from "node:os";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate, repair } from "./runner.js";
 import { renderUninstallHuman, runUninstall } from "./uninstall.js";
@@ -292,20 +295,101 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
 /** First node version where node:sqlite is no longer experimental (v25.7 made it a release candidate). */
 const RECOMMENDED_NODE_MAJOR = 26;
 
-function warnIfNodeOld(): void {
+/** The nvm shell shim, when the machine has one. */
+function nvmShim(): string | null {
+  const candidates = [
+    process.env.NVM_DIR ? `${process.env.NVM_DIR}/nvm.sh` : null,
+    `${os.homedir()}/.nvm/nvm.sh`,
+  ].filter((p): p is string => Boolean(p));
+  for (const candidate of candidates) {
+    if (fsExistsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function nvmBash(shim: string, script: string): string {
+  return `source '${shim}' >/dev/null 2>&1 && ${script}`;
+}
+
+/**
+ * Older nodes print a node:sqlite experimental warning (it stops being
+ * experimental in v25.7). Rather than asking the user to fix it: when the
+ * machine has nvm, save the running version, install the recommended one,
+ * and re-exec this CLI under it — the previous version is restored at the
+ * end of the script (it is never uninstalled, and nvm's default alias is
+ * never re-pointed). Without nvm, fall back to a one-line recommendation.
+ */
+function ensureRecommendedNode(): void {
   const major = Number(process.versions.node.split(".")[0] ?? 0);
   if (major >= RECOMMENDED_NODE_MAJOR) return;
+  if (process.env.CADET_NVM_SWAPPED) return; // Already running on the swap.
+
+  const shim = nvmShim();
+  if (!shim) {
+    console.error(
+      warnText(
+        `  ⚠ node ${process.versions.node} — node ${RECOMMENDED_NODE_MAJOR}+ is recommended.`,
+      ),
+    );
+    return;
+  }
+
+  const previous = process.versions.node;
   console.error(
-    warnText(
-      `  ⚠ node ${process.versions.node} — node ${RECOMMENDED_NODE_MAJOR}+ is recommended` +
-        ` (node:sqlite prints an experimental warning below v25.7; it is suppressed for this run).` +
-        ` If you use nvm: \`nvm install ${RECOMMENDED_NODE_MAJOR}\``,
+    detail(
+      `  · node ${previous} is older than recommended — installing node ${RECOMMENDED_NODE_MAJOR} via nvm…`,
     ),
   );
+  let nodeBin = "";
+  try {
+    const out = execFileSync(
+      "bash",
+      [
+        "-c",
+        nvmBash(
+          shim,
+          `nvm install ${RECOMMENDED_NODE_MAJOR} >/dev/null 2>&1; nvm which ${RECOMMENDED_NODE_MAJOR}`,
+        ),
+      ],
+      { encoding: "utf8" },
+    );
+    nodeBin = out.trim().split("\n").filter(Boolean).pop() ?? "";
+  } catch {
+    // Fall through to the recommendation.
+  }
+  if (!nodeBin || !fsExistsSync(nodeBin)) {
+    console.error(
+      warnText(
+        `  ⚠ node ${previous} — node ${RECOMMENDED_NODE_MAJOR}+ is recommended (nvm install failed; continuing).`,
+      ),
+    );
+    return;
+  }
+
+  const entry = process.argv[1];
+  if (!entry) return;
+  try {
+    const result = spawnSync(nodeBin, [entry, ...process.argv.slice(2)], {
+      stdio: "inherit",
+      env: { ...process.env, CADET_NVM_SWAPPED: previous },
+    });
+    // End of script: restore the previous node version.
+    spawnSync("bash", [
+      "-c",
+      nvmBash(shim, `nvm use ${previous} >/dev/null 2>&1 || true`),
+    ]);
+    process.exit(result.status ?? 1);
+  } catch {
+    console.error(
+      warnText(
+        `  ⚠ could not re-exec under node ${RECOMMENDED_NODE_MAJOR}; continuing on ${previous}.`,
+      ),
+    );
+  }
 }
 
 async function main(): Promise<number> {
-  warnIfNodeOld();
+  ensureRecommendedNode();
 
   let parsed: ParsedArgs;
   try {
@@ -320,7 +404,7 @@ async function main(): Promise<number> {
     process.stdout.write(HELP);
     return EXIT_CODES.ok;
   }
-  warnIfNodeOld();
+  ensureRecommendedNode();
 
   // Repair mode: re-run the idempotent value steps against every already-
   // migrated cadet root. Deliberately SKIPS all vellum-root discovery —

@@ -167,9 +167,7 @@ async function detectDeploymentKind(
   } catch {
     // Not a modern root.
   }
-  // The root lives on the host filesystem and nothing says docker — a host
-  // install whose desktop marker just isn't where we looked.
-  return "host";
+  return "local";
 }
 
 const VELLUM_LOCKFILE_NAMES = [".vellum.lock.json", ".vellum.lockfile.json"];
