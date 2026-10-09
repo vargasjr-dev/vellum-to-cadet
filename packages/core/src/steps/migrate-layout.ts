@@ -77,14 +77,21 @@ export async function migrateLayout(
     const dbs = plan.filter((p) => isDbArtifact(stateRelativePath(p.src)));
     const runtimeData = plan.filter((p) => isUnderWorkspaceRuntime(stateRelativePath(p.src)));
 
-    const substepSummary = Object.entries(substeps)
-      .map(([name, s]) => `${name}: ${s.changes} change(s) in ${s.files} file(s)`)
-      .join(", ");
+    // The headline stays short; the per-transform takeaways render as
+    // nested bullets (only the ones that actually changed something —
+    // "0 change(s)" lines are noise).
+    const takeaways = Object.entries(substeps)
+      .filter(([, s]) => s.changes > 0)
+      .map(([name, s]) => ({
+        severity: "info" as const,
+        message: `${name}: ${s.changes} change(s) in ${s.files} file(s)`,
+      }));
 
     return {
       step: "migrate-layout",
       status: "completed",
-      summary: `migrated ${fileCount} entries → ${detect.cadetRoot} (${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim)${substepSummary ? ` — ${substepSummary}` : ""}`,
+      summary: `migrated ${fileCount} entries → ${detect.cadetRoot} (${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim)`,
+      issues: takeaways,
       files: plan,
       data: {
         rewritten: rewrites.length,
@@ -95,13 +102,20 @@ export async function migrateLayout(
       },
     };
   } catch (err) {
+    const at = errPath(err);
     return {
       step: "migrate-layout",
       status: "failed",
-      summary: `migration failed: ${(err as Error).message}`,
-      issues: [{ severity: "error", message: (err as Error).message }],
+      summary: `migration failed: ${(err as Error).message}${at}`,
+      issues: [{ severity: "error", message: `${(err as Error).message}${at}` }],
     };
   }
+}
+
+/** fs errors carry the offending path — surface it, never crash blind. */
+export function errPath(err: unknown): string {
+  const p = (err as NodeJS.ErrnoException | null)?.path;
+  return typeof p === "string" && p.length > 0 ? ` (at ${p})` : "";
 }
 
 interface LayoutSubsteps {
@@ -136,28 +150,19 @@ async function execute(
     const srcAbs = path.join(detect.vellumRoot, f.src);
     await fs.mkdir(path.dirname(destAbs), { recursive: true });
 
-    if (f.action === "rewrite") {
-      const raw = await fs.readFile(srcAbs, "utf8");
-      const stateRel = stateRelativePath(f.src);
-      // One shared dispatch with repair + verify: every sanctioned rewrite
-      // is a named substep, everything unmapped stays generic machine-file
-      // substitutions.
-      const sanctioned = sanctionedContentTransform(stateRel, raw, targetCtx);
-      let text: string;
-      let counts: Record<string, number> = {};
-      if (sanctioned) {
-        text = sanctioned.text;
-        counts = sanctioned.counts;
-        bump(sanctioned.substep, Object.values(counts).reduce((a, b) => a + b, 0));
-      } else {
-        const applied = applySubstitutions(raw, targetCtx);
-        text = applied.text;
-        counts = applied.counts;
-      }
-      f.substitutions = counts;
-      await fs.writeFile(destAbs, text, "utf8");
-    } else {
-      await fs.copyFile(srcAbs, destAbs);
+    // Guard against EISDIR: whatever the plan thought at build time, if the
+    // source is a directory NOW, create it as one and move on.
+    if ((await fs.stat(srcAbs)).isDirectory()) {
+      await fs.mkdir(destAbs, { recursive: true });
+      continue;
+    }
+
+    try {
+      await copyOne(f, srcAbs, destAbs, stateRelativePath(f.src), targetCtx, bump);
+    } catch (err) {
+      // Annotate with the plan-relative path — indirect failures may not
+      // carry the fs error's own path.
+      throw new Error(`${(err as Error).message} (at ${f.src})`);
     }
     const srcStat = await fs.stat(srcAbs);
     await fs.chmod(destAbs, srcStat.mode);
@@ -191,6 +196,38 @@ async function execute(
   );
   void timestamp;
   return { substeps };
+}
+
+async function copyOne(
+  f: FileAction,
+  srcAbs: string,
+  destAbs: string,
+  stateRel: string,
+  targetCtx: MigrationTargetCtx,
+  bump: (name: string, changes: number) => void,
+): Promise<void> {
+  if (f.action === "rewrite") {
+    const raw = await fs.readFile(srcAbs, "utf8");
+    // One shared dispatch with repair + verify: every sanctioned rewrite
+    // is a named substep, everything unmapped stays generic machine-file
+    // substitutions.
+    const sanctioned = sanctionedContentTransform(stateRel, raw, targetCtx);
+    let text: string;
+    let counts: Record<string, number> = {};
+    if (sanctioned) {
+      text = sanctioned.text;
+      counts = sanctioned.counts;
+      bump(sanctioned.substep, Object.values(counts).reduce((a, b) => a + b, 0));
+    } else {
+      const applied = applySubstitutions(raw, targetCtx);
+      text = applied.text;
+      counts = applied.counts;
+    }
+    f.substitutions = counts;
+    await fs.writeFile(destAbs, text, "utf8");
+  } else {
+    await fs.copyFile(srcAbs, destAbs);
+  }
 }
 
 /**

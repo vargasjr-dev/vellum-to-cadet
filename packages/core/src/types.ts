@@ -14,7 +14,8 @@ export interface FileAction {
 }
 
 export interface StepIssue {
-  severity: "warning" | "error";
+  /** "info" = a nested takeaway bullet, "warning" = yellow ⚠, "error" = red !. */
+  severity: "info" | "warning" | "error";
   message: string;
   /** Optional relative path the issue relates to. */
   path?: string;
@@ -38,7 +39,9 @@ export interface DetectInfo {
   cadetRootPopulated: boolean;
   previousManifest: boolean;
   version: string | null;
-  deploymentKind: "desktop" | "docker" | "unknown";
+  /** Modern-layout assistant dir names (the handles), sorted. Empty for legacy roots. */
+  assistantHandles: string[];
+  deploymentKind: "desktop" | "docker" | "host";
   docker: DockerDeployment;
   runningProcesses: Array<{ pid: number; command: string }>;
   rootSizeBytes: number;
@@ -77,6 +80,8 @@ export interface MigrateOptions {
  */
 export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
+  /** Ask the vellum CLI its own version (`vellum --version`), or null. */
+  vellumVersion(): Promise<string | null>;
   /**
    * Ask the vellum CLI to put an assistant to sleep. The vellum CLI has no
    * sleep-all flag, so the migrator iterates the lockfile and calls this

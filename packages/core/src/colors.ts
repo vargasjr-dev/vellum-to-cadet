@@ -49,3 +49,8 @@ export function command(text: string): string {
 export function errorText(text: string): string {
   return errEnabled ? `\u001b[31m${text}\u001b[0m` : text;
 }
+
+/** Yellow warning text for stderr, colored only on a real terminal. */
+export function warnText(text: string): string {
+  return errEnabled ? `\u001b[33m${text}\u001b[0m` : text;
+}

@@ -9,7 +9,7 @@ import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
 import {
   ASSISTANT_DB_STATE_REL,
-  GATEWAY_DB_STATE_REL,
+  isGatewayDbStateRel,
   migrateAssistantDb,
   migrateAssistantDbAt,
   migrateGatewayDb,
@@ -68,7 +68,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     step: "detect",
     status: "completed",
     summary: detect.vellumRootExists
-      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind}, version ${detect.version ?? "unknown"}${dockerNote})`
+      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind} install, version ${detect.version ?? "unknown"}${dockerNote})`
       : `no vellum root at ${detect.vellumRoot}`,
     data: {
       vellumRoot: detect.vellumRoot,
@@ -187,7 +187,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done(
     await migrateGatewayDb(
       detect,
-      mig.files?.find((f) => stateRelativePath(f.src) === GATEWAY_DB_STATE_REL)?.dest,
+      mig.files?.find((f) => isGatewayDbStateRel(stateRelativePath(f.src)))?.dest,
     ),
   );
 
@@ -264,7 +264,7 @@ async function scanCadetTree(cadetRoot: string): Promise<CadetScan> {
       scan.assistantDb = entry.relPath;
       continue;
     }
-    if (stateRel === GATEWAY_DB_DEST_REL || stateRel === GATEWAY_DB_STATE_REL) {
+    if (stateRel === GATEWAY_DB_DEST_REL || isGatewayDbStateRel(stateRel)) {
       scan.gatewayDb = entry.relPath;
       continue;
     }
@@ -404,7 +404,8 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
     cadetRootPopulated: false,
     previousManifest: false,
     version: null,
-    deploymentKind: "unknown",
+    assistantHandles: [],
+    deploymentKind: "host",
     docker: { instances: [], images: [] },
     runningProcesses: [],
     rootSizeBytes: 0,

@@ -1,10 +1,12 @@
 import { DatabaseSync as Database } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 
 import { migrate, repair } from "../../src/runner.js";
+import { migrateAssistantDbAt } from "../../src/steps/migrate-assistant-db.js";
 import { stopAssistant } from "../../src/steps/stop-assistant.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
@@ -12,6 +14,9 @@ import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture
 
 /** No-op ops: fixtures have no real processes to find or stop. */
 const noopOps: ProcessOps = {
+  async vellumVersion() {
+    return null;
+  },
   async find() {
     return [];
   },
@@ -389,6 +394,9 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const { root, home } = await buildFullVellum0126();
     const sleeps: number[] = [];
     const ops: ProcessOps = {
+      async vellumVersion() {
+        return null;
+      },
       async find() {
         // pgrep pattern matches are untrustworthy: a browser's bundled
         // credential-executor helpers matched here on a real migration.
@@ -422,6 +430,9 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const { root, home } = await buildFullVellum0126();
     let findCalls = 0;
     const ops: ProcessOps = {
+      async vellumVersion() {
+        return null;
+      },
       async find() {
         findCalls += 1;
         return [{ pid: 111, command: "vellum-assistant daemon" }];
@@ -443,6 +454,72 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const stop = report.steps.find((s) => s.step === "stop-assistant");
     expect(stop?.status).toBe("completed");
     expect(report.ok).toBe(true);
+  });
+
+  test("the migrated instance is named after the source assistant's handle", async () => {
+    // Real vellum assistants have handles like vellum-fresh-eel-8di6pa —
+    // cadet keeps the distinctive part, not our old default "vellum".
+    const { root, home } = await buildModernVellum(undefined, "vellum", "vellum-fresh-eel-8di6pa");
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      // A populated cadet root makes the run take the named-instance path.
+      const cadetData = path.join(home, ".local", "share", "cadet");
+      await fs.mkdir(cadetData, { recursive: true });
+      await fs.writeFile(path.join(cadetData, "sentinel.txt"), "occupied");
+
+      const report = await migrate({
+        vellumRoot: root,
+        processOps: noopOps,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.detect.cadetRoot).toBe(
+        path.join(cadetData, "assistants", "fresh-eel-8di6pa"),
+      );
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+
+  test("the gateway db is found at its real protected/ source location", async () => {
+    // Seen in the wild: assistants/<handle>/.vellum/protected/gateway.sqlite
+    // reported as "no gateway db in the migrated workspace".
+    const { root, home } = await buildModernVellum();
+    const report = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: noopOps,
+    });
+
+    expect(report.ok).toBe(true);
+    const gw = report.steps.find((s) => s.step === "migrate-gateway-db");
+    expect(gw?.status).toBe("completed");
+    expect(gw?.summary).not.toContain("no gateway db");
+  });
+
+  test("db value migrations survive unexpected schemas as nested warnings", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-db-warn-"));
+    const cadetRoot = path.join(home, ".cadet");
+    const dbDir = path.join(cadetRoot, "workspace", "data", "db");
+    await fs.mkdir(dbDir, { recursive: true });
+    // A messages table WITHOUT the expected channel columns — the exact
+    // schema surprise from a real run ("no such column: user_message_channel").
+    const db = new Database(path.join(dbDir, "assistant.db"));
+    db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)");
+    db.exec("INSERT INTO messages (content) VALUES ('see vellum://attachment-1')");
+    db.close();
+
+    const result = await migrateAssistantDbAt(cadetRoot, "workspace/data/db/assistant.db");
+
+    // The step keeps going: completed, with the weird column as a nested ⚠.
+    expect(result.status).toBe("completed");
+    const warn = (result.issues ?? []).find((i) => i.severity === "warning");
+    expect(warn?.message).toContain("messages.user_message_channel");
+    expect(warn?.message).toContain("no such column");
+    // The phase that COULD run (attachment links) still ran.
+    expect(result.summary).toContain("attachment links: 1 row(s)");
   });
 
   test("reports external references (launchd/compose) without touching them", async () => {
@@ -739,6 +816,9 @@ describe("e2e: repair mode", () => {
     try {
       const report = await repair({
         processOps: {
+          async vellumVersion() {
+            return null;
+          },
           async find() {
             return [];
           },
@@ -853,6 +933,9 @@ describe("e2e: repair mode", () => {
       const report = await repair({
         dryRun: true,
         processOps: {
+          async vellumVersion() {
+            return null;
+          },
           async find() {
             return [];
           },
@@ -913,6 +996,9 @@ describe("stop-assistant: vellum lockfile iteration", () => {
       const slept: Array<string | undefined> = [];
       const result = await stopAssistant(
         {
+          async vellumVersion() {
+            return null;
+          },
           async find() {
             return [];
           },
@@ -941,6 +1027,9 @@ describe("stop-assistant: vellum lockfile iteration", () => {
       const slept: Array<string | undefined> = [];
       const result = await stopAssistant(
         {
+          async vellumVersion() {
+            return null;
+          },
           async find() {
             return [];
           },

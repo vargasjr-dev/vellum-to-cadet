@@ -7,11 +7,12 @@
  */
 import { createInterface } from "node:readline/promises";
 
-import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon } from "./colors.js";
+import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon, warnText } from "./colors.js";
+import { errPath } from "./steps/migrate-layout.js";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate, repair } from "./runner.js";
 import { toCadetRoot } from "./steps/detect.js";
-import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepResult } from "./types.js";
+import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepResult } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
   help: boolean;
@@ -205,13 +206,16 @@ function createLiveProgress(): {
       if (!live) return;
       process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
       for (const issue of result.issues ?? []) {
-        process.stderr.write(
-          `    ${issue.severity === "error" ? colors.red("!") : detail("·")} ${issue.message}\n`,
-        );
+        process.stderr.write(`    ${issueIcon(issue.severity)} ${issue.message}\n`);
       }
     },
     finish: clearPending,
   };
+}
+
+/** Nested bullet for a step issue: red ! for errors, yellow ⚠ for warnings, dim · for info. */
+function issueIcon(severity: StepIssue["severity"]): string {
+  return severity === "error" ? colors.red("!") : severity === "warning" ? colors.yellow("⚠") : detail("·");
 }
 
 function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boolean }): string {
@@ -225,7 +229,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     for (const step of report.steps) {
       lines.push(`  ${stepIcon(step.status)} ${step.step.padEnd(20)} ${step.summary}`);
       for (const issue of step.issues ?? []) {
-        lines.push(`    ${issue.severity === "error" ? colors.red("!") : detail("·")} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
+        lines.push(`    ${issueIcon(issue.severity)} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
       }
     }
     lines.push("");
@@ -264,7 +268,24 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   return lines.join("\n");
 }
 
+/** First node version where node:sqlite is no longer experimental (v25.7 made it a release candidate). */
+const RECOMMENDED_NODE_MAJOR = 26;
+
+function warnIfNodeOld(): void {
+  const major = Number(process.versions.node.split(".")[0] ?? 0);
+  if (major >= RECOMMENDED_NODE_MAJOR) return;
+  console.error(
+    warnText(
+      `  ⚠ node ${process.versions.node} — node ${RECOMMENDED_NODE_MAJOR}+ is recommended` +
+        ` (node:sqlite prints an experimental warning below v25.7; it is suppressed for this run).` +
+        ` If you use nvm: \`nvm install ${RECOMMENDED_NODE_MAJOR}\``,
+    ),
+  );
+}
+
 async function main(): Promise<number> {
+  warnIfNodeOld();
+
   let parsed: ParsedArgs;
   try {
     parsed = parseArgs(process.argv.slice(2));
@@ -278,6 +299,7 @@ async function main(): Promise<number> {
     process.stdout.write(HELP);
     return EXIT_CODES.ok;
   }
+  warnIfNodeOld();
 
   // Repair mode: re-run the idempotent value steps against every already-
   // migrated cadet root. Deliberately SKIPS all vellum-root discovery —
@@ -365,7 +387,7 @@ async function main(): Promise<number> {
     return report.exitCode;
   } catch (err) {
     progress.finish();
-    console.error(errorText(`migration crashed: ${(err as Error).message}`));
+    console.error(errorText(`migration crashed: ${(err as Error).message}${errPath(err)}`));
     if (parsed.verbose && (err as Error).stack) {
       console.error((err as Error).stack);
     }

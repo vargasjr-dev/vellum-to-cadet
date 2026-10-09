@@ -20,6 +20,17 @@
 export const LEGACY_INSTANCE_NAME = "vellum";
 
 /**
+ * The cadet instance name for a migrated assistant: vellum assistants have
+ * handles like "vellum-fresh-eel-8di6pa" — cadet keeps the distinctive part
+ * ("fresh-eel-8di6pa"), dropping the brand prefix. Falls back to the legacy
+ * instance name when there is no handle to strip.
+ */
+export function handleToInstanceName(handle: string): string {
+  const stripped = handle.replace(/^vellum-/, "").trim();
+  return stripped.length > 0 ? stripped : LEGACY_INSTANCE_NAME;
+}
+
+/**
  * Where the migrated tree lands THIS RUN, threaded through every path
  * rewrite. Most migrations install the legacy instance name into a clear
  * (or absent) cadet root, so the default matches the historical behavior;

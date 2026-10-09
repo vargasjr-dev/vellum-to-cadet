@@ -16,7 +16,6 @@ import {
   ASSISTANT_DB_STATE_REL,
   CHANNEL_COLUMNS,
   GATEWAY_CHANNEL_COLUMNS,
-  GATEWAY_DB_STATE_REL,
 } from "./migrate-assistant-db.js";
 import type { StepIssue, StepResult } from "../types.js";
 
@@ -33,7 +32,9 @@ export const VALUE_MIGRATED_DBS: ReadonlyArray<{
   connections?: boolean;
 }> = [
   { stateRel: ASSISTANT_DB_STATE_REL, columns: CHANNEL_COLUMNS, messages: true, connections: true },
-  { stateRel: GATEWAY_DB_STATE_REL, columns: GATEWAY_CHANNEL_COLUMNS },
+  // Both gateway source forms (protected/ and the older data/) land at the
+  // same destination, so one registry entry covers them.
+  { stateRel: "protected/gateway.sqlite", columns: GATEWAY_CHANNEL_COLUMNS },
 ];
 
 /**
