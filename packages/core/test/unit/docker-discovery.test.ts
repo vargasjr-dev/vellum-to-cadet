@@ -1,9 +1,10 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 
 import { readDockerLockfileEvidence } from "../../src/steps/detect.js";
+import { expect } from "../helpers/expect.js";
 
 /** Redirect $HOME for the duration of fn (discovery reads it live). */
 async function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {

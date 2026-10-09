@@ -177,7 +177,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     // Opening recovers/checkpoints any copied -wal sidecar: committed frames
     // still sitting in the WAL are replayed into the main db BEFORE the
     // rewrites below run, so WAL-resident vellum rows are rewritten too.
-    db = await openSqliteDatabase(dbPath);
+    db = openSqliteDatabase(dbPath);
   } catch (err) {
     return {
       step,

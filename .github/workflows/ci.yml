@@ -11,43 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        # --timeout: bun default is 5s; the full-workspace e2e sits right at
-        # the edge on CI runners (~5.2s) and bunfig.toml [test] timeout is
-        # ignored by bun 1.3.11. Quality over speed: 10s for every test.
-        run: bun test --timeout=10000
-
-  node-sqlite-smoke:
-    # The test suite runs under bun (which cannot load node:sqlite), but the
-    # shipped npx package runs under node. Exercise the built dist's db steps
-    # under node so the shipped runtime path is tested too.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install
-        run: bun install --frozen-lockfile
-
-      - name: Build
-        run: bun run build
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22 # node:sqlite shipped unflagged in 22.13
 
-      - name: Node-runtime sqlite smoke
-        run: node scripts/node-sqlite-smoke.mjs
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

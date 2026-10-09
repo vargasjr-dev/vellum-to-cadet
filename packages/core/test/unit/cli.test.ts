@@ -1,19 +1,21 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import * as url from "node:url";
 
+import { expect } from "../helpers/expect.js";
+
+// The BUILT CLI — node can't run the TS source directly, and the tests
+// exercise exactly the dist the npx package ships.
 const cliPath = path.join(
   url.fileURLToPath(new URL(".", import.meta.url)),
-  "../../src/cli.ts",
+  "../../../dist/cli.js",
 );
 
 function runCli(
   args: string[],
   opts: { env?: Record<string, string>; stdin?: string } = {},
 ): { code: number; stdout: string; stderr: string } {
-  // node:child_process, not Bun.spawnSync — Bun drops stdin input (child sees
-  // EOF without data), and plain node is the CLI's real npx runtime anyway.
   const proc = spawnSync(process.execPath, [cliPath, ...args], {
     env: { ...process.env, ...opts.env },
     input: opts.stdin,

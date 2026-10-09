@@ -28,20 +28,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 # node:sqlite shipped unflagged in 22.13
 
       - name: Install
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Typecheck
-        run: bun run typecheck
+        run: npm run typecheck
 
       - name: Test
-        # --timeout: bun default is 5s; the full-workspace e2e sits right at
-        # the edge on CI runners (~5.2s) and bunfig.toml [test] timeout is
-        # ignored by bun 1.3.11. Quality over speed: 10s for every test.
-        run: bun test --timeout=10000
+        run: npm test
 
       # Bumps happen manually on the branch before dispatching — the workflow
       # publishes exactly the version committed here.
@@ -53,16 +52,7 @@ jobs:
           echo "Releasing v$VERSION from $RELEASE_BRANCH"
 
       - name: Build
-        run: bun run build
-
-      # The suite above runs under bun; users run the published package under
-      # node. Gate the release on the node-runtime sqlite path too.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Node-runtime sqlite smoke
-        run: node scripts/node-sqlite-smoke.mjs
+        run: npm run build
 
       - name: Setup node for npm publish
         uses: actions/setup-node@v4

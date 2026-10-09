@@ -185,7 +185,7 @@ export async function dbVellumRows(
 ): Promise<number | "unreadable"> {
   let db: SqliteDatabase;
   try {
-    db = await openSqliteDatabase(dbPath, { readonly: true });
+    db = openSqliteDatabase(dbPath, { readonly: true });
   } catch {
     return "unreadable";
   }

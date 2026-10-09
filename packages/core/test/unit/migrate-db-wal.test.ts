@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { Database } from "bun:sqlite";
+import { DatabaseSync as Database } from "node:sqlite";
 
+import { expect } from "../helpers/expect.js";
 import { migrateAssistantDb } from "../../src/steps/migrate-assistant-db.js";
 import type { DetectInfo } from "../../src/types.js";
 
@@ -54,13 +55,13 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     // checkpointing: the commits stay in the -wal file (SQLite checkpoints
     // on close or after ~1000 pages — neither happens here).
     const source = new Database(srcDbPath);
-    source.run("PRAGMA journal_mode = wal");
-    source.run(`CREATE TABLE contact_channels (id TEXT PRIMARY KEY, type TEXT NOT NULL)`);
+    source.exec("PRAGMA journal_mode = wal");
+    source.exec(`CREATE TABLE contact_channels (id TEXT PRIMARY KEY, type TEXT NOT NULL)`);
     // WAL-resident content: a telegram row plus two vellum rows, all
     // committed but never checkpointed.
-    source.run(`INSERT INTO contact_channels VALUES ('cc-0', 'telegram')`);
-    source.run(`INSERT INTO contact_channels VALUES ('cc-1', 'vellum')`);
-    source.run(`INSERT INTO contact_channels VALUES ('cc-2', 'vellum')`);
+    source.exec(`INSERT INTO contact_channels VALUES ('cc-0', 'telegram')`);
+    source.exec(`INSERT INTO contact_channels VALUES ('cc-1', 'vellum')`);
+    source.exec(`INSERT INTO contact_channels VALUES ('cc-2', 'vellum')`);
 
     // The -wal must exist and hold ALL the rows — prove the rows are truly
     // WAL-resident by opening the MAIN file alone (no sidecars) and finding
@@ -70,12 +71,12 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     expect(walStat.size).toBeGreaterThan(0);
     const mainOnly = path.join(srcDir, "main-only.db");
     await fs.copyFile(srcDbPath, mainOnly);
-    const mainOnlyDb = new Database(mainOnly, { readonly: true });
+    const mainOnlyDb = new Database(mainOnly, { readOnly: true });
     const mainOnlyHasTable = !!mainOnlyDb
-      .query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contact_channels'`)
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'contact_channels'`)
       .get();
     const mainOnlyVellum = mainOnlyHasTable
-      ? (mainOnlyDb.query(`SELECT COUNT(*) AS c FROM contact_channels WHERE type = 'vellum'`).get() as { c: number }).c
+      ? (mainOnlyDb.prepare(`SELECT COUNT(*) AS c FROM contact_channels WHERE type = 'vellum'`).get() as { c: number }).c
       : 0;
     expect(mainOnlyVellum).toBe(0);
     mainOnlyDb.close();
@@ -99,8 +100,8 @@ describe("migrate-assistant-db: write-ahead replay", () => {
 
     // The WAL-resident vellum rows were replayed into the destination db
     // on open, then rewritten.
-    const destDb = new Database(path.join(destDir, "assistant.db"), { readonly: true });
-    const types = destDb.query(`SELECT id, type FROM contact_channels ORDER BY id`).all();
+    const destDb = new Database(path.join(destDir, "assistant.db"), { readOnly: true });
+    const types = destDb.prepare(`SELECT id, type FROM contact_channels ORDER BY id`).all();
     expect(types).toEqual([
       { id: "cc-0", type: "telegram" },
       { id: "cc-1", type: "cadet" },
@@ -110,8 +111,8 @@ describe("migrate-assistant-db: write-ahead replay", () => {
 
     // The SOURCE tree is untouched (the migration only ever writes the
     // destination copy).
-    const srcTypes = new Database(srcDbPath, { readonly: true })
-      .query(`SELECT type FROM contact_channels ORDER BY id`)
+    const srcTypes = new Database(srcDbPath, { readOnly: true })
+      .prepare(`SELECT type FROM contact_channels ORDER BY id`)
       .all();
     expect(srcTypes).toEqual([
       { type: "telegram" },
@@ -127,8 +128,8 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     await fs.mkdir(destDir, { recursive: true });
     const dbPath = path.join(destDir, "assistant.db");
     const db = new Database(dbPath);
-    db.run(`CREATE TABLE contact_channels (id TEXT PRIMARY KEY, type TEXT NOT NULL)`);
-    db.run(`INSERT INTO contact_channels VALUES ('cc-1', 'vellum')`);
+    db.exec(`CREATE TABLE contact_channels (id TEXT PRIMARY KEY, type TEXT NOT NULL)`);
+    db.exec(`INSERT INTO contact_channels VALUES ('cc-1', 'vellum')`);
     db.close();
     // Garbage sidecar (not a valid WAL) — e.g. truncated or foreign bytes.
     await fs.writeFile(`${dbPath}-wal`, "not-a-real-wal-file");
@@ -136,8 +137,8 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     const result = await migrateAssistantDb(detectFor(tmp), "workspace/data/db/assistant.db");
     expect(result.status).toBe("completed");
 
-    const after = new Database(dbPath, { readonly: true })
-      .query(`SELECT type FROM contact_channels`)
+    const after = new Database(dbPath, { readOnly: true })
+      .prepare(`SELECT type FROM contact_channels`)
       .get() as { type: string };
     expect(after.type).toBe("cadet");
   });

@@ -1,12 +1,13 @@
-import { Database } from "bun:sqlite";
+import { DatabaseSync as Database } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 
 import { migrate, repair } from "../../src/runner.js";
 import { stopAssistant } from "../../src/steps/stop-assistant.js";
 import type { DetectInfo, ProcessOps } from "../../src/types.js";
+import { expect } from "../helpers/expect.js";
 import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
 /** No-op ops: fixtures have no real processes to find or stop. */
@@ -179,14 +180,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const gwStep = report.steps.find((s) => s.step === "migrate-gateway-db");
     expect(gwStep?.status).toBe("completed");
     const gwDb = new Database(path.join(cadetRoot, "gateway-security/gateway.sqlite"), {
-      readonly: true,
+      readOnly: true,
     });
-    const gwChannelTypes = gwDb.query(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
+    const gwChannelTypes = gwDb.prepare(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
     expect(gwChannelTypes).toEqual([{ t: "cadet" }, { t: "telegram" }]);
-    const gwInvites = gwDb.query(`SELECT source_channel AS c FROM ingress_invites`).all();
+    const gwInvites = gwDb.prepare(`SELECT source_channel AS c FROM ingress_invites`).all();
     expect(gwInvites).toEqual([{ c: "cadet" }]);
     const gwOverrides = gwDb
-      .query(`SELECT channel_type AS t FROM channel_permission_overrides ORDER BY id`)
+      .prepare(`SELECT channel_type AS t FROM channel_permission_overrides ORDER BY id`)
       .all();
     expect(gwOverrides).toEqual([{ t: "cadet" }, { t: "slack" }]);
     gwDb.close();
@@ -215,14 +216,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const dbStep = report.steps.find((s) => s.step === "migrate-assistant-db");
     expect(dbStep?.status).toBe("completed");
     const migratedDb = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
-      readonly: true,
+      readOnly: true,
     });
     const convChannels = migratedDb
-      .query(`SELECT origin_channel AS c FROM conversations ORDER BY id`)
+      .prepare(`SELECT origin_channel AS c FROM conversations ORDER BY id`)
       .all();
     expect(convChannels).toEqual([{ c: "cadet" }, { c: "telegram" }]);
     const msg = migratedDb
-      .query(
+      .prepare(
         `SELECT content, user_message_channel, assistant_message_channel, metadata
          FROM messages WHERE id = 'm1'`,
       )
@@ -233,7 +234,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(msg.assistant_message_channel).toBe("cadet");
     expect(JSON.parse(msg.metadata).channel).toBe("cadet");
     const conns = migratedDb
-      .query(`SELECT name, provider FROM provider_connections ORDER BY name`)
+      .prepare(`SELECT name, provider FROM provider_connections ORDER BY name`)
       .all();
     expect(conns).toEqual([
       { name: "cadet", provider: "cadet" },
@@ -572,9 +573,9 @@ describe("e2e: modern multi-instance layout", () => {
     const db = await fs.readFile(path.join(instance, "workspace/data/db/assistant.db"));
     expect(db.toString()).toContain("SQLite format 3");
     const gwDb = new Database(path.join(instance, "gateway-security/gateway.sqlite"), {
-      readonly: true,
+      readOnly: true,
     });
-    const gwChannelTypes = gwDb.query(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
+    const gwChannelTypes = gwDb.prepare(`SELECT type AS t FROM contact_channels ORDER BY id`).all();
     expect(gwChannelTypes).toEqual([{ t: "cadet" }, { t: "telegram" }]);
     gwDb.close();
     expect(
@@ -723,7 +724,7 @@ describe("e2e: repair mode", () => {
     const soulPath = path.join(cadetRoot, "workspace/SOUL.md");
     await fs.appendFile(soulPath, "Bugged addendum: comes with the Vellum harness again.\n");
     const db = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"));
-    db.run(
+    db.exec(
       `INSERT INTO messages VALUES ('m9', 'c1', 'assistant', 'bugged reply', 9,
        '{"channel":"vellum"}', 'vellum', 'vellum')`,
     );
@@ -770,10 +771,10 @@ describe("e2e: repair mode", () => {
       const soul = await fs.readFile(soulPath, "utf8");
       expect(soul).toContain("comes with the Cadet harness again.");
       const checked = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
-        readonly: true,
+        readOnly: true,
       });
       const leftover = checked
-        .query("SELECT COUNT(*) AS n FROM messages WHERE user_message_channel = 'vellum'")
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE user_message_channel = 'vellum'")
         .all();
       expect(leftover).toEqual([{ n: 0 }]);
 

@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, test } from "node:test";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { discoverCadetRoots, discoverVellumRoots } from "../../src/discover.js";
+import { expect } from "../helpers/expect.js";
 
 const ENV_KEYS = ["VELLUM_DATA_DIR", "VELLUM_WORKSPACE_DIR"] as const;
 const ambientEnv = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
