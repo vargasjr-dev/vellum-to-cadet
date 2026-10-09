@@ -173,7 +173,7 @@ interface RawLockfileEntry {
 
 /**
  * Every plausible vellum lockfile location: the e2e hook dir, the
- * home-level legacy names, and the XDG config dirs (`vellum` + env
+ * home-level legacy names, and the production XDG config dir (`vellum`
  * variants) that hold the canonical lockfile.
  */
 async function lockfileCandidates(): Promise<string[]> {
@@ -188,7 +188,7 @@ async function lockfileCandidates(): Promise<string[]> {
   }
   try {
     for (const entry of await fs.readdir(path.join(home, ".config"))) {
-      if (entry === "vellum" || entry.startsWith("vellum-")) {
+      if (entry === "vellum") {
         candidates.push(path.join(home, ".config", entry, "lockfile.json"));
       }
     }
