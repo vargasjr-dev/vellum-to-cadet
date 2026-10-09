@@ -172,17 +172,11 @@ interface RawLockfileEntry {
 }
 
 /**
- * Read the vellum lockfile (the same file `vellum ps` is derived from) and
- * return the instances it records as docker-deployed, plus their images.
- * Only lockfile-tracked assistants matter — the vellum CLI's own `sleep`
- * command stops their containers, so the migrator never touches docker
- * itself. Best-effort: a missing, malformed, or lockless install yields
- * no evidence.
+ * Every plausible vellum lockfile location: the e2e hook dir, the
+ * home-level legacy names, and the XDG config dirs (`vellum` + env
+ * variants) that hold the canonical lockfile.
  */
-export async function readDockerLockfileEvidence(): Promise<{
-  instances: string[];
-  images: string[];
-}> {
+async function lockfileCandidates(): Promise<string[]> {
   const home = homeDir();
   const candidates: string[] = [];
   const lockfileDir = process.env.VELLUM_LOCKFILE_DIR?.trim();
@@ -201,10 +195,17 @@ export async function readDockerLockfileEvidence(): Promise<{
   } catch {
     // No XDG config dir — fine.
   }
+  return candidates;
+}
 
-  const instances = new Set<string>();
-  const images = new Set<string>();
-  for (const candidate of candidates) {
+/**
+ * Read every assistant entry the vellum lockfiles record — the same record
+ * `vellum ps` is derived from. Best-effort: missing, malformed, or lockless
+ * installs yield nothing.
+ */
+export async function readLockfileEntries(): Promise<RawLockfileEntry[]> {
+  const entries: RawLockfileEntry[] = [];
+  for (const candidate of await lockfileCandidates()) {
     let raw: string;
     try {
       raw = await fs.readFile(candidate, "utf8");
@@ -217,16 +218,58 @@ export async function readDockerLockfileEvidence(): Promise<{
     } catch {
       continue;
     }
-    for (const entry of parsed.assistants ?? []) {
-      if (entry.cloud !== "docker" || typeof entry.assistantId !== "string") continue;
-      instances.add(entry.assistantId);
-      for (const image of [
-        entry.containerInfo?.assistantImage,
-        entry.containerInfo?.gatewayImage,
-        entry.containerInfo?.cesImage,
-      ]) {
-        if (typeof image === "string" && image.length > 0) images.add(image);
-      }
+    entries.push(...(parsed.assistants ?? []));
+  }
+  return entries;
+}
+
+/**
+ * Sleep targets for the stop step. The vellum CLI has no sleep-all flag,
+ * so the migrator sleeps each lockfile-tracked assistant by id (falling
+ * back to the entry's name when it has no id). Deduped: the same assistant
+ * can surface from more than one candidate file.
+ */
+export async function readLockfileAssistants(): Promise<
+  Array<{ identifier: string }>
+> {
+  const seen = new Set<string>();
+  const out: Array<{ identifier: string }> = [];
+  for (const entry of await readLockfileEntries()) {
+    const identifier =
+      typeof entry.assistantId === "string" && entry.assistantId.length > 0
+        ? entry.assistantId
+        : typeof entry.name === "string" && entry.name.length > 0
+          ? entry.name
+          : null;
+    if (identifier == null || seen.has(identifier)) continue;
+    seen.add(identifier);
+    out.push({ identifier });
+  }
+  return out;
+}
+
+/**
+ * The instances the lockfile records as docker-deployed, plus their images.
+ * Only lockfile-tracked assistants matter — the vellum CLI's own `sleep`
+ * command stops their containers, so the migrator never touches docker
+ * itself. Best-effort: a missing, malformed, or lockless install yields
+ * no evidence.
+ */
+export async function readDockerLockfileEvidence(): Promise<{
+  instances: string[];
+  images: string[];
+}> {
+  const instances = new Set<string>();
+  const images = new Set<string>();
+  for (const entry of await readLockfileEntries()) {
+    if (entry.cloud !== "docker" || typeof entry.assistantId !== "string") continue;
+    instances.add(entry.assistantId);
+    for (const image of [
+      entry.containerInfo?.assistantImage,
+      entry.containerInfo?.gatewayImage,
+      entry.containerInfo?.cesImage,
+    ]) {
+      if (typeof image === "string" && image.length > 0) images.add(image);
     }
   }
   return { instances: [...instances], images: [...images] };

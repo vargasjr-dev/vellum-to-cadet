@@ -45,18 +45,19 @@ export const defaultProcessOps: ProcessOps = {
     return found;
   },
 
-  async vellumSleep() {
+  async vellumSleep(assistant?: string) {
     // Stopping the assistant is the vellum CLI's own logic — its sleep
     // command knows how its processes are organized. We deliberately do
     // NOT reimplement signal escalation here: custom process killing has
     // hit unrelated processes before.
-    await execFileAsync("vellum", ["sleep"]);
+    await execFileAsync("vellum", assistant ? ["sleep", assistant] : ["sleep"]);
   },
 
   async cadetSleep() {
     // Same contract, cadet side: repair mutates the cadet root, so it is
-    // the cadet CLI's sleep command that owns stopping that assistant.
-    await execFileAsync("cadet", ["sleep"]);
+    // the cadet CLI's sleep command that owns stopping — --all covers
+    // every assistant under the root, not just one.
+    await execFileAsync("cadet", ["sleep", "--all"]);
   },
 };
 

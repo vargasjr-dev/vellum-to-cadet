@@ -192,3 +192,51 @@ async function realpath(p: string): Promise<string> {
     return p;
   }
 }
+
+/**
+ * Cadet-root discovery for repair mode. Repair never takes a path
+ * argument — it finds every cadet root this migrator created and fixes
+ * them all. Candidates mirror the vellum side: bare home roots
+ * (~/.cadet, ~/.cadet-<env>) and the modern XDG roots
+ * (~/.local/share/cadet[-<env>]) with their assistants/<name> instance
+ * dirs. A candidate qualifies only when it carries the migration
+ * manifest — the migrator's own audit trail — so foreign or hand-made
+ * cadet roots are never touched.
+ */
+export async function discoverCadetRoots(): Promise<string[]> {
+  const homeDir = home();
+  const candidates = new Set<string>();
+
+  const bare = await fs.readdir(homeDir).catch(() => []);
+  for (const name of bare) {
+    if (name === ".cadet" || name.startsWith(".cadet-")) {
+      candidates.add(path.join(homeDir, name));
+    }
+  }
+
+  const shareDir = path.join(homeDir, ".local", "share");
+  const share = await fs.readdir(shareDir).catch(() => []);
+  for (const name of share) {
+    if (!/^cadet(-[a-z0-9-]+)?$/.test(name)) continue;
+    const root = path.join(shareDir, name);
+    candidates.add(root);
+    const instances = await fs
+      .readdir(path.join(root, "assistants"))
+      .catch(() => []);
+    for (const instance of instances) {
+      candidates.add(path.join(root, "assistants", instance));
+    }
+  }
+
+  const qualified: string[] = [];
+  for (const candidate of [...candidates].sort()) {
+    try {
+      if ((await fs.stat(path.join(candidate, ".cadet-migration-manifest.json"))).isFile()) {
+        qualified.push(candidate);
+      }
+    } catch {
+      // Not a migrated cadet root.
+    }
+  }
+  return qualified;
+}

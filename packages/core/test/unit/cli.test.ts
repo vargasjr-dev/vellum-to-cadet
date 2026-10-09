@@ -75,7 +75,7 @@ describe("cli", () => {
   });
 
   test("removed flags are rejected", () => {
-    for (const flag of ["--remove-vellum-root", "--skip-stop-assistant", "--vellum-root"]) {
+    for (const flag of ["--remove-vellum-root", "--skip-stop-assistant", "--skip-stop", "--vellum-root"]) {
       const r = runCli([flag]);
       expect(r.code).not.toBe(0);
       expect(r.stderr).toContain("unknown flag");

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
+import { discoverCadetRoots } from "./discover.js";
 import { detect as detectStep, envSuffixFor, resolveMigrationTarget } from "./steps/detect.js";
 import { preflight } from "./steps/preflight.js";
 import { stopAssistant, stopCadet } from "./steps/stop-assistant.js";
@@ -146,14 +147,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.ok);
   }
 
-  // 1. Put the vellum assistant to sleep (its own CLI does the stopping).
-  if (!options.skipStopAssistant) {
-    start("stop-assistant");
-    const stop = await stopAssistant(detect, ops, options.verbose, options.termGraceMs ?? 5_000);
-    done(stop);
-    if (stop.status === "failed") {
-      return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.processesUnstoppable);
-    }
+  // 1. Put the vellum assistants to sleep (the vellum CLI does the stopping).
+  start("stop-assistant");
+  const stop = await stopAssistant(detect, ops, options.verbose, options.termGraceMs ?? 5_000);
+  done(stop);
+  if (stop.status === "failed") {
+    return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.processesUnstoppable);
   }
 
   // 2. Full backup before any mutation.
@@ -383,16 +382,13 @@ async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepRes
   };
 }
 
-export interface RepairOptions extends MigrateOptions {
-  /** Repair target: the cadet root of the installation being fixed. */
-  cadetRoot: string;
-}
+/** Repair takes no root: every migrated cadet root is discovered and fixed. */
+export type RepairOptions = Omit<MigrateOptions, "cadetRoot">;
 
 export async function repair(options: RepairOptions): Promise<MigrationReport> {
   const startedAt = new Date().toISOString();
   const ops = options.processOps ?? defaultProcessOps;
   const steps: StepResult[] = [];
-  const cadetRoot = options.cadetRoot;
   const start = (step: string): void => options.onStepStart?.(step);
   const done = (result: StepResult): StepResult => {
     options.onStepDone?.(result);
@@ -406,10 +402,10 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
   const detect: DetectInfo = {
     vellumRoot: "",
     vellumRootExists: false,
-    cadetRoot,
-    cadetRootExists: true,
-    cadetRootPopulated: true,
-    previousManifest: true,
+    cadetRoot: "",
+    cadetRootExists: false,
+    cadetRootPopulated: false,
+    previousManifest: false,
     version: null,
     deploymentKind: "unknown",
     docker: { instances: [], images: [] },
@@ -418,103 +414,102 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
     externalReferences: [],
   };
 
-  // Preflight: the target must exist and be a migrated cadet root. The
-  // manifest is the migrator's own audit trail — its presence is what makes
-  // "this root is mine to fix" a safe claim.
-  start("preflight-repair");
-  const manifestPath = path.join(cadetRoot, ".cadet-migration-manifest.json");
-  let manifestOk = false;
-  let rootExists = false;
-  try {
-    rootExists = (await fs.stat(cadetRoot)).isDirectory();
-    manifestOk = (await fs.stat(manifestPath)).isFile();
-  } catch {
-    manifestOk = false;
-  }
-  if (!rootExists || !manifestOk) {
+  // Discovery first: repair never takes a path — it finds every cadet
+  // root this migrator created (manifest-bearing) and fixes them all.
+  // The manifest is the migrator's own audit trail — its presence is what
+  // makes "this root is mine to fix" a safe claim.
+  start("discover-cadet-roots");
+  const roots = await discoverCadetRoots();
+  if (roots.length === 0) {
     done({
-      step: "preflight-repair",
+      step: "discover-cadet-roots",
       status: "failed",
-      summary: rootExists
-        ? `${cadetRoot} has no .cadet-migration-manifest.json — repair only runs on roots this migrator created`
-        : `${cadetRoot} does not exist`,
+      summary: "no migrated cadet roots found — repair only runs on roots this migrator created",
       issues: [
         {
           severity: "error",
-          message: rootExists
-            ? "not a migrated cadet root (no manifest); run the migrator instead of repair"
-            : "cadet root not found; pass the root the migrator created",
+          message: "no cadet root carries a .cadet-migration-manifest.json; run the migrator instead of repair",
         },
       ],
     });
-    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.preflightFailed);
+    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.nothingToMigrate);
   }
+  detect.cadetRoot = roots.join(", ");
+  detect.cadetRootExists = true;
+  detect.previousManifest = true;
   done({
-    step: "preflight-repair",
+    step: "discover-cadet-roots",
     status: "completed",
-    summary: `migrated cadet root at ${cadetRoot} (manifest present)`,
+    summary: `${roots.length} migrated cadet root(s): ${roots.join(", ")}`,
   });
 
-  const scan = await scanCadetTree(cadetRoot);
-
   if (options.dryRun) {
-    start("repair-plan");
-    let pending = 0;
-    for (const { destRel, stateRel } of scan.contentFiles) {
-      const raw = await fs.readFile(path.join(cadetRoot, destRel), "utf8");
-      const sanctioned = sanctionedContentTransform(stateRel, raw);
-      const text = sanctioned ? sanctioned.text : applySubstitutions(raw).text;
-      if (text !== raw) pending++;
+    for (const root of roots) {
+      const scan = await scanCadetTree(root);
+      let pending = 0;
+      for (const { destRel, stateRel } of scan.contentFiles) {
+        const raw = await fs.readFile(path.join(root, destRel), "utf8");
+        const sanctioned = sanctionedContentTransform(stateRel, raw);
+        const text = sanctioned ? sanctioned.text : applySubstitutions(raw).text;
+        if (text !== raw) pending++;
+      }
+      done({
+        step: "repair-plan",
+        status: "planned",
+        summary: `dry run in ${root}: ${pending} of ${scan.contentFiles.length} eligible file(s) pending rewrites, ${scan.assistantDb ? 1 : 0} assistant db(s) + ${scan.gatewayDb ? 1 : 0} gateway db(s) to re-check`,
+      });
     }
-    done({
-      step: "repair-plan",
-      status: "planned",
-      summary: `dry run: ${pending} of ${scan.contentFiles.length} eligible file(s) pending rewrites, ${scan.assistantDb ? 1 : 0} assistant db(s) + ${scan.gatewayDb ? 1 : 0} gateway db(s) to re-check in ${cadetRoot}`,
-    });
     return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.ok);
   }
 
-  // 1. Stop the cadet assistant (its own CLI does the stopping).
-  if (!options.skipStopAssistant) {
-    start("stop-cadet");
-    const stop = await stopCadet(cadetRoot, ops, options.verbose, options.termGraceMs ?? 5_000);
-    done(stop);
-    if (stop.status === "failed") {
-      return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.processesUnstoppable);
+  // Stop every cadet assistant ONCE — `cadet sleep --all` sleeps every
+  // assistant the cadet lockfiles know about (the cadet CLI does the
+  // stopping; the re-check reports survivors).
+  start("stop-cadet");
+  const stop = await stopCadet(ops, options.verbose, options.termGraceMs ?? 5_000);
+  done(stop);
+  if (stop.status === "failed") {
+    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.processesUnstoppable);
+  }
+
+  let lastBackupPath: string | null = null;
+  for (const root of roots) {
+    const scan = await scanCadetTree(root);
+
+    // Fresh per-root backup BEFORE mutating it — same sha256 manifest
+    // contract as the migrate backup. The instance-name suffix keeps
+    // sibling instances (which share a backup anchor) from colliding on
+    // the same-second timestamp.
+    start("backup");
+    const timestamp = `${utcStamp()}-${path.basename(root).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+    const bk = await backup(root, root, timestamp);
+    done(bk);
+    if (bk.status === "failed") {
+      return finish(detect, steps, "repair", startedAt, lastBackupPath, EXIT_CODES.backupFailed);
+    }
+    lastBackupPath = backupDirFor(root, timestamp);
+
+    // Re-apply every sanctioned content transform in place.
+    start("rewrite-content");
+    done(await rewriteContent(root, scan, log));
+
+    // The db value steps, pointed at this root. All guarded and
+    // idempotent: WHERE col = 'vellum' matches nothing on a clean root.
+    start("migrate-assistant-db");
+    done(await migrateAssistantDbAt(root, scan.assistantDb ?? undefined));
+
+    start("migrate-gateway-db");
+    done(await migrateGatewayDbAt(root, scan.gatewayDb ?? undefined));
+
+    // Verify: dbs must have zero vellum rows; sanctioned content must be
+    // transform-idempotent (rewriting an already-clean file changes nothing).
+    start("verify");
+    const v = await verifyRepair(root, scan);
+    done(v);
+    if (v.status === "failed") {
+      return finish(detect, steps, "repair", startedAt, lastBackupPath, EXIT_CODES.verifyFailed);
     }
   }
 
-  // 2. Fresh backup of the cadet root BEFORE mutating it — same sha256
-  // manifest contract as the migrate backup.
-  start("backup");
-  const timestamp = utcStamp();
-  const bk = await backup(cadetRoot, cadetRoot, timestamp);
-  done(bk);
-  if (bk.status === "failed") {
-    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.backupFailed);
-  }
-  const backupPath = backupDirFor(cadetRoot, timestamp);
-
-  // 3. Re-apply every sanctioned content transform in place.
-  start("rewrite-content");
-  done(await rewriteContent(cadetRoot, scan, log));
-
-  // 4-5. The db value steps, pointed at the cadet root. All guarded and
-  // idempotent: WHERE col = 'vellum' matches nothing on a clean root.
-  start("migrate-assistant-db");
-  done(await migrateAssistantDbAt(cadetRoot, scan.assistantDb ?? undefined));
-
-  start("migrate-gateway-db");
-  done(await migrateGatewayDbAt(cadetRoot, scan.gatewayDb ?? undefined));
-
-  // 6. Verify: dbs must have zero vellum rows; sanctioned content must be
-  // transform-idempotent (rewriting an already-clean file changes nothing).
-  start("verify");
-  const v = await verifyRepair(cadetRoot, scan);
-  done(v);
-  if (v.status === "failed") {
-    return finish(detect, steps, "repair", startedAt, backupPath, EXIT_CODES.verifyFailed);
-  }
-
-  return finish(detect, steps, "repair", startedAt, backupPath, EXIT_CODES.ok);
+  return finish(detect, steps, "repair", startedAt, lastBackupPath, EXIT_CODES.ok);
 }
