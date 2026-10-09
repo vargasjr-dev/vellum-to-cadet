@@ -3,10 +3,13 @@ import { preflight } from "./steps/preflight.js";
 import { stopAssistant } from "./steps/stop-assistant.js";
 import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
+import { migrateAssistantDb } from "./steps/migrate-assistant-db.js";
 import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
 import { verify } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
+import { stateRelativePath } from "./fs-utils.js";
+import { ASSISTANT_DB_STATE_REL } from "./steps/migrate-assistant-db.js";
 import {
   EXIT_CODES,
   type DetectInfo,
@@ -153,6 +156,17 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   if (mig.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.migrationFailed);
   }
+
+  // 3.5 Rewrite vellum-branded VALUES inside the migrated assistant DB
+  // (channel ids, attachment links, the managed connection row). The
+  // destination path comes from the copy plan so every layout shape agrees.
+  start("migrate-assistant-db");
+  done(
+    await migrateAssistantDb(
+      detect,
+      mig.files?.find((f) => stateRelativePath(f.src) === ASSISTANT_DB_STATE_REL)?.dest,
+    ),
+  );
 
   // 4. Move a legacy home-level cadet lockfile into the config dir so the
   // migrated install keeps its identity (cadet no longer reads the old name).

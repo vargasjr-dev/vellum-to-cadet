@@ -6,7 +6,9 @@ import {
   renameRelativePath,
 } from "../../src/fs-utils.js";
 import {
-  isWorkspaceMachineFile,
+  isPluginSource,
+  isSkillInstallMeta,
+  isWorkspaceConfigContract,
   rewriteWorkspaceJsonValues,
 } from "../../src/layout.js";
 
@@ -205,24 +207,24 @@ describe("layout: modern instance-state paths", () => {
 });
 
 describe("layout: workspace machine files", () => {
-  test("isWorkspaceMachineFile matches the named contract files", () => {
-    expect(isWorkspaceMachineFile("workspace/config.json")).toBe(true);
-    expect(isWorkspaceMachineFile("workspace/skills/github-summary/install-meta.json")).toBe(true);
-    expect(isWorkspaceMachineFile("workspace/plugins/greeter/index.ts")).toBe(true);
-    expect(isWorkspaceMachineFile("workspace/plugins/greeter/package.json")).toBe(true);
+  test("each explicit target matches its own named case", () => {
+    expect(isWorkspaceConfigContract("workspace/config.json")).toBe(true);
+    expect(isSkillInstallMeta("workspace/skills/github-summary/install-meta.json")).toBe(true);
+    expect(isPluginSource("workspace/plugins/greeter/index.ts")).toBe(true);
+    expect(isPluginSource("workspace/plugins/greeter/package.json")).toBe(true);
   });
 
-  test("isWorkspaceMachineFile never matches user content", () => {
-    expect(isWorkspaceMachineFile("workspace/notes/README.md")).toBe(false);
-    expect(isWorkspaceMachineFile("workspace/skills/github-summary/SKILL.md")).toBe(false);
-    expect(isWorkspaceMachineFile("workspace/data/db/assistant.db")).toBe(false);
-    expect(isWorkspaceMachineFile("config.json")).toBe(false);
-  });
-
-  test("eligibility is state-relative — modern instance layouts normalize first", () => {
-    // The predicate takes state-relative paths; the plan/executor normalize
-    // via stateRelativePath before asking.
-    expect(isWorkspaceMachineFile("workspace/config.json")).toBe(true);
+  test("the explicit targets never match user content", () => {
+    for (const check of [isWorkspaceConfigContract, isSkillInstallMeta, isPluginSource]) {
+      expect(check("workspace/notes/README.md")).toBe(false);
+      expect(check("workspace/skills/github-summary/SKILL.md")).toBe(false);
+      expect(check("config.json")).toBe(false);
+    }
+    expect(isWorkspaceConfigContract("workspace/skills/x/install-meta.json")).toBe(false);
+    expect(isSkillInstallMeta("workspace/plugins/greeter/index.ts")).toBe(false);
+    // DB values are the assistant-db step's job, not a text rewrite.
+    expect(isPluginSource("workspace/data/db/assistant.db")).toBe(false);
+    expect(isRewriteEligible("workspace/data/db/assistant.db")).toBe(false);
   });
 
   test("rewriteWorkspaceJsonValues rewrites exact vellum values", () => {

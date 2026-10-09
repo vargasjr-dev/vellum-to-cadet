@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -114,9 +115,9 @@ async function writeAssistantState(root: string): Promise<void> {
   await write(root, "workspace/skills/github-summary/SKILL.md", "# GitHub summary\n\nFrom the vellum catalog.\n");
 
   // Machine runtime state inside workspace.
-  await write(root, "workspace/data/db/assistant.db", `${SQLITE_MAGIC}fake-assistant-db`);
   await write(root, "workspace/data/db/assistant.db-wal", "wal-bytes");
   await write(root, "workspace/data/db/assistant.db-shm", "shm-bytes");
+  await writeRealAssistantDb(path.join(root, "workspace/data/db/assistant.db"));
   await write(root, "workspace/data/stream-seq.json", JSON.stringify({ seq: 42 }));
   await write(root, "workspace/data/avatar/avatar.png", "png-bytes-here");
 
@@ -223,4 +224,41 @@ async function write(root: string, rel: string, content: string): Promise<void> 
   const abs = path.join(root, rel);
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, content, "utf8");
+}
+
+/**
+ * A REAL sqlite assistant db carrying the vellum-branded values the old
+ * product persisted: channel ids `'vellum'` (the desktop client channel),
+ * `vellum://` attachment links in message content, and the managed provider
+ * connection row named/typed `vellum`. The db-value migration step must
+ * rewrite all of it to cadet spellings.
+ */
+function writeRealAssistantDb(dbPath: string): void {
+  const db = new Database(dbPath);
+  db.run(`CREATE TABLE conversations (
+    id TEXT PRIMARY KEY, title TEXT, origin_channel TEXT, origin_interface TEXT, created_at INTEGER
+  )`);
+  db.run(`CREATE TABLE messages (
+    id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER,
+    metadata TEXT, user_message_channel TEXT, assistant_message_channel TEXT
+  )`);
+  db.run(`CREATE TABLE provider_connections (
+    name TEXT PRIMARY KEY, provider TEXT, auth TEXT, created_at INTEGER, updated_at INTEGER
+  )`);
+  db.run(`CREATE TABLE channel_inbound_events (
+    source_channel TEXT, external_chat_id TEXT, external_message_id TEXT
+  )`);
+  db.run(`INSERT INTO conversations VALUES
+    ('c1', 'Desktop chat', 'vellum', 'text', 1),
+    ('c2', 'Telegram chat', 'telegram', 'text', 2)`);
+  db.run(`INSERT INTO messages VALUES
+    ('m1', 'c1', 'user', 'Here it is: [report.md](vellum://workspace/report.md)', 1,
+     '{"channel":"vellum"}', 'vellum', 'vellum'),
+    ('m2', 'c2', 'assistant', 'plain reply, no links', 2,
+     '{"channel":"telegram"}', 'telegram', 'telegram')`);
+  db.run(`INSERT INTO provider_connections VALUES
+    ('vellum', 'vellum', '{"type":"platform"}', 1, 1),
+    ('openai', 'openai', '{"type":"api_key"}', 2, 2)`);
+  db.run(`INSERT INTO channel_inbound_events VALUES ('vellum', 'chat-1', 'evt-1')`);
+  db.close();
 }
