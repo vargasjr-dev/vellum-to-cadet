@@ -34,12 +34,14 @@ export async function buildFullVellum0126(home?: string): Promise<BuiltFixture> 
 export async function buildModernVellum(
   home?: string,
   dirName = "vellum",
+  /** The assistant handle (the dir under assistants/). */
+  assistantName = "velly",
 ): Promise<BuiltFixture> {
   // Neutral prefix — the temp home shows up verbatim inside machine files
   // that embed absolute state paths.
   const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "cadet-migrate-")));
   const root = path.join(tempHome, ".local", "share", dirName);
-  const state = path.join(root, "assistants", "velly", ".vellum");
+  const state = path.join(root, "assistants", assistantName, ".vellum");
   await writeAssistantState(state);
   return { root, home: tempHome };
 }
@@ -223,14 +225,15 @@ async function writeAssistantState(root: string): Promise<void> {
     "---\nname: github-summary\ndescription: Summarize commits\n---\n\nUse $VELLUM_ROOT_DIR to find the root.\n",
   );
 
-  // Gateway state at the STATE ROOT (vellum 0.12.6): the gateway DB lived
-  // at <root>/data/gateway.sqlite and cadet's gateway reads it only from
-  // gateway-security — the migrator owns the relocation. It is a REAL db
-  // carrying the gateway's own channel-branded rows; the value-migration
-  // step rewrites them after the relocation. The -wal sidecar is fake bytes
-  // on purpose: an invalid WAL is tolerated (treated as empty) by SQLite.
-  await writeRealGatewayDb(path.join(root, "data/gateway.sqlite"));
-  await write(root, "data/gateway.sqlite-wal", "gateway-wal-bytes");
+  // Gateway state (vellum 0.12.6): the gateway DB lives under protected/
+  // (seen in the wild at <state>/.vellum/protected/gateway.sqlite) and
+  // cadet's gateway reads it only from gateway-security — the migrator
+  // owns the relocation. It is a REAL db carrying the gateway's own
+  // channel-branded rows; the value-migration step rewrites them after
+  // the relocation. The -wal sidecar is fake bytes on purpose: an invalid
+  // WAL is tolerated (treated as empty) by SQLite.
+  await writeRealGatewayDb(path.join(root, "protected/gateway.sqlite"));
+  await write(root, "protected/gateway.sqlite-wal", "gateway-wal-bytes");
 
   // Root-level guardian-init lock (pre-0.12 straggler; 0.12 kept it in
   // protected/ which dissolves there anyway).

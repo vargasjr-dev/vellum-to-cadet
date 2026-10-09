@@ -89,8 +89,20 @@ export const GATEWAY_CHANNEL_COLUMNS: ReadonlyArray<{ table: string; column: str
 /** State-relative path of the assistant db — how the copy plan addresses it. */
 export const ASSISTANT_DB_STATE_REL = `${USER_WORKSPACE_DIR}/data/db/assistant.db`;
 
-/** State-relative path of the gateway db (pre-relocation, vellum 0.12.6). */
-export const GATEWAY_DB_STATE_REL = "data/gateway.sqlite";
+/**
+ * State-relative source forms of the gateway db. Real vellum 0.12.6 keeps it
+ * inside the assistant's protected/ dir (dissolved to gateway-security/ by
+ * the protected-dir rules); the state-root data/ form is the older shape.
+ */
+export const GATEWAY_DB_STATE_RELS: ReadonlyArray<string> = [
+  "protected/gateway.sqlite",
+  "data/gateway.sqlite",
+];
+
+/** True when a state-relative path is the gateway db's source location. */
+export function isGatewayDbStateRel(stateRel: string): boolean {
+  return GATEWAY_DB_STATE_RELS.includes(stateRel);
+}
 
 export async function migrateAssistantDb(
   detect: DetectInfo,
@@ -186,6 +198,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     };
   }
 
+  const issues: StepIssue[] = [];
   try {
     const substeps: Record<string, number> = {};
     const tableExists = (name: string): boolean =>
@@ -199,21 +212,39 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       const row = db.prepare(`SELECT changes() AS c`).get() as { c: number } | null;
       return row?.c ?? 0;
     };
+    /** A weird db never fails the migration — it becomes a nested ⚠. */
+    const note = (what: string, err: unknown): void => {
+      issues.push({
+        severity: "warning",
+        message: `${what}: ${(err as Error).message} — skipped, continuing`,
+      });
+    };
 
-    // "channel values": every channel-id column, 'vellum' → 'cadet'.
+    // "channel values": every channel-id column, 'vellum' → 'cadet'. Each
+    // column is its own transaction of one: a table that exists but lacks
+    // the expected column (an older schema, a future rename) skips that
+    // column only — the remaining columns still migrate.
     let channelRows = 0;
     for (const { table, column } of columns) {
       if (!tableExists(table)) continue;
-      channelRows += runCounted(
-        `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
-      );
+      try {
+        channelRows += runCounted(
+          `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
+        );
+      } catch (err) {
+        note(`${table}.${column}`, err);
+      }
     }
     if (options.rewriteMessages && tableExists("messages")) {
       // Message metadata records channel refs as JSON string values.
-      channelRows += runCounted(
-        `UPDATE messages SET metadata = REPLACE(metadata, '"vellum"', '"cadet"')
-         WHERE metadata LIKE '%"vellum"%'`,
-      );
+      try {
+        channelRows += runCounted(
+          `UPDATE messages SET metadata = REPLACE(metadata, '"vellum"', '"cadet"')
+           WHERE metadata LIKE '%"vellum"%'`,
+        );
+      } catch (err) {
+        note("messages.metadata", err);
+      }
     }
     substeps["channel values"] = channelRows;
 
@@ -221,10 +252,14 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       // "attachment links": vellum:// attachment URIs in message content.
       let linkRows = 0;
       if (tableExists("messages")) {
-        linkRows += runCounted(
-          `UPDATE messages SET content = REPLACE(content, 'vellum://', 'cadet://')
-           WHERE content LIKE '%vellum://%'`,
-        );
+        try {
+          linkRows += runCounted(
+            `UPDATE messages SET content = REPLACE(content, 'vellum://', 'cadet://')
+             WHERE content LIKE '%vellum://%'`,
+          );
+        } catch (err) {
+          note("messages.content (attachment links)", err);
+        }
       }
       substeps["attachment links"] = linkRows;
     }
@@ -237,14 +272,18 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       // would make the PK collide).
       let connectionRows = 0;
       if (tableExists("provider_connections")) {
-        connectionRows += runCounted(
-          `UPDATE provider_connections SET provider = 'cadet' WHERE provider = 'vellum'`,
-        );
-        connectionRows += runCounted(
-          `UPDATE provider_connections SET name = 'cadet'
-           WHERE name = 'vellum'
-             AND NOT EXISTS (SELECT 1 FROM provider_connections WHERE name = 'cadet')`,
-        );
+        try {
+          connectionRows += runCounted(
+            `UPDATE provider_connections SET provider = 'cadet' WHERE provider = 'vellum'`,
+          );
+          connectionRows += runCounted(
+            `UPDATE provider_connections SET name = 'cadet'
+             WHERE name = 'vellum'
+               AND NOT EXISTS (SELECT 1 FROM provider_connections WHERE name = 'cadet')`,
+          );
+        } catch (err) {
+          note("provider_connections", err);
+        }
       }
       substeps["provider connections"] = connectionRows;
     }
@@ -254,25 +293,29 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     const parts = Object.entries(substeps)
       .filter(([, n]) => n > 0)
       .map(([name, n]) => `${name}: ${n} row(s)`);
+    const warningNote = issues.length > 0 ? ` — ${issues.length} skipped (see ⚠)` : "";
     return {
       step,
       status: "completed",
-      summary: parts.length > 0 ? `${label} — ${parts.join(", ")}` : `${label} — nothing to rewrite`,
+      summary: parts.length > 0
+        ? `${label} — ${parts.join(", ")}${warningNote}`
+        : `${label} — nothing to rewrite${warningNote}`,
+      issues,
       data: { substeps, dbPath: destRel },
     };
   } catch (err) {
-    const issues: StepIssue[] = [
-      { severity: "error", message: `${label} value migration failed: ${(err as Error).message}` },
-    ];
+    // Total surprise (locked db, corrupt page): the BACKUP is the safety
+    // net, not this step's exit code. Keep going, say what happened.
     try {
       db.close();
     } catch {
       // already closed
     }
+    issues.push({ severity: "warning", message: (err as Error).message });
     return {
       step,
-      status: "failed",
-      summary: `${label} value migration failed: ${(err as Error).message}`,
+      status: "completed",
+      summary: `${label} value migration hit ${(err as Error).message} — left as-is (see ⚠)`,
       issues,
     };
   }

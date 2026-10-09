@@ -17,6 +17,40 @@ const execFileAsync = promisify(execFile);
  */
 export const defaultProcessOps: ProcessOps = {
   async find(patterns) {
+    return defaultFind(patterns);
+  },
+
+  async vellumVersion() {
+    try {
+      const { stdout } = await execFileAsync("vellum", ["--version"]);
+      // First line only, accepting both "0.12.6" and "vellum 0.12.6". If it
+      // doesn't look like a version at all (an unrelated binary answered),
+      // fall back to the marker files.
+      const line = stdout.split("\n")[0]?.trim().replace(/^vellum\s+/i, "") ?? "";
+      return /^v?\d/.test(line) ? line : null;
+    } catch {
+      // No CLI on PATH (or it refused) — marker-file detection is the fallback.
+      return null;
+    }
+  },
+
+  async vellumSleep(assistant?: string) {
+    // Stopping the assistant is the vellum CLI's own logic — its sleep
+    // command knows how its processes are organized. We deliberately do
+    // NOT reimplement signal escalation here: custom process killing has
+    // hit unrelated processes before.
+    await execFileAsync("vellum", assistant ? ["sleep", assistant] : ["sleep"]);
+  },
+
+  async cadetSleep() {
+    // Same contract, cadet side: repair mutates the cadet root, so it is
+    // the cadet CLI's sleep command that owns stopping — --all covers
+    // every assistant under the root, not just one.
+    await execFileAsync("cadet", ["sleep", "--all"]);
+  },
+};
+
+async function defaultFind(patterns: string[]) {
     const found: Array<{ pid: number; command: string }> = [];
     const seen = new Set<number>();
     const protectedPids = await ownAncestryPids();
@@ -43,23 +77,7 @@ export const defaultProcessOps: ProcessOps = {
       }
     }
     return found;
-  },
-
-  async vellumSleep(assistant?: string) {
-    // Stopping the assistant is the vellum CLI's own logic — its sleep
-    // command knows how its processes are organized. We deliberately do
-    // NOT reimplement signal escalation here: custom process killing has
-    // hit unrelated processes before.
-    await execFileAsync("vellum", assistant ? ["sleep", assistant] : ["sleep"]);
-  },
-
-  async cadetSleep() {
-    // Same contract, cadet side: repair mutates the cadet root, so it is
-    // the cadet CLI's sleep command that owns stopping — --all covers
-    // every assistant under the root, not just one.
-    await execFileAsync("cadet", ["sleep", "--all"]);
-  },
-};
+}
 
 /** Patterns used for discovery (specific assistant process signatures). */
 export function discoveryPatterns(): string[] {

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { DetectInfo, DockerDeployment, MigrateOptions, ProcessOps } from "../types.js";
 import { discoveryPatterns } from "../process.js";
 import { treeSize } from "../fs-utils.js";
-import { LEGACY_INSTANCE_NAME } from "../layout.js";
+import { handleToInstanceName, LEGACY_INSTANCE_NAME } from "../layout.js";
 
 export const DEFAULT_VELLUM_ROOT = path.join(os.homedir(), ".vellum");
 
@@ -79,6 +79,21 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     ? await ops.find(discoveryPatterns())
     : [];
 
+  // Modern-layout assistant dir names (the handles, e.g.
+  // "vellum-fresh-eel-8di6pa"). The migration names the cadet instance
+  // after the handle, not our own default.
+  const assistantHandles: string[] = [];
+  if (vellumRootExists) {
+    try {
+      for (const name of await fs.readdir(path.join(vellumRoot, "assistants"), { withFileTypes: true })) {
+        if (name.isDirectory()) assistantHandles.push(name.name);
+      }
+      assistantHandles.sort();
+    } catch {
+      // Legacy single-root layout — no assistants/ dir.
+    }
+  }
+
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
   const docker = await readDockerLockfileEvidence();
 
@@ -89,7 +104,8 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     cadetRootExists,
     cadetRootPopulated,
     previousManifest,
-    version: await detectVersion(vellumRoot),
+    version: (await ops.vellumVersion()) ?? (await detectVersion(vellumRoot)),
+    assistantHandles,
     deploymentKind: await detectDeploymentKind(vellumRoot, docker),
     docker,
     runningProcesses,
@@ -151,7 +167,9 @@ async function detectDeploymentKind(
   } catch {
     // Not a modern root.
   }
-  return "unknown";
+  // The root lives on the host filesystem and nothing says docker — a host
+  // install whose desktop marker just isn't where we looked.
+  return "host";
 }
 
 const VELLUM_LOCKFILE_NAMES = [".vellum.lock.json", ".vellum.lockfile.json"];
@@ -358,13 +376,16 @@ export async function resolveMigrationTarget(
     : path.join(detect.cadetRoot, "assistants");
   const baseName = path.basename(path.dirname(detect.cadetRoot)) === "assistants"
     ? path.basename(detect.cadetRoot)
-    : LEGACY_INSTANCE_NAME;
+    : handleToInstanceName(detect.assistantHandles[0] ?? "");
 
   // A previous run against this same shape may have landed in a suffixed
   // instance already — its manifest makes this run verify-only.
   try {
     const entries = await fs.readdir(parent);
-    for (const name of [baseName, ...suffixedNames(baseName)]) {
+    const legacyNames = baseName === LEGACY_INSTANCE_NAME
+      ? []
+      : [LEGACY_INSTANCE_NAME, ...suffixedNames(LEGACY_INSTANCE_NAME)];
+    for (const name of [baseName, ...suffixedNames(baseName), ...legacyNames]) {
       if (!entries.includes(name)) continue;
       const candidate = path.join(parent, name);
       const files = await fs.readdir(candidate);
