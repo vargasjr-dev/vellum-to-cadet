@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 
@@ -452,6 +453,24 @@ describe("e2e: legacy home-level lockfile move", () => {
       const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
       expect(lockStep?.status).toBe("completed");
       expect(lockStep?.summary).toContain(".cadet.lock.json");
+      // TEMP DEBUG: CI-only failure diagnosis — remove after root-cause.
+      console.log(
+        "LOCKFILE-DEBUG",
+        JSON.stringify(
+          {
+            lockStep,
+            home,
+            envHome: process.env.HOME,
+            osHomedir: os.homedir(),
+            tmp: os.tmpdir(),
+            xdgConfigHome: process.env.XDG_CONFIG_HOME ?? null,
+            homeTopLevel: await fs.readdir(home),
+            configDirListing: await fs.readdir(path.join(home, ".config")).catch((e: Error & { code?: string }) => `ERR ${e.code}`),
+          },
+          null,
+          2,
+        ),
+      );
       // The file MOVED — the config dir now holds it, the home level does not.
       expect(
         await fs.access(path.join(home, ".config", "cadet", "lockfile.json")).then(
