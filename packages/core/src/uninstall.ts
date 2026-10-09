@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { defaultProcessOps } from "./process.js";
-import { VELLUM_PROCESS_PATTERNS } from "./layout.js";
 import { EXIT_CODES, type ExitCode, type ProcessOps } from "./types.js";
 
 /**
@@ -14,7 +13,9 @@ import { EXIT_CODES, type ExitCode, type ProcessOps } from "./types.js";
  * command you run AFTER you've confirmed your cadet assistant is whole and
  * you want vellum gone for good. It:
  *
- *   1. stops any running vellum assistants (`vellum sleep`)
+ *   1. asks the vellum CLI to put any running assistants to sleep — the
+ *      CLI's own command, never pattern-matched process killing (pgrep
+ *      guessing at what "belongs" to vellum is how unrelated processes die)
  *   2. deletes every vellum installation on the machine — the legacy home
  *      root, the modern XDG data roots, the XDG config dirs (including
  *      env-suffixed siblings), and the old home-level lockfiles
@@ -64,7 +65,8 @@ export interface UninstallReport {
   exitCode: ExitCode;
   mode: "uninstall";
   dryRun: boolean;
-  stopped: Array<{ pid: number; command: string }>;
+  /** True when `vellum sleep` was invoked (best-effort, best when it works). */
+  slept: boolean;
   targets: UninstallTargetResult[];
   /** The npx cache entry removed for the migrator itself, if any. */
   selfRemoved: string | null;
@@ -245,7 +247,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<Unin
     exitCode: EXIT_CODES.ok,
     mode: "uninstall",
     dryRun: options.dryRun === true,
-    stopped: [],
+    slept: false,
     targets: [],
     selfRemoved: null,
     backupsKept: null,
@@ -261,23 +263,18 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<Unin
   const backups = path.join(homeDir, ".cadet-migration-backups");
   if (await exists(backups)) report.backupsKept = backups;
 
-  // Running assistants go to sleep before anything is examined for
-  // deletion — deleting a live assistant's data mid-write is how disks
-  // learn lies.
-  const running = await ops.find([...VELLUM_PROCESS_PATTERNS]);
-  if (running.length > 0) {
+  // Running assistants go to sleep before anything is deleted — deleting a
+  // live assistant's data mid-write is how disks learn lies. The vellum
+  // CLI owns the decision of what is actually running; we never guess.
+  if (!options.dryRun) {
     try {
       await ops.vellumSleep();
+      report.slept = true;
     } catch {
-      // No vellum CLI (or it failed) — the re-check below decides.
+      // No vellum CLI (nothing to sleep) or it failed — the DELETE
+      // confirmation is the user's moment to make sure everything is
+      // stopped before the point of no return.
     }
-    const stillRunning = await ops.find([...VELLUM_PROCESS_PATTERNS]);
-    if (stillRunning.length > 0) {
-      report.stopped = stillRunning;
-      report.exitCode = EXIT_CODES.runningProcesses;
-      return finish();
-    }
-    report.stopped = running;
   }
 
   const targets = await gatherUninstallTargets();
@@ -389,8 +386,8 @@ export function renderUninstallHuman(report: UninstallReport): string {
     lines.push(`  ${icon} ${target.path} ${dim(`(${target.origin})`)}`);
     if (target.reason) lines.push(`      ${target.reason}`);
   }
-  if (report.stopped.length > 0) {
-    lines.push(`  \u2713 stopped ${report.stopped.length} running vellum assistant${report.stopped.length === 1 ? "" : "s"} (vellum sleep)`);
+  if (report.slept) {
+    lines.push(`  \u2713 asked the vellum CLI to put running assistants to sleep (vellum sleep)`);
   }
   if (report.selfRemoved) {
     lines.push(`  \u2713 removed the migrator's npx cache: ${report.selfRemoved}`);
