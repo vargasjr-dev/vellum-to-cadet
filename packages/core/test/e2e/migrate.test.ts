@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 
@@ -440,6 +439,10 @@ describe("e2e: legacy home-level lockfile move", () => {
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     const prevHome = process.env.HOME;
     process.env.HOME = home;
+    // An ambient XDG_CONFIG_HOME (CI runners set it) would hijack the
+    // destination out of the sandboxed home — sandbox it like HOME.
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
     try {
       // A pre-move cadet install left its identity file at the home level.
       await fs.writeFile(
@@ -453,24 +456,6 @@ describe("e2e: legacy home-level lockfile move", () => {
       const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
       expect(lockStep?.status).toBe("completed");
       expect(lockStep?.summary).toContain(".cadet.lock.json");
-      // TEMP DEBUG: CI-only failure diagnosis — remove after root-cause.
-      console.log(
-        "LOCKFILE-DEBUG",
-        JSON.stringify(
-          {
-            lockStep,
-            home,
-            envHome: process.env.HOME,
-            osHomedir: os.homedir(),
-            tmp: os.tmpdir(),
-            xdgConfigHome: process.env.XDG_CONFIG_HOME ?? null,
-            homeTopLevel: await fs.readdir(home),
-            configDirListing: await fs.readdir(path.join(home, ".config")).catch((e: Error & { code?: string }) => `ERR ${e.code}`),
-          },
-          null,
-          2,
-        ),
-      );
       // The file MOVED — the config dir now holds it, the home level does not.
       expect(
         await fs.access(path.join(home, ".config", "cadet", "lockfile.json")).then(
@@ -487,6 +472,8 @@ describe("e2e: legacy home-level lockfile move", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
     }
   });
 
@@ -495,6 +482,8 @@ describe("e2e: legacy home-level lockfile move", () => {
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     const prevHome = process.env.HOME;
     process.env.HOME = home;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
     try {
       await fs.mkdir(path.join(home, ".config", "cadet"), { recursive: true });
       await fs.writeFile(
@@ -523,6 +512,8 @@ describe("e2e: legacy home-level lockfile move", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
     }
   });
 });
