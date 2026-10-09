@@ -1,8 +1,8 @@
-import { Database } from "bun:sqlite";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import { USER_WORKSPACE_DIR } from "../layout.js";
+import { openSqliteDatabase, type SqliteDatabase } from "../sqlite.js";
 import type { DetectInfo, StepIssue, StepResult } from "../types.js";
 
 /**
@@ -172,12 +172,12 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     return { step, status: "skipped", summary: `no ${label} in the migrated workspace` };
   }
 
-  let db: Database;
+  let db: SqliteDatabase;
   try {
     // Opening recovers/checkpoints any copied -wal sidecar: committed frames
     // still sitting in the WAL are replayed into the main db BEFORE the
     // rewrites below run, so WAL-resident vellum rows are rewritten too.
-    db = new Database(dbPath);
+    db = await openSqliteDatabase(dbPath);
   } catch (err) {
     return {
       step,
@@ -190,13 +190,13 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     const substeps: Record<string, number> = {};
     const tableExists = (name: string): boolean =>
       !!db
-        .query(
+        .prepare(
           `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
         )
         .get(name);
     const runCounted = (sql: string): number => {
-      db.run(sql);
-      const row = db.query(`SELECT changes() AS c`).get() as { c: number } | null;
+      db.exec(sql);
+      const row = db.prepare(`SELECT changes() AS c`).get() as { c: number } | null;
       return row?.c ?? 0;
     };
 

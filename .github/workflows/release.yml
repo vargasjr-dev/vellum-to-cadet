@@ -55,6 +55,15 @@ jobs:
       - name: Build
         run: bun run build
 
+      # The suite above runs under bun; users run the published package under
+      # node. Gate the release on the node-runtime sqlite path too.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Node-runtime sqlite smoke
+        run: node scripts/node-sqlite-smoke.mjs
+
       - name: Setup node for npm publish
         uses: actions/setup-node@v4
         with:

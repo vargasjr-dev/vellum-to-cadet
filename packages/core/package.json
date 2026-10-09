@@ -21,7 +21,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=22.13.0"
   },
   "repository": {
     "type": "git",
