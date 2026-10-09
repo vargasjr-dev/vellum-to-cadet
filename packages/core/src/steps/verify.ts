@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -12,6 +11,7 @@ import {
   walkTree,
 } from "../fs-utils.js";
 import { DEFAULT_TARGET_CTX, type MigrationTargetCtx } from "../layout.js";
+import { openSqliteDatabase, type SqliteDatabase } from "../sqlite.js";
 import {
   ASSISTANT_DB_STATE_REL,
   CHANNEL_COLUMNS,
@@ -183,36 +183,36 @@ export async function dbVellumRows(
   dbPath: string,
   spec: { columns: ReadonlyArray<{ table: string; column: string }>; messages?: boolean; connections?: boolean },
 ): Promise<number | "unreadable"> {
-  let db: Database;
+  let db: SqliteDatabase;
   try {
-    db = new Database(dbPath, { readonly: true });
+    db = await openSqliteDatabase(dbPath, { readonly: true });
   } catch {
     return "unreadable";
   }
   try {
     let total = 0;
     const tableExists = (name: string): boolean =>
-      !!db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
+      !!db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
     for (const { table, column } of spec.columns) {
       if (!tableExists(table)) continue;
       const row = db
-        .query(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
+        .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
         .get() as { c: number } | null;
       total += row?.c ?? 0;
     }
     if (spec.messages && tableExists("messages")) {
       const links = db
-        .query(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
+        .prepare(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
         .get() as { c: number } | null;
       total += links?.c ?? 0;
       const meta = db
-        .query(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
+        .prepare(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
         .get() as { c: number } | null;
       total += meta?.c ?? 0;
     }
     if (spec.connections && tableExists("provider_connections")) {
       const conns = db
-        .query(
+        .prepare(
           `SELECT COUNT(*) AS c FROM provider_connections WHERE name = 'vellum' OR provider = 'vellum'`,
         )
         .get() as { c: number } | null;

@@ -11,7 +11,7 @@
     "bin"
   ],
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@mycadet/vellum": "^0.0.4"
