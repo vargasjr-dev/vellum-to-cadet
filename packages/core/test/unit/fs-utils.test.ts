@@ -7,7 +7,9 @@ import {
   rewritePersonaPrompt,
   sanctionedContentTransform,
 } from "../../src/fs-utils.js";
-import { DEFAULT_TARGET_CTX } from "../../src/layout.js";
+import {
+  consolidateDefaultProvider,
+ DEFAULT_TARGET_CTX } from "../../src/layout.js";
 import { expect } from "../helpers/expect.js";
 
 describe("formatBytes", () => {
@@ -127,5 +129,82 @@ describe("sanctionedContentTransform — the shared dispatch", () => {
   test("unmapped files return null (generic machine-file treatment)", () => {
     expect(sanctionedContentTransform("hooks/on-wake.sh", "VELLUM_")).toBeNull();
     expect(sanctionedContentTransform("workspace/notes/vellum-history.md", "vellum")).toBeNull();
+  });
+});
+
+describe("consolidateDefaultProvider — the blob is the one selection key", () => {
+  const config = (llm: Record<string, unknown>): string =>
+    JSON.stringify({ llm, services: {} }, null, 2) + "\n";
+
+  test("a valid retired key stamps the blob and is deleted", () => {
+    const out = consolidateDefaultProvider(
+      config({
+        defaultProvider: { provider: "anthropic", connectionName: "anthropic-personal" },
+        default: { provider: "together", model: "x" },
+      }),
+    );
+    expect(out).not.toBeNull();
+    const parsed = JSON.parse(out!);
+    expect(parsed.llm.defaultProvider).toBeUndefined();
+    expect(parsed.llm.default).toEqual({
+      provider: "anthropic",
+      provider_connection: "anthropic-personal",
+      model: "x",
+    });
+  });
+
+  test("key-only installs get a blob", () => {
+    const out = consolidateDefaultProvider(
+      config({ defaultProvider: { provider: "openai" } }),
+    );
+    expect(JSON.parse(out!).llm.default).toEqual({ provider: "openai" });
+  });
+
+  test("no explicit pin + provider change drops the old provider's pin", () => {
+    const out = consolidateDefaultProvider(
+      config({
+        defaultProvider: { provider: "openai" },
+        default: { provider: "anthropic", provider_connection: "anthropic-personal" },
+      }),
+    );
+    expect(JSON.parse(out!).llm.default).toEqual({ provider: "openai" });
+  });
+
+  test("no explicit pin + unchanged provider keeps the pin", () => {
+    const out = consolidateDefaultProvider(
+      config({
+        defaultProvider: { provider: "openai" },
+        default: { provider: "openai", provider_connection: "work-openai" },
+      }),
+    );
+    expect(JSON.parse(out!).llm.default).toEqual({
+      provider: "openai",
+      provider_connection: "work-openai",
+    });
+  });
+
+  test("a key with no usable provider is left alone", () => {
+    const raw = config({ defaultProvider: { connectionName: "x" } });
+    expect(consolidateDefaultProvider(raw)).toBeNull();
+    expect(consolidateDefaultProvider(config({}))).toBeNull();
+    expect(consolidateDefaultProvider("not json {{{")).toBeNull();
+  });
+
+  test("is idempotent — the consolidated config maps to itself", () => {
+    const once = consolidateDefaultProvider(
+      config({
+        defaultProvider: { provider: "openai", connectionName: "work-openai" },
+        default: { provider: "together" },
+      }),
+    )!;
+    expect(consolidateDefaultProvider(once)).toBeNull();
+  });
+
+  test("the config.json rewrite substep reports the consolidation", () => {
+    const out = sanctionedContentTransform(
+      "workspace/config.json",
+      config({ defaultProvider: { provider: "openai" } }),
+    );
+    expect(out?.counts["default-provider consolidation"]).toBe(1);
   });
 });
