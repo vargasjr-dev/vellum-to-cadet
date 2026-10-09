@@ -39,6 +39,7 @@ export interface DetectInfo {
   previousManifest: boolean;
   version: string | null;
   deploymentKind: "desktop" | "docker" | "unknown";
+  docker: DockerDeployment;
   runningProcesses: Array<{ pid: number; command: string }>;
   rootSizeBytes: number;
   externalReferences: string[];
@@ -80,6 +81,22 @@ export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
   /** Ask the vellum CLI to put its assistant to sleep. */
   vellumSleep(): Promise<void>;
+  /** Names of RUNNING docker containers ([] when docker is unavailable). */
+  dockerPs?(): Promise<string[]>;
+  /** Stop the named containers — the same mechanism `vellum sleep` uses. */
+  dockerStop?(names: string[]): Promise<void>;
+}
+
+/** Evidence that a vellum root belongs to a containerized deployment. */
+export interface DockerDeployment {
+  /** Instance names whose lockfile entry records docker topology. */
+  instances: string[];
+  /** Running containers matching vellum's service naming (via docker ps). */
+  runningContainers: string[];
+  /** Compose files near the root that reference it as a mount. */
+  composeFiles: string[];
+  /** Docker images recorded in the lockfile's containerInfo. */
+  images: string[];
 }
 
 export interface MigrationReport {

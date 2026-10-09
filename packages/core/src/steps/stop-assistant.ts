@@ -17,7 +17,8 @@ export async function stopAssistant(
   graceMs = 5_000,
 ): Promise<StepResult> {
   const running = detect.runningProcesses;
-  if (running.length === 0) {
+  const containers = detect.docker.runningContainers;
+  if (running.length === 0 && containers.length === 0) {
     return { step: "stop-assistant", status: "skipped", summary: "no running vellum processes" };
   }
 
@@ -51,12 +52,64 @@ export async function stopAssistant(
     };
   }
 
+  // Docker topology: `vellum sleep` stops containers itself when the CLI is
+  // present; if any survived (CLI missing, daemon hiccup), stop them the same
+  // way the CLI does. We still never signal host processes ourselves.
+  let stoppedContainers: string[] = [];
+  let stillUpContainers = containers;
+  if (containers.length > 0 && ops.dockerPs) {
+    stillUpContainers = await aliveContainers(ops, containers);
+    if (stillUpContainers.length > 0 && ops.dockerStop) {
+      try {
+        await ops.dockerStop(stillUpContainers);
+      } catch (err) {
+        issues.push({
+          severity: "warning",
+          message: `docker stop failed (${(err as Error).message})`,
+        });
+      }
+      await sleep(graceMs);
+      stillUpContainers = await aliveContainers(ops, containers);
+      stoppedContainers = containers.filter((name) => !stillUpContainers.includes(name));
+    } else {
+      stoppedContainers = containers;
+    }
+  }
+
+  if (stillUpContainers.length > 0) {
+    return {
+      step: "stop-assistant",
+      status: "failed",
+      summary: `${stillUpContainers.length} docker container(s) still running — stop them and retry`,
+      issues: [
+        ...issues,
+        ...stillUpContainers.map((name) => ({
+          severity: "error" as const,
+          message: `container ${name}`,
+        })),
+      ],
+    };
+  }
+
+  const containerNote =
+    containers.length > 0 ? `; ${containers.length} docker container(s) stopped` : "";
   return {
     step: "stop-assistant",
     status: "completed",
-    summary: "`vellum sleep` accepted; no vellum processes remain",
+    summary: `\`vellum sleep\` accepted; no vellum processes remain${containerNote}`,
     issues,
+    data: stoppedContainers.length > 0 ? { stoppedContainers } : undefined,
   };
+}
+
+async function aliveContainers(ops: ProcessOps, names: string[]): Promise<string[]> {
+  try {
+    const running = new Set(await ops.dockerPs!());
+    return names.filter((name) => running.has(name));
+  } catch {
+    // docker unreachable — treat the known containers as still up.
+    return names;
+  }
 }
 
 function sleep(ms: number): Promise<void> {

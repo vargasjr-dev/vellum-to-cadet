@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { DetectInfo, MigrateOptions, ProcessOps } from "../types.js";
+import type { DetectInfo, DockerDeployment, MigrateOptions, ProcessOps } from "../types.js";
 import { discoveryPatterns } from "../process.js";
 import { treeSize } from "../fs-utils.js";
 import { LEGACY_INSTANCE_NAME } from "../layout.js";
@@ -80,6 +80,7 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     : [];
 
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
+  const docker = await detectDockerDeployment(vellumRoot, ops);
 
   return {
     vellumRoot,
@@ -89,7 +90,8 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     cadetRootPopulated,
     previousManifest,
     version: await detectVersion(vellumRoot),
-    deploymentKind: await detectDeploymentKind(vellumRoot),
+    deploymentKind: await detectDeploymentKind(vellumRoot, docker),
+    docker,
     runningProcesses,
     rootSizeBytes,
     externalReferences: await detectExternalReferences(vellumRoot),
@@ -124,8 +126,16 @@ async function detectVersion(vellumRoot: string): Promise<string | null> {
 
 async function detectDeploymentKind(
   vellumRoot: string,
+  docker: DetectInfo["docker"],
 ): Promise<DetectInfo["deploymentKind"]> {
   if (await pathExists("/.dockerenv")) return "docker";
+  if (
+    docker.instances.length > 0 ||
+    docker.runningContainers.length > 0 ||
+    docker.composeFiles.length > 0
+  ) {
+    return "docker";
+  }
   if (
     await pathExists(
       path.join(vellumRoot, ".vellum-assistant"),
@@ -148,6 +158,148 @@ async function detectDeploymentKind(
     // Not a modern root.
   }
   return "unknown";
+}
+
+/** Container names the vellum CLI derives for an instance's service group. */
+export function dockerContainerNames(instanceName: string): string[] {
+  return [
+    `${instanceName}-assistant`,
+    `${instanceName}-gateway`,
+    `${instanceName}-credential-executor`,
+  ];
+}
+
+const VELLUM_LOCKFILE_NAMES = [".vellum.lock.json", ".vellum.lockfile.json"];
+
+const COMPOSE_FILE_NAMES = [
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "compose.yml",
+  "compose.yaml",
+];
+
+function homeDir(): string {
+  return process.env.HOME?.trim() || os.homedir();
+}
+
+interface RawLockfileEntry {
+  assistantId?: unknown;
+  name?: unknown;
+  cloud?: unknown;
+  containerInfo?: {
+    assistantImage?: unknown;
+    gatewayImage?: unknown;
+    cesImage?: unknown;
+  } | null;
+}
+
+/**
+ * Read the vellum lockfile (the same file `vellum ps` is derived from) and
+ * return the instances it records as docker-deployed, plus their images.
+ * Best-effort: a missing, malformed, or lockless install yields no evidence.
+ */
+export async function readDockerLockfileEvidence(): Promise<{
+  instances: string[];
+  images: string[];
+}> {
+  const home = homeDir();
+  const candidates: string[] = [];
+  const lockfileDir = process.env.VELLUM_LOCKFILE_DIR?.trim();
+  if (lockfileDir) {
+    candidates.push(path.join(lockfileDir, "lockfile.json"));
+  }
+  for (const name of VELLUM_LOCKFILE_NAMES) {
+    candidates.push(path.join(home, name));
+  }
+  try {
+    for (const entry of await fs.readdir(path.join(home, ".config"))) {
+      if (entry === "vellum" || entry.startsWith("vellum-")) {
+        candidates.push(path.join(home, ".config", entry, "lockfile.json"));
+      }
+    }
+  } catch {
+    // No XDG config dir — fine.
+  }
+
+  const instances = new Set<string>();
+  const images = new Set<string>();
+  for (const candidate of candidates) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(candidate, "utf8");
+    } catch {
+      continue;
+    }
+    let parsed: { assistants?: RawLockfileEntry[] };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    for (const entry of parsed.assistants ?? []) {
+      if (entry.cloud !== "docker" || typeof entry.assistantId !== "string") continue;
+      instances.add(entry.assistantId);
+      for (const image of [
+        entry.containerInfo?.assistantImage,
+        entry.containerInfo?.gatewayImage,
+        entry.containerInfo?.cesImage,
+      ]) {
+        if (typeof image === "string" && image.length > 0) images.add(image);
+      }
+    }
+  }
+  return { instances: [...instances], images: [...images] };
+}
+
+/**
+ * Compose files near the root (its parent dir or the home dir) that bind-mount
+ * it — the self-hosted-docker record when no lockfile containerInfo exists.
+ */
+export async function findComposeFiles(vellumRoot: string): Promise<string[]> {
+  const found: string[] = [];
+  const dirs = new Set([path.dirname(vellumRoot), homeDir()]);
+  for (const dir of dirs) {
+    for (const name of COMPOSE_FILE_NAMES) {
+      const candidate = path.join(dir, name);
+      let raw: string;
+      try {
+        raw = await fs.readFile(candidate, "utf8");
+      } catch {
+        continue;
+      }
+      if (raw.includes(vellumRoot)) found.push(candidate);
+    }
+  }
+  return found;
+}
+
+async function detectDockerDeployment(
+  vellumRoot: string,
+  ops: ProcessOps,
+): Promise<DetectInfo["docker"]> {
+  const lockfile = await readDockerLockfileEvidence();
+  const composeFiles = await findComposeFiles(vellumRoot);
+
+  // Only trust container discovery when an instance is known from the
+  // lockfile — a bare `docker ps` would surface unrelated containers.
+  let runningContainers: string[] = [];
+  if (ops.dockerPs && lockfile.instances.length > 0) {
+    try {
+      const running = new Set(await ops.dockerPs());
+      runningContainers = lockfile.instances
+        .flatMap(dockerContainerNames)
+        .filter((name) => running.has(name));
+    } catch {
+      runningContainers = [];
+    }
+  }
+
+  return {
+    instances: lockfile.instances,
+    runningContainers,
+    composeFiles,
+    images: lockfile.images,
+  };
 }
 
 async function detectExternalReferences(vellumRoot: string): Promise<string[]> {

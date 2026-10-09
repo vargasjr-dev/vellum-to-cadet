@@ -323,6 +323,21 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const compose = await fs.readFile(composePath, "utf8");
     expect(compose).toContain(".vellum"); // never rewritten — reported instead
   });
+
+  test("a docker-compose deployment is discovered and migrated", async () => {
+    const { root, home } = await buildDockerFull();
+    const report = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: noopOps,
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.detect.deploymentKind).toBe("docker");
+    expect(report.detect.docker.composeFiles).toEqual([path.join(home, "docker-compose.yml")]);
+    // The data itself migrates like any bind-mounted root.
+    expect(await exists(path.join(home, ".cadet", "workspace", "notes", "README.md"))).toBe(true);
+  });
 });
 
 // ── helpers ──
