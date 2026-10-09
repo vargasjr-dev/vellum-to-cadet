@@ -1,24 +1,37 @@
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
+
 import { detect as detectStep, envSuffixFor, resolveMigrationTarget } from "./steps/detect.js";
 import { preflight } from "./steps/preflight.js";
-import { stopAssistant } from "./steps/stop-assistant.js";
+import { stopAssistant, stopCadet } from "./steps/stop-assistant.js";
 import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
 import {
   ASSISTANT_DB_STATE_REL,
   GATEWAY_DB_STATE_REL,
   migrateAssistantDb,
+  migrateAssistantDbAt,
   migrateGatewayDb,
+  migrateGatewayDbAt,
 } from "./steps/migrate-assistant-db.js";
 import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
-import { verify } from "./steps/verify.js";
+import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
-import { stateRelativePath } from "./fs-utils.js";
+import {
+  applySubstitutions,
+  isDbArtifact,
+  isRewriteEligible,
+  sanctionedContentTransform,
+  stateRelativePath,
+  walkTree,
+} from "./fs-utils.js";
 import {
   EXIT_CODES,
   type DetectInfo,
   type MigrationReport,
   type MigrateOptions,
+  type StepIssue,
   type StepResult,
 } from "./types.js";
 
@@ -107,7 +120,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // Already-migrated path: verify-only.
   if (target.kind === "already-migrated") {
     start("verify");
-    const v = await verify(detect.vellumRoot, detect.cadetRoot);
+    const v = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
     done(v);
     const code = v.status === "completed" ? EXIT_CODES.ok : EXIT_CODES.verifyFailed;
     return finish(detect, steps, "verify-only", startedAt, null, code);
@@ -189,7 +202,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   // 5. Verify against the backup ground truth.
   start("verify");
-  const v = await verify(detect.vellumRoot, detect.cadetRoot);
+  const v = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
   done(v);
   if (v.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.verifyFailed);
@@ -216,4 +229,292 @@ function finish(
     startedAt,
     finishedAt: new Date().toISOString(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Repair mode — re-run the idempotent value steps against an already-
+// migrated cadet root. When a user reports a migration bug after using
+// cadet for a while, `vtc repair <cadetRoot>` fixes the data in place:
+// no layout copy, no renames, no lockfile move — just the content
+// transforms (all idempotent by construction) and the db value rewrites,
+// after a fresh timestamped backup of the cadet root itself.
+// ---------------------------------------------------------------------------
+
+/** Cadet-destination-relative → state-relative: dissolve the instance dir. */
+function cadetStateRel(relPath: string): string {
+  const norm = relPath.split("\\").join("/");
+  const m = norm.match(/^assistants\/[^/]+\//);
+  return m ? norm.slice(m[0].length) : norm;
+}
+
+/** Gateway db at the cadet destination (PATH_MOVES renamed it on migrate). */
+const GATEWAY_DB_DEST_REL = "gateway-security/gateway.sqlite";
+
+interface CadetScan {
+  /** Destination-relative paths, ready for the db steps. */
+  assistantDb: string | null;
+  gatewayDb: string | null;
+  /** Rewrite-eligible, non-db files: destination-relative path + state-relative predicate path. */
+  contentFiles: Array<{ destRel: string; stateRel: string }>;
+}
+
+/** One walk of the cadet tree, classified for the repair steps. */
+async function scanCadetTree(cadetRoot: string): Promise<CadetScan> {
+  const scan: CadetScan = { assistantDb: null, gatewayDb: null, contentFiles: [] };
+  for (const entry of await walkTree(cadetRoot)) {
+    if (entry.isDirectory) continue;
+    const stateRel = cadetStateRel(entry.relPath);
+    if (stateRel === ASSISTANT_DB_STATE_REL) {
+      scan.assistantDb = entry.relPath;
+      continue;
+    }
+    if (stateRel === GATEWAY_DB_DEST_REL || stateRel === GATEWAY_DB_STATE_REL) {
+      scan.gatewayDb = entry.relPath;
+      continue;
+    }
+    if (isDbArtifact(stateRel)) continue;
+    if (!isRewriteEligible(stateRel)) continue;
+    scan.contentFiles.push({ destRel: entry.relPath, stateRel });
+  }
+  return scan;
+}
+
+/**
+ * Re-apply every sanctioned content transform in place. Idempotent by
+ * construction: each transform maps clean content to itself, so a correct
+ * root is a no-op and a buggy one gets exactly the missing edits.
+ */
+async function rewriteContent(
+  cadetRoot: string,
+  scan: CadetScan,
+  log: (msg: string) => void,
+): Promise<StepResult> {
+  const substeps: Record<string, { files: number; changes: number }> = {};
+  let filesWritten = 0;
+  for (const { destRel, stateRel } of scan.contentFiles) {
+    const abs = path.join(cadetRoot, destRel);
+    const raw = await fs.readFile(abs, "utf8");
+    const sanctioned = sanctionedContentTransform(stateRel, raw);
+    const text = sanctioned ? sanctioned.text : applySubstitutions(raw).text;
+    if (text === raw) continue;
+    await fs.writeFile(abs, text, "utf8");
+    filesWritten++;
+    const substep = sanctioned?.substep ?? "machine-file substitutions";
+    const changes = sanctioned
+      ? Object.values(sanctioned.counts).reduce((a, b) => a + b, 0)
+      : 1;
+    const s = (substeps[substep] ??= { files: 0, changes: 0 });
+    s.files++;
+    s.changes += changes;
+    log(`${substep}: ${destRel}`);
+  }
+  return {
+    step: "rewrite-content",
+    status: "completed",
+    summary:
+      filesWritten === 0
+        ? "every eligible file already matches its sanctioned transform"
+        : `${filesWritten} file(s) rewritten in place`,
+    data: { substeps },
+  };
+}
+
+/** Post-repair verification: zero vellum rows in dbs, transform-idempotent content. */
+async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepResult> {
+  const issues: StepIssue[] = [];
+  let dbsChecked = 0;
+  for (const [destRel, spec] of [
+    [scan.assistantDb, VALUE_MIGRATED_DBS[0]!],
+    [scan.gatewayDb, VALUE_MIGRATED_DBS[1]!],
+  ] as const) {
+    if (!destRel) continue;
+    dbsChecked++;
+    const leftover = await dbVellumRows(path.join(cadetRoot, destRel), spec);
+    if (leftover === "unreadable") {
+      issues.push({
+        severity: "warning",
+        message: `${destRel} is not a readable sqlite file — could not check for leftover rows`,
+      });
+    } else if (leftover > 0) {
+      issues.push({
+        severity: "error",
+        message: `${destRel} still has ${leftover} vellum-branded row(s)`,
+      });
+    }
+  }
+
+  let contentChecked = 0;
+  for (const { destRel, stateRel } of scan.contentFiles) {
+    const raw = await fs.readFile(path.join(cadetRoot, destRel), "utf8");
+    contentChecked++;
+    const sanctioned = sanctionedContentTransform(stateRel, raw);
+    if (sanctioned) {
+      if (sanctioned.text !== raw) {
+        issues.push({
+          severity: "error",
+          message: `${destRel}: ${sanctioned.substep} left legacy tokens behind`,
+        });
+      }
+      continue;
+    }
+    // Generic machine file: same leftover-token scan the migrate verify uses.
+    const leftovers = raw.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
+    if (leftovers && leftovers.length > 0) {
+      issues.push({
+        severity: "error",
+        message: `${destRel}: ${leftovers.length} leftover vellum token(s)`,
+      });
+    }
+  }
+
+  if (issues.some((i) => i.severity === "error")) {
+    return {
+      step: "verify",
+      status: "failed",
+      summary: `${issues.length} verification issue(s) in the repaired cadet root`,
+      issues,
+    };
+  }
+  return {
+    step: "verify",
+    status: "completed",
+    summary: `${contentChecked} content file(s) transform-idempotent, ${dbsChecked} db(s) free of vellum rows`,
+    issues,
+  };
+}
+
+export interface RepairOptions extends MigrateOptions {
+  /** Repair target: the cadet root of the installation being fixed. */
+  cadetRoot: string;
+}
+
+export async function repair(options: RepairOptions): Promise<MigrationReport> {
+  const startedAt = new Date().toISOString();
+  const ops = options.processOps ?? defaultProcessOps;
+  const steps: StepResult[] = [];
+  const cadetRoot = options.cadetRoot;
+  const start = (step: string): void => options.onStepStart?.(step);
+  const done = (result: StepResult): StepResult => {
+    options.onStepDone?.(result);
+    steps.push(result);
+    return result;
+  };
+  const log = (msg: string): void => {
+    if (options.verbose) console.error(`[vellum-migrate] ${msg}`);
+  };
+
+  const detect: DetectInfo = {
+    vellumRoot: "",
+    vellumRootExists: false,
+    cadetRoot,
+    cadetRootExists: true,
+    cadetRootPopulated: true,
+    previousManifest: true,
+    version: null,
+    deploymentKind: "unknown",
+    docker: { instances: [], images: [] },
+    runningProcesses: [],
+    rootSizeBytes: 0,
+    externalReferences: [],
+  };
+
+  // Preflight: the target must exist and be a migrated cadet root. The
+  // manifest is the migrator's own audit trail — its presence is what makes
+  // "this root is mine to fix" a safe claim.
+  start("preflight-repair");
+  const manifestPath = path.join(cadetRoot, ".cadet-migration-manifest.json");
+  let manifestOk = false;
+  let rootExists = false;
+  try {
+    rootExists = (await fs.stat(cadetRoot)).isDirectory();
+    manifestOk = (await fs.stat(manifestPath)).isFile();
+  } catch {
+    manifestOk = false;
+  }
+  if (!rootExists || !manifestOk) {
+    done({
+      step: "preflight-repair",
+      status: "failed",
+      summary: rootExists
+        ? `${cadetRoot} has no .cadet-migration-manifest.json — repair only runs on roots this migrator created`
+        : `${cadetRoot} does not exist`,
+      issues: [
+        {
+          severity: "error",
+          message: rootExists
+            ? "not a migrated cadet root (no manifest); run the migrator instead of repair"
+            : "cadet root not found; pass the root the migrator created",
+        },
+      ],
+    });
+    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.preflightFailed);
+  }
+  done({
+    step: "preflight-repair",
+    status: "completed",
+    summary: `migrated cadet root at ${cadetRoot} (manifest present)`,
+  });
+
+  const scan = await scanCadetTree(cadetRoot);
+
+  if (options.dryRun) {
+    start("repair-plan");
+    let pending = 0;
+    for (const { destRel, stateRel } of scan.contentFiles) {
+      const raw = await fs.readFile(path.join(cadetRoot, destRel), "utf8");
+      const sanctioned = sanctionedContentTransform(stateRel, raw);
+      const text = sanctioned ? sanctioned.text : applySubstitutions(raw).text;
+      if (text !== raw) pending++;
+    }
+    done({
+      step: "repair-plan",
+      status: "planned",
+      summary: `dry run: ${pending} of ${scan.contentFiles.length} eligible file(s) pending rewrites, ${scan.assistantDb ? 1 : 0} assistant db(s) + ${scan.gatewayDb ? 1 : 0} gateway db(s) to re-check in ${cadetRoot}`,
+    });
+    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.ok);
+  }
+
+  // 1. Stop the cadet assistant (its own CLI does the stopping).
+  if (!options.skipStopAssistant) {
+    start("stop-cadet");
+    const stop = await stopCadet(cadetRoot, ops, options.verbose, options.termGraceMs ?? 5_000);
+    done(stop);
+    if (stop.status === "failed") {
+      return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.processesUnstoppable);
+    }
+  }
+
+  // 2. Fresh backup of the cadet root BEFORE mutating it — same sha256
+  // manifest contract as the migrate backup.
+  start("backup");
+  const timestamp = utcStamp();
+  const bk = await backup(cadetRoot, cadetRoot, timestamp);
+  done(bk);
+  if (bk.status === "failed") {
+    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.backupFailed);
+  }
+  const backupPath = backupDirFor(cadetRoot, timestamp);
+
+  // 3. Re-apply every sanctioned content transform in place.
+  start("rewrite-content");
+  done(await rewriteContent(cadetRoot, scan, log));
+
+  // 4-5. The db value steps, pointed at the cadet root. All guarded and
+  // idempotent: WHERE col = 'vellum' matches nothing on a clean root.
+  start("migrate-assistant-db");
+  done(await migrateAssistantDbAt(cadetRoot, scan.assistantDb ?? undefined));
+
+  start("migrate-gateway-db");
+  done(await migrateGatewayDbAt(cadetRoot, scan.gatewayDb ?? undefined));
+
+  // 6. Verify: dbs must have zero vellum rows; sanctioned content must be
+  // transform-idempotent (rewriting an already-clean file changes nothing).
+  start("verify");
+  const v = await verifyRepair(cadetRoot, scan);
+  done(v);
+  if (v.status === "failed") {
+    return finish(detect, steps, "repair", startedAt, backupPath, EXIT_CODES.verifyFailed);
+  }
+
+  return finish(detect, steps, "repair", startedAt, backupPath, EXIT_CODES.ok);
 }

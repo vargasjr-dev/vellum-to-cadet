@@ -9,7 +9,7 @@ import { createInterface } from "node:readline/promises";
 
 import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon } from "./colors.js";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
-import { migrate } from "./runner.js";
+import { migrate, repair } from "./runner.js";
 import { toCadetRoot } from "./steps/detect.js";
 import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepResult } from "./types.js";
 
@@ -17,6 +17,8 @@ interface ParsedArgs extends MigrateOptions {
   help: boolean;
   json: boolean;
   cadetRootExplicit: boolean;
+  /** True when invoked as `repair [cadetRoot]` (post-migration fix-up mode). */
+  repair: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -25,7 +27,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     json: false,
     verbose: false,
     cadetRootExplicit: false,
+    repair: false,
   };
+  const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg: string = argv[i]!;
     switch (arg) {
@@ -45,6 +49,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--verbose":
         parsed.verbose = true;
         break;
+      case "--skip-stop":
+        parsed.skipStopAssistant = true;
+        break;
       case "--help":
       case "-h":
         parsed.help = true;
@@ -53,7 +60,18 @@ function parseArgs(argv: string[]): ParsedArgs {
         if (arg.startsWith("--")) {
           throw new Error(`unknown flag: ${arg}`);
         }
+        positionals.push(arg);
     }
+  }
+  if (positionals[0] === "repair") {
+    parsed.repair = true;
+    positionals.shift();
+  }
+  const root = positionals[0];
+  if (root !== undefined) {
+    if (positionals.length > 1) throw new Error(`unexpected extra argument: ${positionals[1]}`);
+    parsed.cadetRoot = root;
+    parsed.cadetRootExplicit = true;
   }
   return parsed;
 }
@@ -73,6 +91,7 @@ Steps: discover → detect → preflight → stop assistant → backup → migra
 
 Usage:
   npx migrate-vellum-assistant-to-cadet [flags]
+  npx migrate-vellum-assistant-to-cadet repair <cadetRoot> [flags]
 
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
@@ -80,7 +99,16 @@ Flags:
   --yes                    Non-interactive; assume yes
   --json                   Machine-readable JSON report on stdout
   --verbose                Log every step to stderr
+  --skip-stop              Repair only: skip \`cadet sleep\` (repair mode never
+                           signals processes; the re-discovery still reports survivors)
   -h, --help               Show this help
+
+Repair mode re-runs the idempotent value steps (content rewrites + db value
+migrations) against an ALREADY-MIGRATED cadet root — for when a migration
+bug is found after the cadet assistant has been in use. It requires the
+migration manifest (it only repairs roots this migrator created), stops the
+cadet assistant, takes a fresh timestamped backup of the cadet root, then
+verifies in place. No layout copy, no renames, no vellum-root involvement.
 
 The vellum root is a read-only source of truth: nothing in it is ever
 modified or deleted. A timestamped full backup with sha256 manifests is
@@ -209,6 +237,17 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   }
 
   if (report.ok) {
+    if (report.mode === "repair") {
+      lines.push(
+        `  ${successIcon()} ${colors.green("Repair complete.")} The cadet root was re-verified in place:`,
+      );
+      lines.push(`    ${command(report.detect.cadetRoot)}`);
+      if (report.backupPath) {
+        lines.push(`    ${detail(`A full backup of the cadet root is at ${report.backupPath}`)}`);
+      }
+      lines.push("");
+      return lines.join("\n");
+    }
     lines.push(`  ${successIcon()} ${colors.green("Migration complete.")} Your assistant data now lives in:`);
     lines.push(`    ${command(report.detect.cadetRoot)}`);
     if (report.backupPath) {
@@ -243,6 +282,46 @@ async function main(): Promise<number> {
   if (parsed.help) {
     process.stdout.write(HELP);
     return EXIT_CODES.ok;
+  }
+
+  // Repair mode: re-run the idempotent value steps against an already-
+  // migrated cadet root. Deliberately SKIPS all vellum-root discovery —
+  // the cadet root is explicit, and the vellum root may not even exist.
+  if (parsed.repair) {
+    if (!parsed.cadetRoot) {
+      console.error(
+        errorText(
+          "repair requires the cadet root to fix: `migrate-vellum-assistant-to-cadet repair <cadetRoot>`",
+        ),
+      );
+      return EXIT_CODES.preflightFailed;
+    }
+    const live = !parsed.json && !parsed.verbose && Boolean(process.stderr.isTTY);
+    const progress = createLiveProgress();
+    try {
+      const report = await repair({
+        cadetRoot: parsed.cadetRoot,
+        dryRun: parsed.dryRun,
+        verbose: parsed.verbose,
+        skipStopAssistant: parsed.skipStopAssistant,
+        onStepStart: live ? progress.onStepStart : undefined,
+        onStepDone: live ? progress.onStepDone : undefined,
+      });
+      progress.finish();
+      if (parsed.json) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        process.stdout.write(renderHuman(report, { stepsStreamedLive: live }));
+      }
+      return report.exitCode;
+    } catch (err) {
+      progress.finish();
+      console.error(errorText(`repair crashed: ${(err as Error).message}`));
+      if (parsed.verbose && (err as Error).stack) {
+        console.error((err as Error).stack);
+      }
+      return EXIT_CODES.migrationFailed;
+    }
   }
 
   // Discover the vellum root.

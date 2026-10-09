@@ -81,6 +81,8 @@ export interface ProcessOps {
   find(patterns: string[]): Promise<Array<{ pid: number; command: string }>>;
   /** Ask the vellum CLI to put its assistant to sleep. */
   vellumSleep(): Promise<void>;
+  /** Ask the cadet CLI to put its assistant to sleep (repair mode). */
+  cadetSleep(): Promise<void>;
 }
 
 /**
@@ -99,7 +101,7 @@ export interface DockerDeployment {
 export interface MigrationReport {
   ok: boolean;
   exitCode: ExitCode;
-  mode: "plan" | "migrate" | "verify-only";
+  mode: "plan" | "migrate" | "verify-only" | "repair";
   detect: DetectInfo;
   steps: StepResult[];
   backupPath: string | null;

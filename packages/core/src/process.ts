@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
+import { CADET_PROCESS_PATTERNS, MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
 import type { ProcessOps } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -52,11 +52,26 @@ export const defaultProcessOps: ProcessOps = {
     // hit unrelated processes before.
     await execFileAsync("vellum", ["sleep"]);
   },
+
+  async cadetSleep() {
+    // Same contract, cadet side: repair mutates the cadet root, so it is
+    // the cadet CLI's sleep command that owns stopping that assistant.
+    await execFileAsync("cadet", ["sleep"]);
+  },
 };
 
 /** Patterns used for discovery (specific assistant process signatures). */
 export function discoveryPatterns(): string[] {
   return [...VELLUM_PROCESS_PATTERNS];
+}
+
+/**
+ * Cadet-side discovery — the same component signatures after the rebrand
+ * (credential-executor kept its name). Used by repair mode, which stops
+ * and inspects the cadet assistant, never the vellum one.
+ */
+export function cadetDiscoveryPatterns(): string[] {
+  return [...CADET_PROCESS_PATTERNS];
 }
 
 /** Self + every ancestor pid, so our own process tree is never counted. */

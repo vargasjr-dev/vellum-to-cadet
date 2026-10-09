@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { applySubstitutions, formatBytes } from "../../src/fs-utils.js";
+import {
+  applySubstitutions,
+  formatBytes,
+  rewriteLegacyTokens,
+  rewritePersonaPrompt,
+  sanctionedContentTransform,
+} from "../../src/fs-utils.js";
 import { DEFAULT_TARGET_CTX } from "../../src/layout.js";
 
 describe("formatBytes", () => {
@@ -39,5 +45,86 @@ describe("applySubstitutions with a nested migration target", () => {
   test("the default target matches the historical behavior", () => {
     const { text } = applySubstitutions("root=~/.vellum\n", DEFAULT_TARGET_CTX);
     expect(text).toContain(".local/share/cadet/assistants/vellum");
+  });
+});
+
+describe("rewriteLegacyTokens — precise edits for conversation/runtime logs", () => {
+  test("flips attachment links and quoted channel values", () => {
+    const out = rewriteLegacyTokens(
+      'attached vellum://workspace/data/attachments/a.pdf on channel "vellum"',
+    );
+    expect(out.text).toBe('attached cadet://workspace/data/attachments/a.pdf on channel "cadet"');
+    expect(out.counts["attachment-links"]).toBe(1);
+    expect(out.counts["channel-values"]).toBe(1);
+  });
+
+  test("leaves quoted user prose and single-quoted shell output verbatim", () => {
+    const raw = 'user said "I used vellum before it was cadet" and ran: SELECT * FROM t WHERE c = \'vellum\';';
+    const out = rewriteLegacyTokens(raw);
+    expect(out.text).toBe(raw);
+  });
+
+  test("rewrites moved state paths and env names", () => {
+    const out = rewriteLegacyTokens("VELLUM_ROOT_DIR=/root/.vellum/workspace");
+    expect(out.text).toContain("CADET_ROOT_DIR=");
+    expect(out.text).toContain(".local/share/cadet/assistants/vellum/workspace");
+    expect(out.text).not.toContain("VELLUM_");
+  });
+
+  test("is idempotent — clean content maps to itself", () => {
+    const clean = 'docs at cadet://workspace/notes on channel "cadet" with CADET_ROOT_DIR set';
+    expect(rewriteLegacyTokens(clean).text).toBe(clean);
+  });
+});
+
+describe("rewritePersonaPrompt — brand flip with path protection", () => {
+  test("flips brand words in prose, links, and paths", () => {
+    const out = rewritePersonaPrompt(
+      "Comes with the Vellum harness. Docs at vellum://workspace/notes. Keys in ~/.vellum.",
+    );
+    expect(out.text).toBe(
+      "Comes with the Cadet harness. Docs at cadet://workspace/notes. Keys in ~/.local/share/cadet/assistants/vellum.",
+    );
+    // Only the prose "Vellum" counts as a brand word — the link's vellum://
+    // was already consumed (and counted) by the attachment-links rule.
+    expect(out.counts["brand-words"]).toBe(1);
+  });
+
+  test("the migrated instance's own name survives inside rewritten paths", () => {
+    // The path rule legitimately writes `…/assistants/vellum` (the migrated
+    // instance is NAMED vellum) — the brand flip must not corrupt it.
+    const out = rewritePersonaPrompt("We keep docs at vellum://x and keys in ~/.vellum.");
+    expect(out.text).toContain(".local/share/cadet/assistants/vellum");
+    expect(out.text).not.toContain("assistants/cadet");
+  });
+
+  test("is idempotent — an already-flipped prompt maps to itself", () => {
+    const clean = "Comes with the Cadet harness. Docs at cadet://workspace/notes. Keys in ~/.local/share/cadet/assistants/vellum.";
+    expect(rewritePersonaPrompt(clean).text).toBe(clean);
+  });
+});
+
+describe("sanctionedContentTransform — the shared dispatch", () => {
+  test("each category reports its own substep", () => {
+    expect(sanctionedContentTransform("workspace/config.json", '{"provider":"vellum"}')?.substep).toBe(
+      "config.json rewrite",
+    );
+    expect(sanctionedContentTransform("workspace/skills/s/install-meta.json", '{"origin":"vellum"}')?.substep).toBe(
+      "skills renames",
+    );
+    expect(sanctionedContentTransform("workspace/conversations/x/messages.jsonl", 'a "vellum"')?.substep).toBe(
+      "conversation log rewrites",
+    );
+    expect(sanctionedContentTransform("workspace/data/logs/assistant-2026-01-01.log", "vellum://x")?.substep).toBe(
+      "runtime log rewrites",
+    );
+    expect(sanctionedContentTransform("workspace/SOUL.md", "the Vellum harness")?.substep).toBe(
+      "persona prompt rewrites",
+    );
+  });
+
+  test("unmapped files return null (generic machine-file treatment)", () => {
+    expect(sanctionedContentTransform("hooks/on-wake.sh", "VELLUM_")).toBeNull();
+    expect(sanctionedContentTransform("workspace/notes/vellum-history.md", "vellum")).toBeNull();
   });
 });

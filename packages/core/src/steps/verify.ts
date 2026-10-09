@@ -7,10 +7,11 @@ import {
   isDbArtifact,
   isRewriteEligible,
   renameRelativePath,
+  sanctionedContentTransform,
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { isSkillFrontmatter, rewriteSkillFrontmatter } from "../layout.js";
+import { DEFAULT_TARGET_CTX, type MigrationTargetCtx } from "../layout.js";
 import {
   ASSISTANT_DB_STATE_REL,
   CHANNEL_COLUMNS,
@@ -23,8 +24,9 @@ import type { StepIssue, StepResult } from "../types.js";
  * The value-migrated DBs: each is checked semantically (zero remaining
  * vellum-branded rows) instead of byte-for-byte, and their -wal/-shm sidecars
  * are expected to vanish (the open folds them in, the close checkpoints).
+ * Exported so repair mode re-checks the same registry against the cadet root.
  */
-const VALUE_MIGRATED_DBS: ReadonlyArray<{
+export const VALUE_MIGRATED_DBS: ReadonlyArray<{
   stateRel: string;
   columns: ReadonlyArray<{ table: string; column: string }>;
   messages?: boolean;
@@ -44,6 +46,7 @@ const VALUE_MIGRATED_DBS: ReadonlyArray<{
 export async function verify(
   vellumRoot: string,
   cadetRoot: string,
+  targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
 ): Promise<StepResult> {
   const issues: StepIssue[] = [];
   const source = await walkTree(vellumRoot);
@@ -117,20 +120,20 @@ export async function verify(
     // Different bytes — acceptable only if the file was supposed to be
     // rewritten AND the rewrite is exactly the sanctioned transform (or, for
     // generic machine files, left no vellum tokens behind).
-    if (isSupposedToBeRewritten(entry.relPath)) {
-      if (isSkillFrontmatter(entry.relPath)) {
-        // Semantic check: the destination must be EXACTLY the source with
-        // the frontmatter metadata key flipped — nothing else. A token scan
-        // would false-positive on skill prose that legitimately mentions
-        // vellum.
-        const expected = rewriteSkillFrontmatter(srcBuf.toString("utf8")).text;
-        if (destBuf.toString("utf8") === expected) {
+    if (isSupposedToBeRewritten(stateRel)) {
+      // Sanctioned rewrites get a semantic check: the destination must be
+      // EXACTLY the source through the shared transform — nothing else.
+      // Token scans would false-positive on prose that legitimately
+      // mentions vellum (skill docs, persona files, quoted messages).
+      const sanctioned = sanctionedContentTransform(stateRel, srcBuf.toString("utf8"), targetCtx);
+      if (sanctioned) {
+        if (destBuf.toString("utf8") === sanctioned.text) {
           rewrittenClean++;
         } else {
           issues.push({
             severity: "error",
             path: entry.relPath,
-            message: "skill frontmatter differs from the sanctioned metadata-key rewrite",
+            message: `${sanctioned.substep}: destination differs from the sanctioned rewrite`,
           });
         }
         continue;
@@ -175,7 +178,8 @@ export async function verify(
  * `vellum`-spelled managed-connection rows. Returns "unreadable" when the
  * file is not a real sqlite database (callers fall back to byte comparison).
  */
-async function dbVellumRows(
+/** Zero-vellum-rows checker, shared with repair-mode verification. */
+export async function dbVellumRows(
   dbPath: string,
   spec: { columns: ReadonlyArray<{ table: string; column: string }>; messages?: boolean; connections?: boolean },
 ): Promise<number | "unreadable"> {

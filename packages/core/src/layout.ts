@@ -344,6 +344,49 @@ export function rewriteSkillFrontmatter(content: string): { text: string; change
 }
 
 /**
+ * Agent conversation logs (`workspace/conversations/**`). The runtime reads
+ * them back to answer questions about shared history — vellum-era attachment
+ * links (`vellum://workspace/...`) would render broken, and legacy channel
+ * values would read as foreign. JSONL + JSON + tool-result text.
+ */
+export function isConversationLog(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  return norm.startsWith(`${USER_WORKSPACE_DIR}/conversations/`);
+}
+
+/**
+ * Runtime log files (`workspace/data/logs/**`). The assistant writes daily
+ * `assistant-YYYY-MM-DD.log` files (same names in cadet) that embed the
+ * same links, channel values, paths, and env names as the machine files.
+ */
+export function isRuntimeLog(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  return norm.startsWith(`${USER_WORKSPACE_DIR}/data/logs/`);
+}
+
+/** The workspace prompt files (persona/persona-adjacent, machine-seeded names). */
+export const WORKSPACE_PROMPT_FILES: ReadonlyArray<string> = [
+  "SOUL.md",
+  "IDENTITY.md",
+  "HEARTBEAT.md",
+  "VOICE.md",
+  "NOW.md",
+];
+
+/**
+ * Workspace prompt files (`workspace/SOUL.md` and friends). These are
+ * persona prose — but the persona must not tell cadet it runs on vellum.
+ * Vargas's call: flip brand references in these files (and only these).
+ */
+export function isPersonaPrompt(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  const ws = `${USER_WORKSPACE_DIR}/`;
+  if (!norm.startsWith(ws) || norm.slice(ws.length).includes("/")) return false;
+  return WORKSPACE_PROMPT_FILES.includes(norm.slice(ws.length));
+}
+
+
+/**
  * JSON-value rewrites for machine-owned workspace files: any string value
  * exactly equal to "vellum" becomes "cadet" (provider ids, skill origins).
  * JSON-aware on purpose — a textual vellum→cadet sweep would mangle user
@@ -424,6 +467,15 @@ export const VELLUM_PROCESS_PATTERNS: ReadonlyArray<string> = [
   "vellum-daemon",
   "vellum-gateway",
   "vellum-mac-helper",
+  "credential-executor",
+];
+
+/** The same component signatures after the rebrand (repair mode's targets). */
+export const CADET_PROCESS_PATTERNS: ReadonlyArray<string> = [
+  "cadet-assistant",
+  "cadet-daemon",
+  "cadet-gateway",
+  "cadet-mac-helper",
   "credential-executor",
 ];
 
