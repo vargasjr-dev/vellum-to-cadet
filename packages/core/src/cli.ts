@@ -89,6 +89,16 @@ function requireValue(value: string | undefined, flag: string): string {
   return value;
 }
 
+const UNINSTALL_HELP = `migrate-vellum-assistant-to-cadet uninstall
+
+Permanently deletes every vellum installation on this machine (data is
+unrecoverable — the cadet assistant and migration backups are safe) and
+removes the migrator itself; run with --dry-run to list what would go,
+--yes to skip the DELETE confirmation.
+
+Exit codes: 0 success · 10 not confirmed · 11 deletion failed
+`;
+
 const HELP = `migrate-vellum-assistant-to-cadet
 
 Migrate a vellum assistant workspace to cadet.
@@ -120,15 +130,6 @@ The vellum root is a read-only source of truth: nothing in it is ever
 modified or deleted. A timestamped full backup with sha256 manifests is
 written next to the cadet root before anything is migrated.
 
-Uninstall is the point of no return AFTER your cadet assistant is confirmed:
-it stops running vellum assistants, permanently deletes every vellum
-installation on the machine (legacy home root, modern XDG data roots, XDG
-config dirs and their env siblings, the old home-level lockfiles), and
-removes the migrator's own npx cache. It demands the word DELETE be typed;
-pass --yes for non-interactive runs and --dry-run to list without deleting.
-It never touches the cadet side — the cadet assistant and the migration
-backups in ~/.cadet-migration-backups are kept.
-
 Exit codes:
   0  success (or already migrated + verified)
   2  no vellum root found
@@ -138,9 +139,6 @@ Exit codes:
   7  verification failed
   8  cadet root already populated (conflict)
   9  multiple candidate roots found in a non-interactive run
-  4  running vellum assistants refused to sleep (uninstall)
-  10  uninstall not confirmed (declined, or stdin unavailable without --yes)
-  11  uninstall failed to delete one or more targets
 `;
 
 async function resolveRoot(): Promise<string> {
@@ -317,7 +315,7 @@ async function main(): Promise<number> {
   }
 
   if (parsed.help) {
-    process.stdout.write(HELP);
+    process.stdout.write(parsed.uninstall ? UNINSTALL_HELP : HELP);
     return EXIT_CODES.ok;
   }
   warnIfNodeOld();

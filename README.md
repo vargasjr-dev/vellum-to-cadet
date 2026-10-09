@@ -53,10 +53,13 @@ npx migrate-vellum-assistant-to-cadet uninstall --dry-run   # list, delete nothi
 npx migrate-vellum-assistant-to-cadet uninstall
 ```
 
-Uninstall sweeps every vellum location on the machine — the legacy home
-root, the modern XDG data roots (including env-suffixed siblings like
-`vellum-dev`), the XDG config dirs, and the old home-level lockfiles — and
-removes the migrator's own npx cache. It demands the word `DELETE` be
+Uninstall first asks the vellum CLI to put running assistants to sleep
+(`vellum sleep` — the CLI's own command; uninstall never pattern-matches
+processes, since guessing at what "belongs" to vellum is how unrelated
+processes die). It sweeps every vellum location on the machine — the
+legacy home root, the modern XDG data roots (including env-suffixed
+siblings like `vellum-dev`), the XDG config dirs, and the old home-level
+lockfiles — and removes the migrator's own npx cache. It demands the word `DELETE` be
 typed (`--yes` for non-interactive runs) and prints a full warning: the
 deletion is irreversible and the data is unrecoverable. The cadet side is
 never touched — the cadet assistant and the migration backups in

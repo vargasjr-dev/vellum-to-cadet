@@ -131,8 +131,6 @@ export const EXIT_CODES = {
   cadetRootConflict: 8,
   /** Discovery found multiple plausible vellum roots in a non-interactive run. */
   ambiguousRoot: 9,
-  /** Uninstall found vellum assistants that refused to sleep. */
-  runningProcesses: 4,
   /** Uninstall was not confirmed (declined or unconfirmable). */
   uninstallDeclined: 10,
   /** Uninstall failed to delete one or more targets. */

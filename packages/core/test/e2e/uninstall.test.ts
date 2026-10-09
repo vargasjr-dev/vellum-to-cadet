@@ -142,50 +142,55 @@ describe("uninstall", () => {
     }
   });
 
-  test("assistants that refuse to sleep abort the run before any deletion", async () => {
+  test("asks the vellum CLI to sleep assistants — no pattern-matched process discovery", async () => {
     const s = await buildLegacyScenario();
     const restore = pinHome(s.home);
     try {
-      const stubborn: ProcessOps = {
+      let sleeps = 0;
+      const ops: ProcessOps = {
         async find() {
-          return [{ pid: 4242, command: "vellum-assistant --stubborn" }];
+          return [];
         },
         async vellumVersion() {
           return "0.12.6";
         },
-        async vellumSleep() {},
+        async vellumSleep() {
+          sleeps++;
+        },
         async cadetSleep() {},
       };
-      const report = await runUninstall({ yes: true, processOps: stubborn });
-      expect(report.ok).toBe(false);
-      expect(report.exitCode).toBe(4);
-      expect(report.targets.length).toBe(0);
-      expect(await exists(s.root)).toBe(true);
+      const report = await runUninstall({ yes: true, processOps: ops });
+      expect(report.ok).toBe(true);
+      expect(report.slept).toBe(true);
+      expect(sleeps).toBe(1);
+      expect(await exists(s.root)).toBe(false);
     } finally {
       restore();
     }
   });
 
-  test("successfully stopped assistants are reported, then the run proceeds", async () => {
+  test("dry runs never ask the vellum CLI to sleep anything", async () => {
     const s = await buildLegacyScenario();
     const restore = pinHome(s.home);
     try {
-      let called = 0;
-      const sleepy: ProcessOps = {
+      let sleeps = 0;
+      const ops: ProcessOps = {
         async find() {
-          return called++ === 0 ? [{ pid: 4242, command: "vellum-assistant --sleepy" }] : [];
+          return [];
         },
         async vellumVersion() {
           return "0.12.6";
         },
-        async vellumSleep() {},
+        async vellumSleep() {
+          sleeps++;
+        },
         async cadetSleep() {},
       };
-      const report = await runUninstall({ yes: true, processOps: sleepy });
+      const report = await runUninstall({ dryRun: true, yes: true, processOps: ops });
       expect(report.ok).toBe(true);
-      expect(report.stopped.length).toBe(1);
-      expect(report.stopped[0]!.pid).toBe(4242);
-      expect(await exists(s.root)).toBe(false);
+      expect(report.slept).toBe(false);
+      expect(sleeps).toBe(0);
+      expect(await exists(s.root)).toBe(true);
     } finally {
       restore();
     }
@@ -251,8 +256,24 @@ describe("uninstall cli surface", () => {
     );
     const proc = spawnSync(process.execPath, [cliPath, "--help"], { encoding: "utf8" });
     expect(proc.status).toBe(0);
-    expect(proc.stdout).toContain("uninstall");
-    expect(proc.stdout).toContain("DELETE");
+    expect(proc.stdout).toContain("uninstall [flags]");
+    // The deep-dive lives in the subcommand's own help menu now.
+    expect(proc.stdout).not.toContain("unrecoverable");
+  });
+
+  test("uninstall --help prints the subcommand's own menu", async () => {
+    const { spawnSync } = await import("node:child_process");
+    const url = await import("node:url");
+    const cliPath = path.join(
+      url.fileURLToPath(new URL(".", import.meta.url)),
+      "../../../dist/cli.js",
+    );
+    const proc = spawnSync(process.execPath, [cliPath, "uninstall", "--help"], { encoding: "utf8" });
+    expect(proc.status).toBe(0);
+    expect(proc.stdout).toContain("unrecoverable");
+    expect(proc.stdout).toContain("10 not confirmed");
+    // And it doesn't drag the whole migration help along.
+    expect(proc.stdout).not.toContain("Steps: discover");
   });
 
   test("uninstall rejects a --cadet-root argument", async () => {
