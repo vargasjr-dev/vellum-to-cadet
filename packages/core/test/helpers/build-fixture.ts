@@ -79,6 +79,40 @@ async function writeAssistantState(root: string): Promise<void> {
     "# History\n\nI used vellum before it was cadet. VELLUM_ROOT_DIR was a nice env var.\n",
   );
 
+  // Machine-owned files inside the workspace carry vellum-branded VALUES.
+  await write(
+    root,
+    "workspace/config.json",
+    JSON.stringify(
+      {
+        profiles: [
+          { name: "daily", provider: "vellum", model: "claude-sonnet" },
+          { name: "byok", provider: "anthropic", model: "claude" },
+        ],
+        services: { stt: { provider: "vellum" }, tts: { provider: "vellum" } },
+      },
+      null,
+      2,
+    ),
+  );
+  await write(
+    root,
+    "workspace/skills/github-summary/install-meta.json",
+    JSON.stringify({ origin: "vellum", version: "1.2.3", installedAt: "2026-10-01" }, null, 2),
+  );
+  await write(
+    root,
+    "workspace/plugins/greeter/package.json",
+    JSON.stringify({ name: "greeter", dependencies: { "@vellumai/plugin-api": "^1.0.0" } }, null, 2),
+  );
+  await write(
+    root,
+    "workspace/plugins/greeter/index.ts",
+    'import { definePlugin } from "@vellumai/plugin-api";\n\nexport default definePlugin({ name: "greeter" });\n',
+  );
+  // Skill docs are user content — origins in prose stay untouched.
+  await write(root, "workspace/skills/github-summary/SKILL.md", "# GitHub summary\n\nFrom the vellum catalog.\n");
+
   // Machine runtime state inside workspace.
   await write(root, "workspace/data/db/assistant.db", `${SQLITE_MAGIC}fake-assistant-db`);
   await write(root, "workspace/data/db/assistant.db-wal", "wal-bytes");

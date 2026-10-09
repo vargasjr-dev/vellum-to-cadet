@@ -5,6 +5,10 @@ import {
   isRewriteEligible,
   renameRelativePath,
 } from "../../src/fs-utils.js";
+import {
+  isWorkspaceMachineFile,
+  rewriteWorkspaceJsonValues,
+} from "../../src/layout.js";
 
 describe("layout: path renames", () => {
   test("renames every mapped dotfile segment", () => {
@@ -113,9 +117,11 @@ describe("layout: text substitutions", () => {
 });
 
 describe("layout: rewrite eligibility", () => {
-  test("never rewrites the user workspace", () => {
+  test("never rewrites the user workspace — except named machine files", () => {
     expect(isRewriteEligible("workspace/notes/README.md")).toBe(false);
-    expect(isRewriteEligible("workspace/config.json")).toBe(false);
+    expect(isRewriteEligible("workspace/skills/github-summary/SKILL.md")).toBe(false);
+    // The gateway-facing config contract carries vellum provider ids.
+    expect(isRewriteEligible("workspace/config.json")).toBe(true);
   });
 
   test("never rewrites protected keys", () => {
@@ -195,5 +201,55 @@ describe("layout: modern instance-state paths", () => {
   test("prose mentioning vellum is untouched", () => {
     const { text } = applySubstitutions("I used vellum before it was cadet");
     expect(text).toBe("I used vellum before it was cadet");
+  });
+});
+
+describe("layout: workspace machine files", () => {
+  test("isWorkspaceMachineFile matches the named contract files", () => {
+    expect(isWorkspaceMachineFile("workspace/config.json")).toBe(true);
+    expect(isWorkspaceMachineFile("workspace/skills/github-summary/install-meta.json")).toBe(true);
+    expect(isWorkspaceMachineFile("workspace/plugins/greeter/index.ts")).toBe(true);
+    expect(isWorkspaceMachineFile("workspace/plugins/greeter/package.json")).toBe(true);
+  });
+
+  test("isWorkspaceMachineFile never matches user content", () => {
+    expect(isWorkspaceMachineFile("workspace/notes/README.md")).toBe(false);
+    expect(isWorkspaceMachineFile("workspace/skills/github-summary/SKILL.md")).toBe(false);
+    expect(isWorkspaceMachineFile("workspace/data/db/assistant.db")).toBe(false);
+    expect(isWorkspaceMachineFile("config.json")).toBe(false);
+  });
+
+  test("eligibility is state-relative — modern instance layouts normalize first", () => {
+    // The predicate takes state-relative paths; the plan/executor normalize
+    // via stateRelativePath before asking.
+    expect(isWorkspaceMachineFile("workspace/config.json")).toBe(true);
+  });
+
+  test("rewriteWorkspaceJsonValues rewrites exact vellum values", () => {
+    const { text, changed } = rewriteWorkspaceJsonValues(
+      JSON.stringify({
+        profiles: [{ provider: "vellum" }, { provider: "anthropic" }],
+        services: { tts: { provider: "vellum" } },
+        url: "https://api.vellum.ai",
+        note: "vellum was great",
+      }),
+    );
+    expect(changed).toBe(2);
+    const parsed = JSON.parse(text);
+    expect(parsed.profiles[0].provider).toBe("cadet");
+    expect(parsed.profiles[1].provider).toBe("anthropic");
+    expect(parsed.services.tts.provider).toBe("cadet");
+    // Containing values (URLs, prose) stay untouched.
+    expect(parsed.url).toBe("https://api.vellum.ai");
+    expect(parsed.note).toBe("vellum was great");
+  });
+
+  test("rewriteWorkspaceJsonValues leaves malformed JSON alone", () => {
+    expect(rewriteWorkspaceJsonValues("not json")).toEqual({ text: "not json", changed: 0 });
+  });
+
+  test("rewriteWorkspaceJsonValues is a no-op when nothing matches", () => {
+    const raw = JSON.stringify({ provider: "anthropic" }, null, 2);
+    expect(rewriteWorkspaceJsonValues(raw)).toEqual({ text: raw, changed: 0 });
   });
 });

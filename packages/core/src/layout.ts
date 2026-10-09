@@ -259,6 +259,68 @@ export const USER_WORKSPACE_DIR = "workspace";
  */
 export const WORKSPACE_RUNTIME_DIR = "data";
 
+/**
+ * Machine-owned files INSIDE the user workspace that carry vellum-branded
+ * *values* the renamed product no longer reads:
+ *
+ * - `workspace/config.json` — the gateway-facing contract (written by the
+ *   CLI, not the user). LLM/speech profiles record `provider: "vellum"`;
+ *   cadet dispatches only the "cadet" managed provider.
+ * - `workspace/skills/<name>/install-meta.json` — skill install metadata
+ *   records `origin: "vellum"` for catalog-installed skills; cadet's origin
+ *   enum has no "vellum".
+ * - `workspace/plugins/**` — user-authored plugin sources importing
+ *   `@vellumai/plugin-api`; the renamed package is `@mycadet/plugin-api`.
+ *
+ * User-authored skill/docs content stays verbatim, as does everything in
+ * `workspace/data` (the runtime state dir, including the SQLite DBs).
+ */
+export function isWorkspaceMachineFile(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  const ws = `${USER_WORKSPACE_DIR}/`;
+  if (!norm.startsWith(ws)) return false;
+  if (norm === `${ws}config.json`) return true;
+  if (/^skills\/[^/]+\/install-meta\.json$/.test(norm.slice(ws.length))) return true;
+  if (norm.startsWith(`${ws}plugins/`)) return true;
+  return false;
+}
+
+/**
+ * JSON-value rewrites for machine-owned workspace files: any string value
+ * exactly equal to "vellum" becomes "cadet" (provider ids, skill origins).
+ * JSON-aware on purpose — a textual vellum→cadet sweep would mangle user
+ * prose and URLs. Malformed JSON is left untouched. Values that merely
+ * CONTAIN "vellum" (URLs, ids like "vellum:assistant_api_key") are not
+ * touched here: connection names live in the assistant DB (healed by the
+ * product's own boot migrations) and URLs are machine-refreshed.
+ */
+export function rewriteWorkspaceJsonValues(content: string): {
+  text: string;
+  changed: number;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { text: content, changed: 0 };
+  }
+  let changed = 0;
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node !== null && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, walk(v)]));
+    }
+    if (node === "vellum") {
+      changed++;
+      return "cadet";
+    }
+    return node;
+  };
+  const rewritten = walk(parsed);
+  if (changed === 0) return { text: content, changed: 0 };
+  return { text: JSON.stringify(rewritten, null, 2) + "\n", changed };
+}
+
 /** Database artifacts are copied verbatim and recorded for later inspection. */
 export const DB_EXTENSIONS = new Set([".db", ".sqlite", ".sqlite3", ".wal", ".shm"]);
 

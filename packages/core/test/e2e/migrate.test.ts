@@ -70,6 +70,35 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(await exists(path.join(cadetRoot, ".vellum-assistant"))).toBe(false);
     expect(await exists(path.join(cadetRoot, ".cadet-skill-run/github-summary"))).toBe(true);
 
+    // ── Machine-owned files inside the workspace: vellum VALUES rewritten. ──
+    const wsConfig = JSON.parse(await fs.readFile(path.join(cadetRoot, "workspace/config.json"), "utf8"));
+    expect(wsConfig.profiles[0].provider).toBe("cadet");
+    expect(wsConfig.profiles[1].provider).toBe("anthropic");
+    expect(wsConfig.services.stt.provider).toBe("cadet");
+    const installMeta = JSON.parse(
+      await fs.readFile(path.join(cadetRoot, "workspace/skills/github-summary/install-meta.json"), "utf8"),
+    );
+    expect(installMeta.origin).toBe("cadet");
+    const pluginSource = await fs.readFile(path.join(cadetRoot, "workspace/plugins/greeter/index.ts"), "utf8");
+    expect(pluginSource).toContain("@mycadet/plugin-api");
+    expect(pluginSource).not.toContain("@vellumai/");
+    const pluginPkg = JSON.parse(
+      await fs.readFile(path.join(cadetRoot, "workspace/plugins/greeter/package.json"), "utf8"),
+    );
+    expect(Object.keys(pluginPkg.dependencies)[0]).toBe("@mycadet/plugin-api");
+
+    // ── User content inside the workspace stays byte-for-byte. ──
+    const skillDoc = await fs.readFile(
+      path.join(cadetRoot, "workspace/skills/github-summary/SKILL.md"),
+      "utf8",
+    );
+    expect(skillDoc).toContain("From the vellum catalog.");
+    const history = await fs.readFile(
+      path.join(cadetRoot, "workspace/notes/vellum-history.md"),
+      "utf8",
+    );
+    expect(history).toContain("I used vellum before it was cadet.");
+
     // ── Protected keys: verbatim, dissolved to the per-service dirs. ──
     const key = await fs.readFile(
       path.join(cadetRoot, "gateway-security/actor-token-signing-key"),
