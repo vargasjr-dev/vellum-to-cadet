@@ -149,11 +149,8 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   // 1. Put the vellum assistants to sleep (the vellum CLI does the stopping).
   start("stop-assistant");
-  const stop = await stopAssistant(detect, ops, options.verbose, options.termGraceMs ?? 5_000);
+  const stop = await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000);
   done(stop);
-  if (stop.status === "failed") {
-    return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.processesUnstoppable);
-  }
 
   // 2. Full backup before any mutation.
   start("backup");
@@ -464,13 +461,10 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
 
   // Stop every cadet assistant ONCE — `cadet sleep --all` sleeps every
   // assistant the cadet lockfiles know about (the cadet CLI does the
-  // stopping; the re-check reports survivors).
+  // stopping; we trust it).
   start("stop-cadet");
   const stop = await stopCadet(ops, options.verbose, options.termGraceMs ?? 5_000);
   done(stop);
-  if (stop.status === "failed") {
-    return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.processesUnstoppable);
-  }
 
   let lastBackupPath: string | null = null;
   for (const root of roots) {

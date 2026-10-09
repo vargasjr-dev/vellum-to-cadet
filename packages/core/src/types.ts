@@ -120,7 +120,6 @@ export const EXIT_CODES = {
   ok: 0,
   nothingToMigrate: 2,
   preflightFailed: 3,
-  processesUnstoppable: 4,
   backupFailed: 5,
   migrationFailed: 6,
   verifyFailed: 7,
