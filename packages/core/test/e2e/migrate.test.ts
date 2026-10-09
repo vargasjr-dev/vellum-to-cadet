@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { migrate } from "../../src/runner.js";
+import { migrate, repair } from "../../src/runner.js";
 import type { ProcessOps } from "../../src/types.js";
 import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
 
@@ -14,6 +14,7 @@ const noopOps: ProcessOps = {
     return [];
   },
   async vellumSleep() {},
+  async cadetSleep() {},
 };
 
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
@@ -103,6 +104,60 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       "utf8",
     );
     expect(history).toContain("I used vellum before it was cadet.");
+
+    // ── Conversation logs + runtime logs: PRECISE edits only — attachment
+    // links and channel values flip so the runtime never reads broken
+    // history; quoted prose and single-quoted shell output survive. ──
+    const convo = await fs.readFile(
+      path.join(
+        cadetRoot,
+        "workspace/conversations/2026-10-01T09-00-00.000Z_11111111-1111-4111-8111-111111111111/messages.jsonl",
+      ),
+      "utf8",
+    );
+    expect(convo).toContain("cadet://workspace/data/attachments/q3-report.pdf");
+    expect(convo).toContain('"channel":"cadet"');
+    expect(convo).toContain("I used vellum before it was cadet");
+    expect(convo).toContain("type = 'vellum'");
+    expect(convo).not.toContain("vellum://");
+
+    const toolResult = await fs.readFile(
+      path.join(
+        cadetRoot,
+        "workspace/conversations/2026-10-01T09-00-00.000Z_11111111-1111-4111-8111-111111111111/.tool-results/abc123.txt",
+      ),
+      "utf8",
+    );
+    expect(toolResult).toContain("cadet://workspace/data/attachments/notes.txt");
+    expect(toolResult).toContain("plain vellum in prose");
+
+    const dailyLog = await fs.readFile(
+      path.join(cadetRoot, "workspace/data/logs/assistant-2026-10-09.log"),
+      "utf8",
+    );
+    expect(dailyLog).toContain("cadet://workspace/data/attachments/q3-report.pdf");
+    expect(dailyLog).toContain('channel "cadet"');
+    expect(dailyLog).toContain("CADET_ROOT_DIR=");
+    expect(dailyLog).toContain(".local/share/cadet/assistants/vellum/workspace");
+    expect(dailyLog).toContain('user said "I used vellum before it was cadet"');
+    expect(dailyLog).not.toContain("VELLUM_");
+    expect(dailyLog).not.toContain("vellum://");
+
+    // The legacy-named log file keeps its name (cadet never reads it) but
+    // its content follows the same rules.
+    expect(await exists(path.join(cadetRoot, "workspace/data/logs/vellum.log"))).toBe(true);
+    const legacyLog = await fs.readFile(path.join(cadetRoot, "workspace/data/logs/vellum.log"), "utf8");
+    expect(legacyLog).toContain("cadet://workspace/data/attachments/old.txt");
+
+    // ── Persona prompt files: brand references flip so the persona never
+    // tells cadet it runs on vellum — while the migrated instance's own
+    // name (vellum, inside rewritten paths) survives untouched. ──
+    const soul = await fs.readFile(path.join(cadetRoot, "workspace/SOUL.md"), "utf8");
+    expect(soul).toContain("comes with the Cadet harness");
+    expect(soul).toContain("cadet://workspace/notes/readme");
+    expect(soul).toContain("~/.local/share/cadet/assistants/vellum");
+    expect(soul).not.toContain("Vellum");
+    expect(soul).not.toContain("vellum://");
 
     // ── Protected keys: verbatim, dissolved to the per-service dirs. ──
     const key = await fs.readFile(
@@ -342,6 +397,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async vellumSleep() {
         sleeps.push(1);
       },
+      async cadetSleep() {},
     };
 
     const report = await migrate({
@@ -370,6 +426,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
           : [];
       },
       async vellumSleep() {},
+      async cadetSleep() {},
     };
 
     const report = await migrate({
@@ -639,5 +696,135 @@ describe("e2e: legacy home-level lockfile move", () => {
       if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
     }
+  });
+});
+
+describe("e2e: repair mode", () => {
+  test("re-runs the idempotent value steps against the migrated cadet root", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const migrateReport = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: noopOps,
+    });
+    expect(migrateReport.ok).toBe(true);
+    const cadetRoot = path.join(home, ".cadet");
+
+    // Simulate a migration bug: legacy tokens back in migrated files, a
+    // vellum-branded row back in the assistant db.
+    const logPath = path.join(cadetRoot, "workspace/data/logs/assistant-2026-10-09.log");
+    await fs.appendFile(logPath, "2026-10-09T13:00:00.000Z INFO bugged line vellum://workspace/data/attachments/late.txt\n");
+    const configPath = path.join(cadetRoot, "workspace/config.json");
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({ services: { stt: { provider: "vellum" } } }, null, 2),
+    );
+    const soulPath = path.join(cadetRoot, "workspace/SOUL.md");
+    await fs.appendFile(soulPath, "Bugged addendum: comes with the Vellum harness again.\n");
+    const db = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"));
+    db.run(
+      `INSERT INTO messages VALUES ('m9', 'c1', 'assistant', 'bugged reply', 9,
+       '{"channel":"vellum"}', 'vellum', 'vellum')`,
+    );
+    db.close();
+
+    let cadetSleeps = 0;
+    let vellumSleeps = 0;
+    const report = await repair({
+      cadetRoot,
+      processOps: {
+        async find() {
+          return [];
+        },
+        async vellumSleep() {
+          vellumSleeps++;
+        },
+        async cadetSleep() {
+          cadetSleeps++;
+        },
+      },
+      termGraceMs: 0,
+    });
+
+    expect(report.mode).toBe("repair");
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
+    expect(vellumSleeps).toBe(0); // repair never touches the vellum CLI
+    // No running cadet processes in the fixture → sleep skipped.
+    expect(cadetSleeps).toBe(0);
+    const stop = report.steps.find((s) => s.step === "stop-cadet");
+    expect(stop?.status).toBe("skipped");
+
+    const log = await fs.readFile(logPath, "utf8");
+    expect(log).toContain("cadet://workspace/data/attachments/late.txt");
+    const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+    expect(config.services.stt.provider).toBe("cadet");
+    const soul = await fs.readFile(soulPath, "utf8");
+    expect(soul).toContain("comes with the Cadet harness again.");
+    const checked = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {
+      readonly: true,
+    });
+    const leftover = checked
+      .query("SELECT COUNT(*) AS n FROM messages WHERE user_message_channel = 'vellum'")
+      .all();
+    expect(leftover).toEqual([{ n: 0 }]);
+
+    // A timestamped backup of the cadet root itself, beside it.
+    expect(report.backupPath).toContain(".cadet-migration-backups");
+    expect(report.backupPath!.startsWith(home)).toBe(true);
+
+    // Second repair: everything already clean → still ok, no rewrites.
+    const second = await repair({ cadetRoot, processOps: noopOps, termGraceMs: 0 });
+    expect(second.ok).toBe(true);
+    const rewrite = second.steps.find((s) => s.step === "rewrite-content");
+    expect(rewrite?.summary).toContain("already matches its sanctioned transform");
+  });
+
+  test("dry run reports pending work, touches nothing, stops nothing", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const migrateReport = await migrate({
+      vellumRoot: root,
+      cadetRoot: path.join(home, ".cadet"),
+      processOps: noopOps,
+    });
+    expect(migrateReport.ok).toBe(true);
+    const cadetRoot = path.join(home, ".cadet");
+
+    const logPath = path.join(cadetRoot, "workspace/data/logs/assistant-2026-10-09.log");
+    await fs.appendFile(logPath, "2026-10-09T14:00:00.000Z INFO pending vellum://workspace/data/attachments/x.txt\n");
+
+    let cadetSleeps = 0;
+    const report = await repair({
+      cadetRoot,
+      dryRun: true,
+      processOps: {
+        async find() {
+          return [];
+        },
+        async vellumSleep() {},
+        async cadetSleep() {
+          cadetSleeps++;
+        },
+      },
+    });
+
+    expect(report.mode).toBe("repair");
+    expect(report.ok).toBe(true);
+    expect(report.steps.find((s) => s.step === "repair-plan")?.status).toBe("planned");
+    expect(report.steps.find((s) => s.step === "stop-cadet")).toBeUndefined();
+    expect(cadetSleeps).toBe(0);
+    expect(await fs.readFile(logPath, "utf8")).toContain("vellum://workspace/data/attachments/x.txt");
+    expect(report.backupPath).toBeNull();
+  });
+
+  test("refuses to run on a cadet root this migrator did not create", async () => {
+    const { home } = await buildFullVellum0126();
+    const bare = path.join(home, ".cadet-not-ours");
+    await fs.mkdir(bare, { recursive: true });
+
+    const report = await repair({ cadetRoot: bare, processOps: noopOps });
+    expect(report.ok).toBe(false);
+    expect(report.exitCode).toBe(3);
+    expect(report.steps.find((s) => s.step === "preflight-repair")?.status).toBe("failed");
   });
 });

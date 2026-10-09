@@ -6,7 +6,11 @@ import {
   renameRelativePath,
 } from "../../src/fs-utils.js";
 import {
+  CADET_PROCESS_PATTERNS,
+  isConversationLog,
+  isPersonaPrompt,
   isPluginSource,
+  isRuntimeLog,
   isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
@@ -314,5 +318,36 @@ describe("layout: skill frontmatter rewrites", () => {
     const { text, changed } = rewriteSkillFrontmatter(raw);
     expect(changed).toBe(0);
     expect(text).toBe(raw);
+  });
+});
+
+describe("layout: workspace content categories", () => {
+  test("conversation logs live under workspace/conversations", () => {
+    expect(isConversationLog("workspace/conversations/2026-10-01/x/messages.jsonl")).toBe(true);
+    expect(isConversationLog("workspace/conversations/2026-10-01/x/.tool-results/abc.txt")).toBe(true);
+    expect(isConversationLog("workspace/conversations")).toBe(false);
+    expect(isConversationLog("workspace/data/logs/assistant-2026-10-09.log")).toBe(false);
+  });
+
+  test("runtime logs live under workspace/data/logs", () => {
+    expect(isRuntimeLog("workspace/data/logs/assistant-2026-10-09.log")).toBe(true);
+    expect(isRuntimeLog("workspace/data/logs/vellum.log")).toBe(true);
+    expect(isRuntimeLog("workspace/data/db/assistant.db")).toBe(false);
+    expect(isRuntimeLog("data/logs/assistant-2026-10-09.log")).toBe(false);
+  });
+
+  test("persona prompts are the known workspace-root prompt files only", () => {
+    expect(isPersonaPrompt("workspace/SOUL.md")).toBe(true);
+    expect(isPersonaPrompt("workspace/IDENTITY.md")).toBe(true);
+    expect(isPersonaPrompt("workspace/notes/vellum-history.md")).toBe(false);
+    expect(isPersonaPrompt("workspace/SOUL.md.bak")).toBe(false);
+    expect(isPersonaPrompt("SOUL.md")).toBe(false);
+  });
+
+  test("cadet process patterns mirror the vellum component set", () => {
+    expect(CADET_PROCESS_PATTERNS).toContain("cadet-assistant");
+    expect(CADET_PROCESS_PATTERNS).toContain("cadet-gateway");
+    expect(CADET_PROCESS_PATTERNS).toContain("credential-executor");
+    expect(CADET_PROCESS_PATTERNS).not.toContain("vellum-daemon");
   });
 });

@@ -8,20 +8,11 @@ import {
   isUnderWorkspaceRuntime,
   isVerbatimDir,
   renameRelativePath,
+  sanctionedContentTransform,
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import {
-  DEFAULT_TARGET_CTX,
-  isPluginSource,
-  isSkillFrontmatter,
-  isSkillInstallMeta,
-  isWorkspaceConfigContract,
-  rewriteSkillFrontmatter,
-  rewriteWorkspaceJsonValues,
-  USER_WORKSPACE_DIR,
-  type MigrationTargetCtx,
-} from "../layout.js";
+import { DEFAULT_TARGET_CTX, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
 
 /**
@@ -148,40 +139,16 @@ async function execute(
     if (f.action === "rewrite") {
       const raw = await fs.readFile(srcAbs, "utf8");
       const stateRel = stateRelativePath(f.src);
-      let text = raw;
+      // One shared dispatch with repair + verify: every sanctioned rewrite
+      // is a named substep, everything unmapped stays generic machine-file
+      // substitutions.
+      const sanctioned = sanctionedContentTransform(stateRel, raw, targetCtx);
+      let text: string;
       let counts: Record<string, number> = {};
-      if (isWorkspaceConfigContract(stateRel)) {
-        // "config.json rewrite": path/env substitutions PLUS JSON value
-        // rewrites (provider: "vellum" → "cadet").
-        const applied = applySubstitutions(raw, targetCtx);
-        text = applied.text;
-        counts = applied.counts;
-        const values = rewriteWorkspaceJsonValues(text);
-        if (values.changed > 0) {
-          text = values.text;
-          counts["json-values"] = values.changed;
-        }
-        bump("config.json rewrite", values.changed);
-      } else if (isSkillInstallMeta(stateRel)) {
-        // "skills renames": origin: "vellum" → "cadet", JSON-aware only.
-        const values = rewriteWorkspaceJsonValues(raw);
-        text = values.text;
-        if (values.changed > 0) counts["json-values"] = values.changed;
-        bump("skills renames", values.changed);
-      } else if (isSkillFrontmatter(stateRel)) {
-        // "skill frontmatter rewrites": metadata.vellum → metadata.cadet in
-        // the SKILL.md frontmatter block only — prose below stays verbatim.
-        const values = rewriteSkillFrontmatter(raw);
-        text = values.text;
-        if (values.changed > 0) counts["frontmatter-metadata-key"] = values.changed;
-        bump("skill frontmatter rewrites", values.changed);
-      } else if (isPluginSource(stateRel)) {
-        // "plugin import rewrites": the npm-scope rule ONLY — never touch
-        // user-authored code beyond the renamed package specifier.
-        text = raw.replace(/@vellumai\//g, "@mycadet/");
-        const changed = raw !== text ? 1 : 0;
-        if (changed) counts["npm-scope"] = 1;
-        bump("plugin import rewrites", changed);
+      if (sanctioned) {
+        text = sanctioned.text;
+        counts = sanctioned.counts;
+        bump(sanctioned.substep, Object.values(counts).reduce((a, b) => a + b, 0));
       } else {
         const applied = applySubstitutions(raw, targetCtx);
         text = applied.text;

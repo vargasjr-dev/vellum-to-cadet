@@ -97,6 +97,14 @@ export async function migrateAssistantDb(
   /** Destination-relative path of the assistant db, derived from the copy plan. */
   destRel: string | undefined,
 ): Promise<StepResult> {
+  return migrateAssistantDbAt(detect.cadetRoot, destRel);
+}
+
+/** Repair-mode entry: same step, aimed at an already-migrated cadet root. */
+export async function migrateAssistantDbAt(
+  cadetRoot: string,
+  destRel: string | undefined,
+): Promise<StepResult> {
   if (!destRel) {
     return {
       step: "migrate-assistant-db",
@@ -105,7 +113,7 @@ export async function migrateAssistantDb(
     };
   }
   return migrateDbValues({
-    detect,
+    cadetRoot,
     destRel,
     step: "migrate-assistant-db",
     label: "assistant db",
@@ -120,6 +128,14 @@ export async function migrateGatewayDb(
   /** Destination-relative path of the gateway db, derived from the copy plan. */
   destRel: string | undefined,
 ): Promise<StepResult> {
+  return migrateGatewayDbAt(detect.cadetRoot, destRel);
+}
+
+/** Repair-mode entry: same step, aimed at an already-migrated cadet root. */
+export async function migrateGatewayDbAt(
+  cadetRoot: string,
+  destRel: string | undefined,
+): Promise<StepResult> {
   if (!destRel) {
     return {
       step: "migrate-gateway-db",
@@ -128,7 +144,7 @@ export async function migrateGatewayDb(
     };
   }
   return migrateDbValues({
-    detect,
+    cadetRoot,
     destRel,
     step: "migrate-gateway-db",
     label: "gateway db",
@@ -137,7 +153,7 @@ export async function migrateGatewayDb(
 }
 
 type DbValuesOptions = {
-  detect: DetectInfo;
+  cadetRoot: string;
   destRel: string;
   step: StepResult["step"];
   label: string;
@@ -149,8 +165,8 @@ type DbValuesOptions = {
 };
 
 async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
-  const { detect, destRel, step, label, columns } = options;
-  const dbPath = path.join(detect.cadetRoot, destRel);
+  const { cadetRoot, destRel, step, label, columns } = options;
+  const dbPath = path.join(cadetRoot, destRel);
 
   if (!(await fileExists(dbPath))) {
     return { step, status: "skipped", summary: `no ${label} in the migrated workspace` };

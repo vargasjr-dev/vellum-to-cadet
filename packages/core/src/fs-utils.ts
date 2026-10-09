@@ -13,10 +13,14 @@ import {
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
+  isConversationLog,
+  isPersonaPrompt,
   isPluginSource,
+  isRuntimeLog,
   isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
+  rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
   textSubstitutions,
   type MigrationTargetCtx,
@@ -98,15 +102,18 @@ export function isRewriteEligible(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
   // Never rewrite the user-facing workspace or protected keys — except the
   // explicit machine-owned targets inside it (the config contract, skill
-  // install metadata, skill frontmatter, plugin sources), each its own
-  // reported substep.
+  // install metadata, skill frontmatter, plugin sources, conversation logs,
+  // runtime logs, persona prompts), each its own reported substep.
   if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) {
     if (isDbArtifact(norm)) return false;
     return (
       isWorkspaceConfigContract(norm) ||
       isSkillInstallMeta(norm) ||
       isSkillFrontmatter(norm) ||
-      isPluginSource(norm)
+      isPluginSource(norm) ||
+      isConversationLog(norm) ||
+      isRuntimeLog(norm) ||
+      isPersonaPrompt(norm)
     );
   }
   for (const dir of VERBATIM_DIRS) {
@@ -278,4 +285,122 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)}MB`;
   if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)}KB`;
   return `${bytes}B`;
+}
+/**
+ * Precise legacy-token rewrites for machine-ish text that embeds history:
+ * links, channel values, moved paths, env names, npm scope. A quoted
+ * `"vellum"` JSON token is the channel-value shape (same rule the db
+ * metadata rewrite uses) — single-quoted or bare prose `vellum` is left
+ * alone so quoted user messages and this migration's own history survive
+ * verbatim.
+ */
+export function rewriteLegacyTokens(
+  content: string,
+  ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+): { text: string; counts: Record<string, number> } {
+  const counts: Record<string, number> = {};
+  let text = content;
+  const run = (name: string, pattern: RegExp, replace: string): void => {
+    const before = text;
+    text = text.replace(pattern, replace);
+    if (text !== before) counts[name] = (counts[name] ?? 0) + countMatches(before, pattern);
+  };
+  // Links/attachments first (vellum:// would otherwise be partly consumed
+  // by the path rules' `.vellum` alternation… it isn't, but order is cheap
+  // insurance and keeps the counts meaningful).
+  run("attachment-links", /vellum:\/\//g, "cadet://");
+  // Channel values as JSON string tokens (compact or spaced; the lookahead
+  // also admits end-of-string so a trailing quoted value still flips).
+  run("channel-values", /"(vellum)"(?=[\s,:\]}]|$)/g, '"cadet"');
+  // Moved state paths, env names, npm scope — the same rules machine files get.
+  const applied = applySubstitutions(text, ctx);
+  text = applied.text;
+  for (const [k, v] of Object.entries(applied.counts)) counts[k] = (counts[k] ?? 0) + v;
+  return { text, counts };
+}
+
+/**
+ * Persona prompt flip: everything {@link rewriteLegacyTokens} does, plus
+ * brand words — remaining `Vellum`/`vellum` occurrences are prose-only by
+ * then (paths, links, and scope were already consumed), and that is exactly
+ * what should flip ("comes with the Vellum harness" → Cadet).
+ */
+export function rewritePersonaPrompt(
+  content: string,
+  ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+): { text: string; counts: Record<string, number> } {
+  const base = rewriteLegacyTokens(content, ctx);
+  let text = base.text;
+  const counts = { ...base.counts };
+  const brandBefore = text;
+  // Brand words LAST: by now paths, links, and scope were consumed, so the
+  // remaining occurrences are prose ("comes with the Vellum harness"). The
+  // lookbehind keeps path-embedded names intact — the migrated instance is
+  // legitimately NAMED vellum (~/.vellum → .local/share/cadet/assistants/
+  // vellum), and a bare word-flip after the path rules would corrupt it to
+  // …/assistants/cadet.
+  text = text.replace(/(?<![.\w/\\])Vellum\b/g, "Cadet").replace(/(?<![.\w/\\])vellum\b/g, "cadet");
+  if (text !== brandBefore) {
+    counts["brand-words"] =
+      (brandBefore.match(/(?<![.\w/\\])Vellum\b/g)?.length ?? 0) +
+      (brandBefore.match(/(?<![.\w/\\])vellum\b/g)?.length ?? 0);
+  }
+  return { text, counts };
+}
+
+function countMatches(before: string, pattern: RegExp): number {
+  // pattern is global — count what the replace is about to change.
+  return (before.match(pattern) ?? []).length;
+}
+
+/**
+ * The ONE dispatch for content rewrites, shared by migrate-layout (during
+ * copy), repair (post-migration re-run), and verify (semantic comparison).
+ * Every case is a named substep; anything unmapped returns null (verbatim).
+ */
+export function sanctionedContentTransform(
+  stateRel: string,
+  raw: string,
+  ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+): { substep: string; text: string; counts: Record<string, number> } | null {
+  if (isWorkspaceConfigContract(stateRel)) {
+    const applied = applySubstitutions(raw, ctx);
+    const values = rewriteWorkspaceJsonValues(applied.text);
+    const counts = { ...applied.counts };
+    if (values.changed > 0) counts["json-values"] = values.changed;
+    return { substep: "config.json rewrite", text: values.text, counts };
+  }
+  if (isSkillInstallMeta(stateRel)) {
+    const values = rewriteWorkspaceJsonValues(raw);
+    const counts: Record<string, number> = values.changed > 0 ? { "json-values": values.changed } : {};
+    return { substep: "skills renames", text: values.text, counts };
+  }
+  if (isSkillFrontmatter(stateRel)) {
+    const values = rewriteSkillFrontmatter(raw);
+    const counts: Record<string, number> =
+      values.changed > 0 ? { "frontmatter-metadata-key": values.changed } : {};
+    return { substep: "skill frontmatter rewrites", text: values.text, counts };
+  }
+  if (isPluginSource(stateRel)) {
+    const before = raw;
+    const text = raw.replace(/@vellumai\//g, "@mycadet/");
+    return {
+      substep: "plugin import rewrites",
+      text,
+      counts: text !== before ? { "npm-scope": 1 } : {},
+    };
+  }
+  if (isConversationLog(stateRel)) {
+    const { text, counts } = rewriteLegacyTokens(raw, ctx);
+    return { substep: "conversation log rewrites", text, counts };
+  }
+  if (isRuntimeLog(stateRel)) {
+    const { text, counts } = rewriteLegacyTokens(raw, ctx);
+    return { substep: "runtime log rewrites", text, counts };
+  }
+  if (isPersonaPrompt(stateRel)) {
+    const { text, counts } = rewritePersonaPrompt(raw, ctx);
+    return { substep: "persona prompt rewrites", text, counts };
+  }
+  return null;
 }

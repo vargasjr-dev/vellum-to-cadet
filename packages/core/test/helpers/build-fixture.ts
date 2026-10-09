@@ -120,6 +120,68 @@ async function writeAssistantState(root: string): Promise<void> {
     "---\nname: github-summary\ndescription: Summarize commits\nmetadata:\n  emoji: \"octopus\"\n  vellum:\n    display-name: GitHub Summary\n    category: productivity\n---\n\n# GitHub summary\n\nFrom the vellum catalog.\n",
   );
 
+  // Agent conversation logs — the runtime reads these back to answer
+  // questions about shared history. Precise edits only: attachment links
+  // and channel values flip; quoted user prose and single-quoted shell
+  // output stay verbatim.
+  await mkdirs(root, ["workspace/conversations/2026-10-01T09-00-00.000Z_11111111-1111-4111-8111-111111111111/.tool-results"]);
+  await write(
+    root,
+    "workspace/conversations/2026-10-01T09-00-00.000Z_11111111-1111-4111-8111-111111111111/messages.jsonl",
+    [
+      JSON.stringify({ type: "user", content: "Remember when I said I used vellum before it was cadet?" }),
+      JSON.stringify({
+        type: "assistant",
+        content: "Here is the doc you shared: vellum://workspace/data/attachments/q3-report.pdf",
+      }),
+      JSON.stringify({ type: "event", channel: "vellum", detail: "delivered" }),
+      JSON.stringify({ type: "tool", content: "SELECT * FROM channels WHERE type = 'vellum';" }),
+      "",
+    ].join("\n"),
+  );
+  await write(
+    root,
+    "workspace/conversations/2026-10-01T09-00-00.000Z_11111111-1111-4111-8111-111111111111/.tool-results/abc123.txt",
+    "saved attachment to vellum://workspace/data/attachments/notes.txt\nsecond line mentions plain vellum in prose\n",
+  );
+
+  // Runtime logs (daily files, same names in cadet) + the legacy-named
+  // vellum.log (content rewritten, name kept — cadet never reads it).
+  await mkdirs(root, ["workspace/data/logs"]);
+  await write(
+    root,
+    "workspace/data/logs/assistant-2026-10-09.log",
+    [
+      "2026-10-09T12:00:00.000Z INFO attached doc vellum://workspace/data/attachments/q3-report.pdf",
+      '2026-10-09T12:00:01.000Z INFO event delivered on channel "vellum"',
+      "2026-10-09T12:00:02.000Z INFO VELLUM_ROOT_DIR=/root/.vellum workspace=/root/.vellum/workspace",
+      '2026-10-09T12:00:03.000Z INFO user said "I used vellum before it was cadet"',
+      "",
+    ].join("\n"),
+  );
+  await write(
+    root,
+    "workspace/data/logs/vellum.log",
+    "legacy daemon line with a vellum://workspace/data/attachments/old.txt link\n",
+  );
+
+  // Persona prompt files: brand references flip (Vargas's call) so the
+  // persona never tells cadet it runs on vellum. Paths and links follow
+  // the same precise rules.
+  await write(
+    root,
+    "workspace/SOUL.md",
+    [
+      "# Soul",
+      "",
+      "You are the user's loyal padawan. The assistant comes with the Vellum harness by default.",
+      "",
+      "## History",
+      "We keep shared docs at vellum://workspace/notes/readme and my old keys lived in ~/.vellum.",
+      "",
+    ].join("\n"),
+  );
+
   // Machine runtime state inside workspace.
   await write(root, "workspace/data/db/assistant.db-wal", "wal-bytes");
   await write(root, "workspace/data/db/assistant.db-shm", "shm-bytes");
