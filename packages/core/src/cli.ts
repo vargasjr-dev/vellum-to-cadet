@@ -11,6 +11,7 @@ import { colors, command, detail, errorText, failIcon, header, skipIcon, success
 import { errPath } from "./steps/migrate-layout.js";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate, repair } from "./runner.js";
+import { renderUninstallHuman, runUninstall } from "./uninstall.js";
 import { toCadetRoot } from "./steps/detect.js";
 import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepResult } from "./types.js";
 
@@ -20,6 +21,8 @@ interface ParsedArgs extends MigrateOptions {
   cadetRootExplicit: boolean;
   /** True when invoked as `repair [flags]` (post-migration fix-up mode). */
   repair: boolean;
+  /** True when invoked as `uninstall [flags]` (point of no return). */
+  uninstall: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -29,6 +32,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     verbose: false,
     cadetRootExplicit: false,
     repair: false,
+    uninstall: false,
   };
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -65,6 +69,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     parsed.repair = true;
     positionals.shift();
   }
+  if (positionals[0] === "uninstall") {
+    parsed.uninstall = true;
+    positionals.shift();
+  }
   const root = positionals[0];
   if (root !== undefined) {
     if (positionals.length > 1) throw new Error(`unexpected extra argument: ${positionals[1]}`);
@@ -90,6 +98,7 @@ Steps: discover → detect → preflight → stop assistant → backup → migra
 Usage:
   npx migrate-vellum-assistant-to-cadet [flags]
   npx migrate-vellum-assistant-to-cadet repair [flags]
+  npx migrate-vellum-assistant-to-cadet uninstall [flags]
 
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
@@ -111,6 +120,15 @@ The vellum root is a read-only source of truth: nothing in it is ever
 modified or deleted. A timestamped full backup with sha256 manifests is
 written next to the cadet root before anything is migrated.
 
+Uninstall is the point of no return AFTER your cadet assistant is confirmed:
+it stops running vellum assistants, permanently deletes every vellum
+installation on the machine (legacy home root, modern XDG data roots, XDG
+config dirs and their env siblings, the old home-level lockfiles), and
+removes the migrator's own npx cache. It demands the word DELETE be typed;
+pass --yes for non-interactive runs and --dry-run to list without deleting.
+It never touches the cadet side — the cadet assistant and the migration
+backups in ~/.cadet-migration-backups are kept.
+
 Exit codes:
   0  success (or already migrated + verified)
   2  no vellum root found
@@ -120,6 +138,9 @@ Exit codes:
   7  verification failed
   8  cadet root already populated (conflict)
   9  multiple candidate roots found in a non-interactive run
+  4  running vellum assistants refused to sleep (uninstall)
+  10  uninstall not confirmed (declined, or stdin unavailable without --yes)
+  11  uninstall failed to delete one or more targets
 `;
 
 async function resolveRoot(): Promise<string> {
@@ -255,8 +276,8 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     lines.push("");
     lines.push(`  ${header("Optional next steps")}`);
     lines.push(`    · Install and launch the cadet assistant, then sign in`);
-    lines.push(`    · Once you've confirmed everything is there, delete the old copy:`);
-    lines.push(`      ${command(`rm -rf ${report.detect.vellumRoot}`)}`);
+    lines.push(`    · Once you've confirmed everything is there, retire vellum for good:`);
+    lines.push(`      ${command(`npx migrate-vellum-assistant-to-cadet uninstall`)}`);
   } else {
     lines.push(`  ${failIcon()} ${colors.red("Migration did not complete.")} ${detail("Nothing was deleted.")}`);
     if (report.backupPath) {
@@ -337,6 +358,35 @@ async function main(): Promise<number> {
         console.error((err as Error).stack);
       }
       return EXIT_CODES.migrationFailed;
+    }
+  }
+
+  // Uninstall mode: the point of no return. Skips root resolution —
+  // discovery inside runUninstall finds and gates every target itself.
+  if (parsed.uninstall) {
+    if (parsed.cadetRoot) {
+      console.error(errorText("uninstall takes no root — it removes every vellum installation it finds"));
+      return EXIT_CODES.preflightFailed;
+    }
+    try {
+      const report = await runUninstall({
+        dryRun: parsed.dryRun,
+        yes: parsed.yes,
+        json: parsed.json,
+        verbose: parsed.verbose,
+      });
+      if (parsed.json) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        process.stdout.write(renderUninstallHuman(report));
+      }
+      return report.exitCode;
+    } catch (err) {
+      console.error(errorText(`uninstall crashed: ${(err as Error).message}`));
+      if (parsed.verbose && (err as Error).stack) {
+        console.error((err as Error).stack);
+      }
+      return EXIT_CODES.uninstallFailed;
     }
   }
 

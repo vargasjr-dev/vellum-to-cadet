@@ -31,7 +31,7 @@ npx migrate-vellum-assistant-to-cadet --json      # machine-readable report
 
 On success the CLI prints a colorful summary plus **optional next steps**
 (install and launch cadet, and — only once you've confirmed your data —
-`rm -rf` the old root by hand).
+the `uninstall` subcommand to retire vellum for good).
 
 ## Guarantees
 
@@ -43,6 +43,25 @@ On success the CLI prints a colorful summary plus **optional next steps**
   makes re-runs verify-only.
 - Running vellum assistant processes are stopped automatically before the
   migration; if one refuses to die, the run fails loudly with exit code 4.
+
+## Uninstalling vellum
+
+After your cadet assistant is confirmed and you want vellum gone for good:
+
+```sh
+npx migrate-vellum-assistant-to-cadet uninstall --dry-run   # list, delete nothing
+npx migrate-vellum-assistant-to-cadet uninstall
+```
+
+Uninstall sweeps every vellum location on the machine — the legacy home
+root, the modern XDG data roots (including env-suffixed siblings like
+`vellum-dev`), the XDG config dirs, and the old home-level lockfiles — and
+removes the migrator's own npx cache. It demands the word `DELETE` be
+typed (`--yes` for non-interactive runs) and prints a full warning: the
+deletion is irreversible and the data is unrecoverable. The cadet side is
+never touched — the cadet assistant and the migration backups in
+`~/.cadet-migration-backups` are kept (delete those by hand if you're
+truly done with them).
 
 ## Releasing
 
