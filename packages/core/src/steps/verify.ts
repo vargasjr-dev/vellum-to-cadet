@@ -10,8 +10,29 @@ import {
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { ASSISTANT_DB_STATE_REL, CHANNEL_COLUMNS } from "./migrate-assistant-db.js";
+import { isSkillFrontmatter, rewriteSkillFrontmatter } from "../layout.js";
+import {
+  ASSISTANT_DB_STATE_REL,
+  CHANNEL_COLUMNS,
+  GATEWAY_CHANNEL_COLUMNS,
+  GATEWAY_DB_STATE_REL,
+} from "./migrate-assistant-db.js";
 import type { StepIssue, StepResult } from "../types.js";
+
+/**
+ * The value-migrated DBs: each is checked semantically (zero remaining
+ * vellum-branded rows) instead of byte-for-byte, and their -wal/-shm sidecars
+ * are expected to vanish (the open folds them in, the close checkpoints).
+ */
+const VALUE_MIGRATED_DBS: ReadonlyArray<{
+  stateRel: string;
+  columns: ReadonlyArray<{ table: string; column: string }>;
+  messages?: boolean;
+  connections?: boolean;
+}> = [
+  { stateRel: ASSISTANT_DB_STATE_REL, columns: CHANNEL_COLUMNS, messages: true, connections: true },
+  { stateRel: GATEWAY_DB_STATE_REL, columns: GATEWAY_CHANNEL_COLUMNS },
+];
 
 /**
  * Post-migration verification:
@@ -33,52 +54,45 @@ export async function verify(
 
   for (const entry of source) {
     if (entry.isDirectory) continue;
-    // The assistant DB is value-migrated (channel ids, attachment links, the
-    // managed connection row) — its sidecars vanish on checkpoint and its
-    // bytes legitimately differ, so neither survives a byte-compare. It is
-    // checked semantically below; other DB artifacts compare byte-for-byte.
     const stateRel = stateRelativePath(entry.relPath);
-    // The assistant DB's -wal/-shm sidecars are folded into the main db on
-    // checkpoint and removed — their absence at the destination is expected.
-    if (
-      stateRel === `${ASSISTANT_DB_STATE_REL}-wal` ||
-      stateRel === `${ASSISTANT_DB_STATE_REL}-shm`
-    ) {
-      continue;
-    }
-    // The assistant DB is value-migrated (channel ids, attachment links, the
-    // managed connection row) — its bytes legitimately differ, so it is
-    // checked semantically instead of byte-for-byte. Other DB artifacts
-    // (untouched) still compare byte-for-byte below.
-    if (isDbArtifact(stateRel)) {
-      if (stateRel === ASSISTANT_DB_STATE_REL) {
-        checked++;
-        const destAbs = path.join(cadetRoot, renameRelativePath(entry.relPath));
-        const leftover = await assistantDbVellumRows(destAbs);
-        if (leftover === "unreadable") {
-          // Not a real sqlite file — fall back to byte comparison.
-          if (!(await bytesMatch(entry.absPath, path.join(cadetRoot, renameRelativePath(entry.relPath))))) {
-            issues.push({
-              severity: "error",
-              path: entry.relPath,
-              message: "assistant db differs from backup source and could not be checked semantically",
-            });
-          } else {
-            byteIdentical++;
-          }
-        } else if (leftover > 0) {
+
+    // Value-migrated DBs are checked semantically below; their -wal/-shm
+    // sidecars are folded into the main db on checkpoint and removed — their
+    // absence at the destination is expected.
+    const migratedDb = VALUE_MIGRATED_DBS.find(
+      (d) =>
+        stateRel === d.stateRel ||
+        stateRel === `${d.stateRel}-wal` ||
+        stateRel === `${d.stateRel}-shm`,
+    );
+    if (migratedDb) {
+      if (stateRel !== migratedDb.stateRel) continue;
+      checked++;
+      const destAbs = path.join(cadetRoot, renameRelativePath(entry.relPath));
+      const leftover = await dbVellumRows(destAbs, migratedDb);
+      if (leftover === "unreadable") {
+        // Not a real sqlite file — fall back to byte comparison (the
+        // value-migration step leaves non-sqlite files verbatim).
+        if (!(await bytesMatch(entry.absPath, path.join(cadetRoot, renameRelativePath(entry.relPath))))) {
           issues.push({
             severity: "error",
             path: entry.relPath,
-            message: `${leftover} vellum-branded row(s)/link(s) remain in the assistant db`,
+            message: "db differs from backup source and could not be checked semantically",
           });
         } else {
-          dbsChecked++;
+          byteIdentical++;
         }
+      } else if (leftover > 0) {
+        issues.push({
+          severity: "error",
+          path: entry.relPath,
+          message: `${leftover} vellum-branded row(s)/link(s) remain in ${migratedDb.stateRel}`,
+        });
+      } else {
+        dbsChecked++;
       }
-      // Sidecars (-wal/-shm) and non-workspace DBs: sidecars are folded into
-      // the main db on checkpoint; other DBs are untouched → byte-identical
-      // by construction, checked by nothing here.
+      // Sidecars vanish on checkpoint; other DB artifacts (untouched) are
+      // byte-identical by construction, checked by nothing here.
       continue;
     }
     const destRel = renameRelativePath(entry.relPath);
@@ -101,8 +115,26 @@ export async function verify(
     }
 
     // Different bytes — acceptable only if the file was supposed to be
-    // rewritten AND the rewrite left no vellum tokens behind.
+    // rewritten AND the rewrite is exactly the sanctioned transform (or, for
+    // generic machine files, left no vellum tokens behind).
     if (isSupposedToBeRewritten(entry.relPath)) {
+      if (isSkillFrontmatter(entry.relPath)) {
+        // Semantic check: the destination must be EXACTLY the source with
+        // the frontmatter metadata key flipped — nothing else. A token scan
+        // would false-positive on skill prose that legitimately mentions
+        // vellum.
+        const expected = rewriteSkillFrontmatter(srcBuf.toString("utf8")).text;
+        if (destBuf.toString("utf8") === expected) {
+          rewrittenClean++;
+        } else {
+          issues.push({
+            severity: "error",
+            path: entry.relPath,
+            message: "skill frontmatter differs from the sanctioned metadata-key rewrite",
+          });
+        }
+        continue;
+      }
       const text = destBuf.toString("utf8");
       const leftovers = text.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
       if (leftovers && leftovers.length > 0) {
@@ -137,12 +169,16 @@ export async function verify(
 }
 
 /**
- * Count vellum-branded values remaining in the migrated assistant DB:
- * channel-id rows, `vellum://` attachment links, and `vellum`-spelled
- * managed-connection rows. Returns "unreadable" when the file is not a
- * real sqlite database (callers fall back to byte comparison).
+ * Count vellum-branded values remaining in a value-migrated DB: channel-id
+ * rows across the db's explicit column list, plus (assistant db only)
+ * `vellum://` attachment links / `vellum` JSON refs in message content and
+ * `vellum`-spelled managed-connection rows. Returns "unreadable" when the
+ * file is not a real sqlite database (callers fall back to byte comparison).
  */
-async function assistantDbVellumRows(dbPath: string): Promise<number | "unreadable"> {
+async function dbVellumRows(
+  dbPath: string,
+  spec: { columns: ReadonlyArray<{ table: string; column: string }>; messages?: boolean; connections?: boolean },
+): Promise<number | "unreadable"> {
   let db: Database;
   try {
     db = new Database(dbPath, { readonly: true });
@@ -153,14 +189,14 @@ async function assistantDbVellumRows(dbPath: string): Promise<number | "unreadab
     let total = 0;
     const tableExists = (name: string): boolean =>
       !!db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
-    for (const { table, column } of CHANNEL_COLUMNS) {
+    for (const { table, column } of spec.columns) {
       if (!tableExists(table)) continue;
       const row = db
         .query(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
         .get() as { c: number } | null;
       total += row?.c ?? 0;
     }
-    if (tableExists("messages")) {
+    if (spec.messages && tableExists("messages")) {
       const links = db
         .query(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
         .get() as { c: number } | null;
@@ -170,7 +206,7 @@ async function assistantDbVellumRows(dbPath: string): Promise<number | "unreadab
         .get() as { c: number } | null;
       total += meta?.c ?? 0;
     }
-    if (tableExists("provider_connections")) {
+    if (spec.connections && tableExists("provider_connections")) {
       const conns = db
         .query(
           `SELECT COUNT(*) AS c FROM provider_connections WHERE name = 'vellum' OR provider = 'vellum'`,

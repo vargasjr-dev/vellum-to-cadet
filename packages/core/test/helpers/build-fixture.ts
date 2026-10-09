@@ -111,8 +111,14 @@ async function writeAssistantState(root: string): Promise<void> {
     "workspace/plugins/greeter/index.ts",
     'import { definePlugin } from "@vellumai/plugin-api";\n\nexport default definePlugin({ name: "greeter" });\n',
   );
-  // Skill docs are user content — origins in prose stay untouched.
-  await write(root, "workspace/skills/github-summary/SKILL.md", "# GitHub summary\n\nFrom the vellum catalog.\n");
+  // Skill docs' frontmatter is a machine contract (cadet reads
+  // metadata.cadet.*) — old installs carry metadata.vellum and must be
+  // rewritten; the prose below stays verbatim.
+  await write(
+    root,
+    "workspace/skills/github-summary/SKILL.md",
+    "---\nname: github-summary\ndescription: Summarize commits\nmetadata:\n  emoji: \"octopus\"\n  vellum:\n    display-name: GitHub Summary\n    category: productivity\n---\n\n# GitHub summary\n\nFrom the vellum catalog.\n",
+  );
 
   // Machine runtime state inside workspace.
   await write(root, "workspace/data/db/assistant.db-wal", "wal-bytes");
@@ -157,8 +163,11 @@ async function writeAssistantState(root: string): Promise<void> {
 
   // Gateway state at the STATE ROOT (vellum 0.12.6): the gateway DB lived
   // at <root>/data/gateway.sqlite and cadet's gateway reads it only from
-  // gateway-security — the migrator owns the relocation.
-  await write(root, "data/gateway.sqlite", `${SQLITE_MAGIC}fake-gateway-db`);
+  // gateway-security — the migrator owns the relocation. It is a REAL db
+  // carrying the gateway's own channel-branded rows; the value-migration
+  // step rewrites them after the relocation. The -wal sidecar is fake bytes
+  // on purpose: an invalid WAL is tolerated (treated as empty) by SQLite.
+  await writeRealGatewayDb(path.join(root, "data/gateway.sqlite"));
   await write(root, "data/gateway.sqlite-wal", "gateway-wal-bytes");
 
   // Root-level guardian-init lock (pre-0.12 straggler; 0.12 kept it in
@@ -260,5 +269,72 @@ function writeRealAssistantDb(dbPath: string): void {
     ('vellum', 'vellum', '{"type":"platform"}', 1, 1),
     ('openai', 'openai', '{"type":"api_key"}', 2, 2)`);
   db.run(`INSERT INTO channel_inbound_events VALUES ('vellum', 'chat-1', 'evt-1')`);
+  db.close();
+}
+
+/**
+ * A REAL sqlite gateway db carrying the gateway's OWN channel-branded rows
+ * (gateway/src/db/schema.ts): the gateway-owned contact_channels copy,
+ * invite/request/delivery/seen-event channel columns, and the per-channel
+ * policy/identity tables. The value-migration step must rewrite all of it to
+ * cadet spellings after the relocation into gateway-security/.
+ */
+function writeRealGatewayDb(dbPath: string): void {
+  // The state root's data/ dir may not exist yet — sqlite won't create it.
+  const fsSync = require("node:fs");
+  fsSync.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.run(`CREATE TABLE contacts (
+    id TEXT PRIMARY KEY, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'contact'
+  )`);
+  db.run(`CREATE TABLE contact_channels (
+    id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, type TEXT NOT NULL, address TEXT
+  )`);
+  db.run(`CREATE TABLE ingress_invites (
+    id TEXT PRIMARY KEY, source_channel TEXT NOT NULL, code TEXT
+  )`);
+  db.run(`CREATE TABLE guardian_requests (
+    id TEXT PRIMARY KEY, source_channel TEXT, summary TEXT
+  )`);
+  db.run(`CREATE TABLE guardian_request_deliveries (
+    id TEXT PRIMARY KEY, destination_channel TEXT NOT NULL, chat_id TEXT
+  )`);
+  db.run(`CREATE TABLE inbound_seen_events (
+    id TEXT PRIMARY KEY, source_channel TEXT NOT NULL, external_message_id TEXT
+  )`);
+  db.run(`CREATE TABLE channel_bot_identity (
+    channel_type TEXT PRIMARY KEY, bot_user_id TEXT
+  )`);
+  db.run(`CREATE TABLE channel_admission_policy (
+    channel_type TEXT PRIMARY KEY, mode TEXT
+  )`);
+  db.run(`CREATE TABLE channel_permission_overrides (
+    id TEXT PRIMARY KEY, channel_type TEXT NOT NULL, channel_external_id TEXT
+  )`);
+  db.run(`CREATE TABLE channel_verification_sessions (
+    id TEXT PRIMARY KEY, channel TEXT NOT NULL, address TEXT
+  )`);
+  db.run(`CREATE TABLE channel_guardian_rate_limits (
+    channel TEXT PRIMARY KEY, window_start INTEGER
+  )`);
+  db.run(`CREATE TABLE slack_active_threads (
+    id TEXT PRIMARY KEY, channel_id TEXT
+  )`);
+  db.run(`INSERT INTO contacts VALUES ('contact-1', 'Vargas', 'guardian')`);
+  db.run(`INSERT INTO contact_channels VALUES
+    ('cc-1', 'contact-1', 'vellum', 'owner@vellum.local'),
+    ('cc-2', 'contact-1', 'telegram', '@owner')`);
+  db.run(`INSERT INTO ingress_invites VALUES ('inv-1', 'vellum', 'code-1')`);
+  db.run(`INSERT INTO guardian_requests VALUES ('gr-1', 'vellum', 'open the pod bay doors')`);
+  db.run(`INSERT INTO guardian_request_deliveries VALUES ('gd-1', 'vellum', 'chat-1')`);
+  db.run(`INSERT INTO inbound_seen_events VALUES ('se-1', 'vellum', 'evt-1')`);
+  db.run(`INSERT INTO channel_bot_identity VALUES ('vellum', 'bot-1')`);
+  db.run(`INSERT INTO channel_admission_policy VALUES ('vellum', 'open')`);
+  db.run(`INSERT INTO channel_permission_overrides VALUES
+    ('po-1', 'vellum', 'chat-1'),
+    ('po-2', 'slack', 'C01ABC')`);
+  db.run(`INSERT INTO channel_verification_sessions VALUES ('vs-1', 'vellum', 'owner@vellum.local')`);
+  db.run(`INSERT INTO channel_guardian_rate_limits VALUES ('vellum', 1)`);
+  db.run(`INSERT INTO slack_active_threads VALUES ('t-1', 'C01ABC')`);
   db.close();
 }
