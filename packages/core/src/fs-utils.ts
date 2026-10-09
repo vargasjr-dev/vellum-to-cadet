@@ -13,6 +13,8 @@ import {
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
+  isWorkspaceMachineFile,
+  rewriteWorkspaceJsonValues,
   textSubstitutions,
   type MigrationTargetCtx,
 } from "./layout.js";
@@ -91,8 +93,13 @@ export function extensionOf(name: string): string {
 
 export function isRewriteEligible(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
-  // Never rewrite the user-facing workspace or protected keys.
-  if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) return false;
+  // Never rewrite the user-facing workspace or protected keys — except the
+  // named machine-owned files inside it (config.json, skill install meta,
+  // plugin sources), which carry vellum-branded values the renamed product
+  // no longer reads.
+  if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) {
+    return isWorkspaceMachineFile(norm) && !isDbArtifact(norm);
+  }
   for (const dir of VERBATIM_DIRS) {
     if (norm === dir || norm.startsWith(`${dir}/`)) return false;
   }

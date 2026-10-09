@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { renameRelativePath, walkTree } from "../fs-utils.js";
+import { isDbArtifact, isRewriteEligible, renameRelativePath, walkTree } from "../fs-utils.js";
 import type { StepIssue, StepResult } from "../types.js";
 
 /**
@@ -80,12 +80,9 @@ export async function verify(
 }
 
 function isSupposedToBeRewritten(relPath: string): boolean {
-  // Mirrors the eligibility rules in migrate-layout — kept as a local check
-  // so verify can reason independently about what differences are acceptable.
-  const norm = relPath.split("\\").join("/");
-  if (norm.startsWith("workspace/")) return false;
-  if (norm === "protected" || norm.startsWith("protected/")) return false;
-  return true;
+  // Same predicate migrate-layout plans with — by construction, so verify
+  // can never drift from the executor's classification.
+  return isRewriteEligible(relPath) && !isDbArtifact(relPath);
 }
 
 async function exists(p: string): Promise<boolean> {

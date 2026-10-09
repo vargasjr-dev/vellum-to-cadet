@@ -11,7 +11,7 @@ import {
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { DEFAULT_TARGET_CTX, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
+import { DEFAULT_TARGET_CTX, isWorkspaceMachineFile, rewriteWorkspaceJsonValues, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
 import type { FileAction, DetectInfo, StepResult } from "../types.js";
 
 /**
@@ -119,7 +119,16 @@ async function execute(
 
     if (f.action === "rewrite") {
       const raw = await fs.readFile(srcAbs, "utf8");
-      const { text, counts } = applySubstitutions(raw, targetCtx);
+      let { text, counts } = applySubstitutions(raw, targetCtx);
+      if (isWorkspaceMachineFile(stateRelativePath(f.src)) && f.src.endsWith(".json")) {
+        // config.json + install-meta.json: value-level vellum→cadet
+        // (provider ids, skill origins) that the path/env rules miss.
+        const values = rewriteWorkspaceJsonValues(text);
+        if (values.changed > 0) {
+          text = values.text;
+          counts["workspace-json-values"] = values.changed;
+        }
+      }
       f.substitutions = counts;
       await fs.writeFile(destAbs, text, "utf8");
     } else {
