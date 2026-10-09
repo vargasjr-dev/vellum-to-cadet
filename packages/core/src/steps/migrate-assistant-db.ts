@@ -222,11 +222,17 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
 
     // "channel values": every channel-id column, 'vellum' → 'cadet'. Each
     // column is its own transaction of one: a table that exists but lacks
-    // the expected column (an older schema, a future rename) skips that
-    // column only — the remaining columns still migrate.
+    // the expected column is known schema drift (the old product's own
+    // migration 120 dropped the messages channel columns), so it skips
+    // silently — only real errors warn.
+    const columnExists = (table: string, column: string): boolean =>
+      !!db
+        .prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`)
+        .get(table, column);
     let channelRows = 0;
     for (const { table, column } of columns) {
       if (!tableExists(table)) continue;
+      if (!columnExists(table, column)) continue;
       try {
         channelRows += runCounted(
           `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
@@ -235,7 +241,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
         note(`${table}.${column}`, err);
       }
     }
-    if (options.rewriteMessages && tableExists("messages")) {
+    if (options.rewriteMessages && tableExists("messages") && columnExists("messages", "metadata")) {
       // Message metadata records channel refs as JSON string values.
       try {
         channelRows += runCounted(
@@ -251,7 +257,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     if (options.rewriteMessages) {
       // "attachment links": vellum:// attachment URIs in message content.
       let linkRows = 0;
-      if (tableExists("messages")) {
+      if (tableExists("messages") && columnExists("messages", "content")) {
         try {
           linkRows += runCounted(
             `UPDATE messages SET content = REPLACE(content, 'vellum://', 'cadet://')
@@ -271,7 +277,10 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       // ours. The name only moves when `cadet` is free (a re-seeded cadet row
       // would make the PK collide).
       let connectionRows = 0;
-      if (tableExists("provider_connections")) {
+      if (
+        tableExists("provider_connections") &&
+        columnExists("provider_connections", "provider")
+      ) {
         try {
           connectionRows += runCounted(
             `UPDATE provider_connections SET provider = 'cadet' WHERE provider = 'vellum'`,

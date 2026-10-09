@@ -60,6 +60,11 @@ export async function verify(
     if (entry.isDirectory) continue;
     const stateRel = stateRelativePath(entry.relPath);
 
+    // Retired archives are migrated by migrate-retired, optionally by
+    // design — they are cold storage, not part of the live-tree guarantee,
+    // and their re-tarred bytes legitimately differ from the source.
+    if (stateRel === "retired" || stateRel.startsWith("retired/")) continue;
+
     // Value-migrated DBs are checked semantically below; their -wal/-shm
     // sidecars are folded into the main db on checkpoint and removed — their
     // absence at the destination is expected.
@@ -108,8 +113,22 @@ export async function verify(
     }
     checked++;
 
-    const srcBuf = await fs.readFile(entry.absPath);
-    const destBuf = await fs.readFile(destAbs);
+    // A single unreadable entry (a directory wearing a file's name, odd
+    // filesystem state) must never crash the migration — it becomes a
+    // warning and the run continues.
+    let srcBuf: Buffer;
+    let destBuf: Buffer;
+    try {
+      srcBuf = await fs.readFile(entry.absPath);
+      destBuf = await fs.readFile(destAbs);
+    } catch (err) {
+      issues.push({
+        severity: "warning",
+        path: entry.relPath,
+        message: `unreadable, skipped: ${(err as Error).message}`,
+      });
+      continue;
+    }
     const srcHash = createHash("sha256").update(srcBuf).digest("hex");
     const destHash = createHash("sha256").update(destBuf).digest("hex");
 
@@ -194,22 +213,32 @@ export async function dbVellumRows(
     let total = 0;
     const tableExists = (name: string): boolean =>
       !!db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
+    const columnExists = (table: string, column: string): boolean =>
+      !!db.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`).get(table, column);
     for (const { table, column } of spec.columns) {
       if (!tableExists(table)) continue;
+      // Missing columns are known schema drift (the old product's migration
+      // 120 dropped the messages channel columns), not an error — nothing to
+      // check there.
+      if (!columnExists(table, column)) continue;
       const row = db
         .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
         .get() as { c: number } | null;
       total += row?.c ?? 0;
     }
     if (spec.messages && tableExists("messages")) {
-      const links = db
-        .prepare(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
-        .get() as { c: number } | null;
-      total += links?.c ?? 0;
-      const meta = db
-        .prepare(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
-        .get() as { c: number } | null;
-      total += meta?.c ?? 0;
+      if (columnExists("messages", "content")) {
+        const links = db
+          .prepare(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
+          .get() as { c: number } | null;
+        total += links?.c ?? 0;
+      }
+      if (columnExists("messages", "metadata")) {
+        const meta = db
+          .prepare(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
+          .get() as { c: number } | null;
+        total += meta?.c ?? 0;
+      }
     }
     if (spec.connections && tableExists("provider_connections")) {
       const conns = db

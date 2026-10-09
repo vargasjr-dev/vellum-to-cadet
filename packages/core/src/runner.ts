@@ -16,6 +16,7 @@ import {
   migrateGatewayDbAt,
 } from "./steps/migrate-assistant-db.js";
 import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
+import { migrateRetiredArchives } from "./steps/migrate-retired.js";
 import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
@@ -195,6 +196,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // migrated install keeps its identity (cadet no longer reads the old name).
   start("migrate-lockfile");
   done(await migrateHomeLockfile(envSuffixFor(detect.vellumRoot)));
+
+  // 4.5 Retired-assistant archives ride along verbatim — untar each one,
+  // run the same assistant-logic migration over the extracted tree, re-tar.
+  // Success is optional by design: failures warn and never fail the run.
+  start("migrate-retired");
+  done(await migrateRetiredArchives(detect.cadetRoot, targetCtx));
 
   // 5. Verify against the backup ground truth.
   start("verify");
