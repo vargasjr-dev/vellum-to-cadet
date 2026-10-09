@@ -1,8 +1,9 @@
-import { detect as detectStep, resolveMigrationTarget } from "./steps/detect.js";
+import { detect as detectStep, envSuffixFor, resolveMigrationTarget } from "./steps/detect.js";
 import { preflight } from "./steps/preflight.js";
 import { stopAssistant } from "./steps/stop-assistant.js";
 import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
+import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
 import { verify } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
@@ -148,7 +149,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.migrationFailed);
   }
 
-  // 4. Verify against the backup ground truth.
+  // 4. Move a legacy home-level cadet lockfile into the config dir so the
+  // migrated install keeps its identity (cadet no longer reads the old name).
+  start("migrate-lockfile");
+  done(await migrateHomeLockfile(envSuffixFor(detect.vellumRoot)));
+
+  // 5. Verify against the backup ground truth.
   start("verify");
   const v = await verify(detect.vellumRoot, detect.cadetRoot);
   done(v);

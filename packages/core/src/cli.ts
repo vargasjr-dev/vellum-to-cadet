@@ -69,7 +69,7 @@ const HELP = `migrate-vellum-assistant-to-cadet
 
 Migrate a vellum assistant workspace to cadet.
 
-Steps: discover → detect → preflight → stop assistant → backup → migrate → verify
+Steps: discover → detect → preflight → stop assistant → backup → migrate → lockfile → verify
 
 Usage:
   npx migrate-vellum-assistant-to-cadet [flags]

@@ -25,9 +25,7 @@ export function toCadetRoot(vellumRoot: string): string {
   if (base === ".vellum" || base.startsWith(".vellum-")) {
     const dataHome =
       process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
-    const envSuffix = base.startsWith(".vellum-")
-      ? base.slice(".vellum".length)
-      : "";
+    const envSuffix = envSuffixFor(vellumRoot);
     return path.join(
       dataHome,
       `cadet${envSuffix}`,
@@ -36,6 +34,19 @@ export function toCadetRoot(vellumRoot: string): string {
     );
   }
   return path.join(path.dirname(vellumRoot), "cadet");
+}
+
+/**
+ * The environment suffix a vellum root maps to in cadet's XDG layout
+ * ("" for the default install, "-<env>" for an env-scoped one). Shared by
+ * the data-root derivation and the config-dir lockfile move, which must
+ * agree on the env.
+ */
+export function envSuffixFor(vellumRoot: string): string {
+  const base = path.basename(vellumRoot);
+  if (base.startsWith("vellum-")) return base.slice("vellum".length);
+  if (base.startsWith(".vellum-")) return base.slice(".vellum".length);
+  return "";
 }
 
 /**

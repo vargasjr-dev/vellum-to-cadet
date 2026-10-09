@@ -432,3 +432,88 @@ describe("e2e: modern multi-instance layout", () => {
     expect(await exists(path.join(home, ".local", "share", "cadet-dev", "assistants", "velly", "workspace", "notes", "README.md"))).toBe(true);
   });
 });
+
+describe("e2e: legacy home-level lockfile move", () => {
+  test("moves ~/.cadet.lock.json into the config dir during migration", async () => {
+    const { root, home } = await buildFullVellum0126();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    // An ambient XDG_CONFIG_HOME (CI runners set it) would hijack the
+    // destination out of the sandboxed home — sandbox it like HOME.
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    try {
+      // A pre-move cadet install left its identity file at the home level.
+      await fs.writeFile(
+        path.join(home, ".cadet.lock.json"),
+        JSON.stringify({ assistants: [{ assistantId: "old-bot" }] }, null, 2),
+      );
+
+      const report = await migrate({ vellumRoot: root, processOps: noopOps });
+
+      expect(report.ok).toBe(true);
+      const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
+      expect(lockStep?.status).toBe("completed");
+      expect(lockStep?.summary).toContain(".cadet.lock.json");
+      // The file MOVED — the config dir now holds it, the home level does not.
+      expect(
+        await fs.access(path.join(home, ".config", "cadet", "lockfile.json")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(true);
+      expect(
+        await fs.access(path.join(home, ".cadet.lock.json")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+
+  test("leaves the home-level file when the config-dir lockfile already exists", async () => {
+    const { root, home } = await buildFullVellum0126();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    try {
+      await fs.mkdir(path.join(home, ".config", "cadet"), { recursive: true });
+      await fs.writeFile(
+        path.join(home, ".config", "cadet", "lockfile.json"),
+        JSON.stringify({ assistants: [{ assistantId: "live-bot" }] }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(home, ".cadet.lock.json"),
+        JSON.stringify({ assistants: [{ assistantId: "old-bot" }] }, null, 2),
+      );
+
+      const report = await migrate({ vellumRoot: root, processOps: noopOps });
+
+      expect(report.ok).toBe(true);
+      const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
+      expect(lockStep?.status).toBe("completed");
+      expect(lockStep?.summary).toContain("left untouched");
+      expect(lockStep?.issues?.[0]?.severity).toBe("warning");
+      // Neither file was destroyed.
+      expect(
+        await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+      ).toContain("live-bot");
+      expect(
+        await fs.readFile(path.join(home, ".cadet.lock.json"), "utf8"),
+      ).toContain("old-bot");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+});
