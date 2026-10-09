@@ -41,7 +41,7 @@ export interface DetectInfo {
   version: string | null;
   /** Modern-layout assistant dir names (the handles), sorted. Empty for legacy roots. */
   assistantHandles: string[];
-  deploymentKind: "desktop" | "docker" | "host";
+  deploymentKind: "desktop" | "docker" | "local";
   docker: DockerDeployment;
   runningProcesses: Array<{ pid: number; command: string }>;
   rootSizeBytes: number;
