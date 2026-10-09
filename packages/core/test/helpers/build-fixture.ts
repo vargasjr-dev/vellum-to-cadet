@@ -1,5 +1,5 @@
-import { Database } from "bun:sqlite";
-import { promises as fs } from "node:fs";
+import { DatabaseSync as Database } from "node:sqlite";
+import { promises as fs, mkdirSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -306,31 +306,31 @@ async function write(root: string, rel: string, content: string): Promise<void> 
  */
 function writeRealAssistantDb(dbPath: string): void {
   const db = new Database(dbPath);
-  db.run(`CREATE TABLE conversations (
+  db.exec(`CREATE TABLE conversations (
     id TEXT PRIMARY KEY, title TEXT, origin_channel TEXT, origin_interface TEXT, created_at INTEGER
   )`);
-  db.run(`CREATE TABLE messages (
+  db.exec(`CREATE TABLE messages (
     id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER,
     metadata TEXT, user_message_channel TEXT, assistant_message_channel TEXT
   )`);
-  db.run(`CREATE TABLE provider_connections (
+  db.exec(`CREATE TABLE provider_connections (
     name TEXT PRIMARY KEY, provider TEXT, auth TEXT, created_at INTEGER, updated_at INTEGER
   )`);
-  db.run(`CREATE TABLE channel_inbound_events (
+  db.exec(`CREATE TABLE channel_inbound_events (
     source_channel TEXT, external_chat_id TEXT, external_message_id TEXT
   )`);
-  db.run(`INSERT INTO conversations VALUES
+  db.exec(`INSERT INTO conversations VALUES
     ('c1', 'Desktop chat', 'vellum', 'text', 1),
     ('c2', 'Telegram chat', 'telegram', 'text', 2)`);
-  db.run(`INSERT INTO messages VALUES
+  db.exec(`INSERT INTO messages VALUES
     ('m1', 'c1', 'user', 'Here it is: [report.md](vellum://workspace/report.md)', 1,
      '{"channel":"vellum"}', 'vellum', 'vellum'),
     ('m2', 'c2', 'assistant', 'plain reply, no links', 2,
      '{"channel":"telegram"}', 'telegram', 'telegram')`);
-  db.run(`INSERT INTO provider_connections VALUES
+  db.exec(`INSERT INTO provider_connections VALUES
     ('vellum', 'vellum', '{"type":"platform"}', 1, 1),
     ('openai', 'openai', '{"type":"api_key"}', 2, 2)`);
-  db.run(`INSERT INTO channel_inbound_events VALUES ('vellum', 'chat-1', 'evt-1')`);
+  db.exec(`INSERT INTO channel_inbound_events VALUES ('vellum', 'chat-1', 'evt-1')`);
   db.close();
 }
 
@@ -343,60 +343,59 @@ function writeRealAssistantDb(dbPath: string): void {
  */
 function writeRealGatewayDb(dbPath: string): void {
   // The state root's data/ dir may not exist yet — sqlite won't create it.
-  const fsSync = require("node:fs");
-  fsSync.mkdirSync(path.dirname(dbPath), { recursive: true });
+  mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
-  db.run(`CREATE TABLE contacts (
+  db.exec(`CREATE TABLE contacts (
     id TEXT PRIMARY KEY, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'contact'
   )`);
-  db.run(`CREATE TABLE contact_channels (
+  db.exec(`CREATE TABLE contact_channels (
     id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, type TEXT NOT NULL, address TEXT
   )`);
-  db.run(`CREATE TABLE ingress_invites (
+  db.exec(`CREATE TABLE ingress_invites (
     id TEXT PRIMARY KEY, source_channel TEXT NOT NULL, code TEXT
   )`);
-  db.run(`CREATE TABLE guardian_requests (
+  db.exec(`CREATE TABLE guardian_requests (
     id TEXT PRIMARY KEY, source_channel TEXT, summary TEXT
   )`);
-  db.run(`CREATE TABLE guardian_request_deliveries (
+  db.exec(`CREATE TABLE guardian_request_deliveries (
     id TEXT PRIMARY KEY, destination_channel TEXT NOT NULL, chat_id TEXT
   )`);
-  db.run(`CREATE TABLE inbound_seen_events (
+  db.exec(`CREATE TABLE inbound_seen_events (
     id TEXT PRIMARY KEY, source_channel TEXT NOT NULL, external_message_id TEXT
   )`);
-  db.run(`CREATE TABLE channel_bot_identity (
+  db.exec(`CREATE TABLE channel_bot_identity (
     channel_type TEXT PRIMARY KEY, bot_user_id TEXT
   )`);
-  db.run(`CREATE TABLE channel_admission_policy (
+  db.exec(`CREATE TABLE channel_admission_policy (
     channel_type TEXT PRIMARY KEY, mode TEXT
   )`);
-  db.run(`CREATE TABLE channel_permission_overrides (
+  db.exec(`CREATE TABLE channel_permission_overrides (
     id TEXT PRIMARY KEY, channel_type TEXT NOT NULL, channel_external_id TEXT
   )`);
-  db.run(`CREATE TABLE channel_verification_sessions (
+  db.exec(`CREATE TABLE channel_verification_sessions (
     id TEXT PRIMARY KEY, channel TEXT NOT NULL, address TEXT
   )`);
-  db.run(`CREATE TABLE channel_guardian_rate_limits (
+  db.exec(`CREATE TABLE channel_guardian_rate_limits (
     channel TEXT PRIMARY KEY, window_start INTEGER
   )`);
-  db.run(`CREATE TABLE slack_active_threads (
+  db.exec(`CREATE TABLE slack_active_threads (
     id TEXT PRIMARY KEY, channel_id TEXT
   )`);
-  db.run(`INSERT INTO contacts VALUES ('contact-1', 'Vargas', 'guardian')`);
-  db.run(`INSERT INTO contact_channels VALUES
+  db.exec(`INSERT INTO contacts VALUES ('contact-1', 'Vargas', 'guardian')`);
+  db.exec(`INSERT INTO contact_channels VALUES
     ('cc-1', 'contact-1', 'vellum', 'owner@vellum.local'),
     ('cc-2', 'contact-1', 'telegram', '@owner')`);
-  db.run(`INSERT INTO ingress_invites VALUES ('inv-1', 'vellum', 'code-1')`);
-  db.run(`INSERT INTO guardian_requests VALUES ('gr-1', 'vellum', 'open the pod bay doors')`);
-  db.run(`INSERT INTO guardian_request_deliveries VALUES ('gd-1', 'vellum', 'chat-1')`);
-  db.run(`INSERT INTO inbound_seen_events VALUES ('se-1', 'vellum', 'evt-1')`);
-  db.run(`INSERT INTO channel_bot_identity VALUES ('vellum', 'bot-1')`);
-  db.run(`INSERT INTO channel_admission_policy VALUES ('vellum', 'open')`);
-  db.run(`INSERT INTO channel_permission_overrides VALUES
+  db.exec(`INSERT INTO ingress_invites VALUES ('inv-1', 'vellum', 'code-1')`);
+  db.exec(`INSERT INTO guardian_requests VALUES ('gr-1', 'vellum', 'open the pod bay doors')`);
+  db.exec(`INSERT INTO guardian_request_deliveries VALUES ('gd-1', 'vellum', 'chat-1')`);
+  db.exec(`INSERT INTO inbound_seen_events VALUES ('se-1', 'vellum', 'evt-1')`);
+  db.exec(`INSERT INTO channel_bot_identity VALUES ('vellum', 'bot-1')`);
+  db.exec(`INSERT INTO channel_admission_policy VALUES ('vellum', 'open')`);
+  db.exec(`INSERT INTO channel_permission_overrides VALUES
     ('po-1', 'vellum', 'chat-1'),
     ('po-2', 'slack', 'C01ABC')`);
-  db.run(`INSERT INTO channel_verification_sessions VALUES ('vs-1', 'vellum', 'owner@vellum.local')`);
-  db.run(`INSERT INTO channel_guardian_rate_limits VALUES ('vellum', 1)`);
-  db.run(`INSERT INTO slack_active_threads VALUES ('t-1', 'C01ABC')`);
+  db.exec(`INSERT INTO channel_verification_sessions VALUES ('vs-1', 'vellum', 'owner@vellum.local')`);
+  db.exec(`INSERT INTO channel_guardian_rate_limits VALUES ('vellum', 1)`);
+  db.exec(`INSERT INTO slack_active_threads VALUES ('t-1', 'C01ABC')`);
   db.close();
 }

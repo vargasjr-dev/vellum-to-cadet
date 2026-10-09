@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 
 import {
   applySubstitutions,
@@ -8,6 +8,7 @@ import {
   sanctionedContentTransform,
 } from "../../src/fs-utils.js";
 import { DEFAULT_TARGET_CTX } from "../../src/layout.js";
+import { expect } from "../helpers/expect.js";
 
 describe("formatBytes", () => {
   test("converts to GB when applicable", () => {

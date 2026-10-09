@@ -54,8 +54,8 @@ OIDC), tags, and merges the branch into main. Rehearse with `dry-run: true`.
 ## Development
 
 ```sh
-bun install
-bun run typecheck   # both packages
-bun test            # fixtures build synthetic vellum 0.12.6 trees
-bun run build       # plain-node-compatible dist for packages/core
+npm install
+npm run typecheck   # both packages, src + tests
+npm test            # node:test; fixtures build synthetic vellum 0.12.6 trees
+npm run build       # dist for packages/core
 ```

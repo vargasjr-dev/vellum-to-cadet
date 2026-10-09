@@ -3,7 +3,7 @@
  * CLI shell over the migration engine.
  *
  * Deliberately dependency-free so npx stays fast and the supply chain stays
- * boring. Runs on plain Node >= 18.17 — self-hosters don't need bun.
+ * boring. Runs on plain Node >= 22.13 (node:sqlite) — self-hosters need nothing but node.
  */
 import { createInterface } from "node:readline/promises";
 

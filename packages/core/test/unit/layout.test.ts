@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 
 import {
   applySubstitutions,
@@ -17,6 +17,7 @@ import {
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
 } from "../../src/layout.js";
+import { expect } from "../helpers/expect.js";
 
 describe("layout: path renames", () => {
   test("renames every mapped dotfile segment", () => {

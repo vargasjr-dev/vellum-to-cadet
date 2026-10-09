@@ -1,16 +1,13 @@
 {
   "name": "vellum-to-cadet",
   "private": true,
-  "description": "Migration tooling: vellum assistant → cadet. Publishes @mycadet/vellum and the migrate-vellum-assistant-to-cadet npx script.",
+  "description": "Migration tooling: vellum assistant \u2192 cadet. Publishes @mycadet/vellum and the migrate-vellum-assistant-to-cadet npx script.",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --filter '*' build",
-    "typecheck": "bun run --filter '*' typecheck",
-    "test": "bun test --timeout=10000"
-  },
-  "devDependencies": {
-    "bun-types": "latest"
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present"
   }
 }
