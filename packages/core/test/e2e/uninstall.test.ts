@@ -187,11 +187,13 @@ describe("uninstall", () => {
     }
   });
 
-  test("the list includes the vellum npm/bun package itself and its binaries", async () => {
+  test("the list includes the vellum npm/bun package itself and its binary", async () => {
     // v0.0.9 run feedback: "The full list" stopped at data/config dirs —
-    // the installed program (the global `vellum` package and the vellum +
-    // gateway binaries it links) survived an uninstall that claimed to be
-    // complete. Both global layouts are enumerated; existing paths only.
+    // the installed program (the global `vellum` package and the vellum
+    // binary it links) survived an uninstall that claimed to be complete.
+    // Only the distinctive `vellum` name is probed — a generic bin name
+    // like `gateway` (which the package also links) could belong to
+    // something else. Both global layouts are enumerated; existing paths.
     const s = await buildLegacyScenario();
     const restore = pinHome(s.home);
     try {
@@ -202,8 +204,7 @@ describe("uninstall", () => {
       const binDir = path.join(s.home, ".nvm", "versions", "node", "v22", "bin");
       await fs.mkdir(binDir, { recursive: true });
       await fs.writeFile(path.join(binDir, "vellum"), "#!/usr/bin/env node");
-      await fs.writeFile(path.join(binDir, "gateway"), "#!/usr/bin/env node");
-      // A bun global install too — package + one of its two bins.
+      // A bun global install too — package + its bin.
       const bunPkg = path.join(s.home, ".bun", "install", "global", "node_modules", "vellum");
       await fs.mkdir(bunPkg, { recursive: true });
       await fs.mkdir(path.join(s.home, ".bun", "bin"), { recursive: true });
@@ -223,7 +224,6 @@ describe("uninstall", () => {
       const paths = report.targets.map((t) => t.path);
       expect(paths).toContain(path.join(npmRoot, "vellum"));
       expect(paths).toContain(path.join(binDir, "vellum"));
-      expect(paths).toContain(path.join(binDir, "gateway"));
       expect(paths).toContain(bunPkg);
       expect(paths).toContain(path.join(s.home, ".bun", "bin", "vellum"));
       // And they were actually deleted, not just listed.

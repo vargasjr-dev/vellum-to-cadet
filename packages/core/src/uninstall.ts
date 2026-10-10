@@ -210,14 +210,14 @@ export async function gatherUninstallTargets(ops: ProcessOps = defaultProcessOps
   }
 
   // The installed program itself: the npm global package (`vellum`) and the
-  // binaries it links into the PATH (vellum, gateway). Data dirs without the
+  // binary it links into the PATH (vellum). Data dirs without the
   // program left behind a machine that still can't spell vellum — v0.0.9
   // run feedback ("The full list" was missing the binary/package). The npm
   // global root is probed via ops (npm may be absent); the bun global layout
   // is checked by path. Everything is exists-gated and passes the same
   // assertSafeTarget guard as the rest of the list.
   const GLOBAL_PACKAGE = "vellum";
-  const GLOBAL_BINS = ["vellum", "gateway"];
+  const GLOBAL_BINS = ["vellum"];
   const packageDirs: Array<{ dir: string; origin: string }> = [];
   const binParents: Array<{ dir: string; origin: string }> = [];
   const npmRoot = await ops.npmGlobalRoot();
