@@ -1089,28 +1089,28 @@ describe("e2e: retired archives", () => {
 
     // ── Archive 1: a finished retire — a tar of a workspace tree with the
     //    same branded shapes as the live tree (logs, config, a db).
-    const staging1 = path.join(retiredDir, "grand-assistant.staging");
-    await fs.mkdir(path.join(staging1, "workspace", "data", "db"), { recursive: true });
-    await fs.mkdir(path.join(staging1, "workspace", "data", "logs"), { recursive: true });
+    const scratch1 = path.join(retiredDir, "grand-assistant.staging");
+    await fs.mkdir(path.join(scratch1, "workspace", "data", "db"), { recursive: true });
+    await fs.mkdir(path.join(scratch1, "workspace", "data", "logs"), { recursive: true });
     await fs.writeFile(
-      path.join(staging1, "workspace", "data", "logs", "2026-01-01.log"),
+      path.join(scratch1, "workspace", "data", "logs", "2026-01-01.log"),
       "session start; attachment vellum://a.png; root /Users/x/.local/share/vellum\n",
     );
     await fs.writeFile(
-      path.join(staging1, "workspace", "config.json"),
+      path.join(scratch1, "workspace", "config.json"),
       JSON.stringify({ services: { stt: { provider: "vellum" } } }, null, 2),
     );
-    const db = new Database(path.join(staging1, "workspace", "data", "db", "assistant.db"));
+    const db = new Database(path.join(scratch1, "workspace", "data", "db", "assistant.db"));
     db.exec("CREATE TABLE conversations (id INTEGER PRIMARY KEY, origin_channel TEXT)");
     db.exec("INSERT INTO conversations (origin_channel) VALUES ('vellum')");
     db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)");
     db.exec("INSERT INTO messages (content) VALUES ('see vellum://a.png')");
     db.close();
-    await run("tar", ["-czf", path.join(retiredDir, "grand-assistant.tar.gz"), "-C", staging1, "."]);
-    await fs.rm(staging1, { recursive: true, force: true });
+    await run("tar", ["-czf", path.join(retiredDir, "grand-assistant.tar.gz"), "-C", scratch1, "."]);
+    await fs.rm(scratch1, { recursive: true, force: true });
 
-    // ── Archive 2: an interrupted retire — a staging tree, never tarred.
-    const staging2 = path.join(retiredDir, "interrupted.tar.gz.staging");
+    // ── Archive 2: an interrupted retire — a .tmp scratch tree, never tarred.
+    const staging2 = path.join(retiredDir, "interrupted.tar.gz.tmp");
     await fs.mkdir(path.join(staging2, "workspace", "data", "logs"), { recursive: true });
     await fs.writeFile(path.join(staging2, "workspace", "data", "logs", "day.log"), "vellum://x\n");
 
@@ -1145,9 +1145,9 @@ describe("e2e: retired archives", () => {
     expect(link.content).toContain("cadet://");
     migratedDb.close();
 
-    // Interrupted retire: completed into a tar, staging consumed.
+    // Interrupted retire: completed into a tar, .tmp scratch consumed.
     expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz"))).toBe(true);
-    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz.staging"))).toBe(false);
+    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz.tmp"))).toBe(false);
 
     // Corrupt archive: byte-identical, warned, run still ok.
     expect((await fs.readFile(path.join(cadetRoot, "retired", "broken.tar.gz"))).toString()).toBe(
@@ -1157,9 +1157,9 @@ describe("e2e: retired archives", () => {
     expect(broken.length).toBe(1);
     expect(broken[0]?.severity).toBe("warning");
 
-    // No staging litter left behind anywhere.
+    // No scratch litter left behind anywhere.
     const litter = (await fs.readdir(path.join(cadetRoot, "retired"))).filter((n) =>
-      n.endsWith(".staging"),
+      n.endsWith(".tar.gz.tmp"),
     );
     expect(litter.length).toBe(0);
   });

@@ -22,11 +22,10 @@ const execFile = promisify(execFileCb);
 
 /**
  * Retired-assistant archives (`retired/<name>.tar.gz`, plus the
- * `<name>.tar.gz.staging` trees an interrupted retire leaves behind) ride
- * along in the vellum root and land in the cadet root verbatim. They hold
- * the same vellum-branded paths, tokens, and dbs as the live tree, so each
- * one is untarred, run through the same assistant-logic migration, and
- * re-tarred.
+ * `<name>.tar.gz.tmp` scratch trees an interrupted retire leaves behind)
+ * ride along in the vellum root and land in the cadet root verbatim. They hold the same
+ * vellum-branded paths, tokens, and dbs as the live tree, so each one is
+ * untarred, run through the same assistant-logic migration, and re-tarred.
  *
  * Success here is OPTIONAL by design: a retired archive is cold storage,
  * not a live assistant. Any archive that fails (corrupt tar, unreadable
@@ -34,15 +33,15 @@ const execFile = promisify(execFileCb);
  * as it was — the migration never fails because of one.
  */
 
-const STAGING_SUFFIX = ".tar.gz.staging";
+const TMP_SUFFIX = ".tar.gz.tmp";
 
-/** Archive inventory: finished tars + leftover staging trees. */
+/** Archive inventory: finished tars + leftover scratch trees. */
 interface RetiredTarget {
   name: string;
   tarPath: string | null;
-  stagingPath: string | null;
-  /** We created the staging dir this run — safe to remove on failure. */
-  stagingIsOurs: boolean;
+  scratchPath: string | null;
+  /** We created the scratch dir this run — safe to remove on failure. */
+  scratchIsOurs: boolean;
 }
 
 export async function migrateRetiredArchives(
@@ -59,20 +58,20 @@ export async function migrateRetiredArchives(
   }
 
   const targets: RetiredTarget[] = [];
-  // Leftover staging trees first (an interrupted retire): they may be the
-  // only extracted copy, so they are migrated before any tar overwrites the
-  // staging location, and finished into a tar when none ever landed.
+  // Leftover scratch trees first (an interrupted retire, or a scratch dir
+  // from an earlier run of this step): they may be the only extracted copy,
+  // so they are migrated before any tar overwrites the scratch location,
+  // and finished into a tar when none ever landed.
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name.endsWith(STAGING_SUFFIX)) {
-      const name = entry.name.slice(0, -STAGING_SUFFIX.length);
-      const tarPath = path.join(retiredDir, `${name}.tar.gz`);
-      targets.push({
-        name,
-        tarPath: (await fileExists(tarPath)) ? tarPath : null,
-        stagingPath: path.join(retiredDir, entry.name),
-        stagingIsOurs: false,
-      });
-    }
+    if (!(entry.isDirectory() && entry.name.endsWith(TMP_SUFFIX))) continue;
+    const name = entry.name.slice(0, -TMP_SUFFIX.length);
+    const tarPath = path.join(retiredDir, `${name}.tar.gz`);
+    targets.push({
+      name,
+      tarPath: (await fileExists(tarPath)) ? tarPath : null,
+      scratchPath: path.join(retiredDir, entry.name),
+      scratchIsOurs: false,
+    });
   }
   for (const entry of entries) {
     if (entry.isFile() && entry.name.endsWith(".tar.gz")) {
@@ -85,8 +84,8 @@ export async function migrateRetiredArchives(
       targets.push({
         name,
         tarPath: path.join(retiredDir, entry.name),
-        stagingPath: null,
-        stagingIsOurs: false,
+        scratchPath: null,
+        scratchIsOurs: false,
       });
     }
   }
@@ -113,9 +112,9 @@ export async function migrateRetiredArchives(
         severity: "warning",
         message: `retired archive '${target.name}': ${(err as Error).message} — left as-is, continuing`,
       });
-      // Our scratch staging dir goes; anything pre-existing stays untouched.
-      if (target.stagingIsOurs && target.stagingPath) {
-        await fs.rm(target.stagingPath, { recursive: true, force: true });
+      // Our scratch dir goes; anything pre-existing stays untouched.
+      if (target.scratchIsOurs && target.scratchPath) {
+        await fs.rm(target.scratchPath, { recursive: true, force: true });
       }
     }
   }
@@ -133,32 +132,32 @@ async function migrateOneArchive(
   ctx: MigrationTargetCtx,
   issues: StepIssue[],
 ): Promise<{ contentChanges: number; dbRows: number }> {
-  const stagingPath = path.join(retiredDir, `${target.name}${STAGING_SUFFIX}`);
+  const scratchPath = path.join(retiredDir, `${target.name}${TMP_SUFFIX}`);
 
-  // No finished tar = an interrupted retire: the staging tree IS the
+  // No finished tar = an interrupted retire: the leftover tree IS the
   // archive-in-progress — migrate it and finish the tar.
   if (!target.tarPath) {
-    const result = await migrateExtractedTree(target.stagingPath!, ctx, issues);
+    const result = await migrateExtractedTree(target.scratchPath!, ctx, issues);
     const tarOut = path.join(retiredDir, `${target.name}.tar.gz`);
-    await execFile("tar", ["-czf", tarOut, "-C", target.stagingPath!, "."]);
-    await fs.rm(target.stagingPath!, { recursive: true, force: true });
+    await execFile("tar", ["-czf", tarOut, "-C", target.scratchPath!, "."]);
+    await fs.rm(target.scratchPath!, { recursive: true, force: true });
     return result;
   }
 
   // Finished tar: extract, migrate the tree, re-tar atomically (a failed
   // re-tar must never destroy the original), clean up.
-  await fs.rm(stagingPath, { recursive: true, force: true });
-  target.stagingPath = stagingPath;
-  target.stagingIsOurs = true;
-  await fs.mkdir(stagingPath, { recursive: true });
-  await execFile("tar", ["-xzf", target.tarPath, "-C", stagingPath]);
+  await fs.rm(scratchPath, { recursive: true, force: true });
+  target.scratchPath = scratchPath;
+  target.scratchIsOurs = true;
+  await fs.mkdir(scratchPath, { recursive: true });
+  await execFile("tar", ["-xzf", target.tarPath, "-C", scratchPath]);
 
-  const result = await migrateExtractedTree(stagingPath, ctx, issues);
+  const result = await migrateExtractedTree(scratchPath, ctx, issues);
 
   const tarNew = `${target.tarPath}.new`;
-  await execFile("tar", ["-czf", tarNew, "-C", stagingPath, "."]);
+  await execFile("tar", ["-czf", tarNew, "-C", scratchPath, "."]);
   await fs.rename(tarNew, target.tarPath);
-  await fs.rm(stagingPath, { recursive: true, force: true });
+  await fs.rm(scratchPath, { recursive: true, force: true });
   return result;
 }
 
