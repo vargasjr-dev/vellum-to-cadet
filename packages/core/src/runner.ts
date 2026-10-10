@@ -34,6 +34,7 @@ import {
   type MigrationReport,
   type MigrateOptions,
   type StepIssue,
+  type StepItemEvent,
   type StepResult,
 } from "./types.js";
 
@@ -58,6 +59,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   const log = (msg: string): void => {
     if (options.verbose) console.error(`[vellum-migrate] ${msg}`);
   };
+  const onItem = (step: string) => (item: StepItemEvent): void => options.onStepItem?.(step, item);
 
   start("detect");
   const detect: DetectInfo = await detectStep(options, ops);
@@ -201,7 +203,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // run the same assistant-logic migration over the extracted tree, re-tar.
   // Success is optional by design: failures warn and never fail the run.
   start("migrate-retired");
-  done(await migrateRetiredArchives(detect.cadetRoot, targetCtx));
+  done(await migrateRetiredArchives(detect.cadetRoot, targetCtx, onItem("migrate-retired")));
 
   // 5. Verify against the backup ground truth.
   start("verify");

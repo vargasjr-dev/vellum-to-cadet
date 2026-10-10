@@ -47,6 +47,14 @@ class Match<T> {
     }
   }
 
+  toMatch(pattern: RegExp): void {
+    if (this.negated) {
+      assert.ok(!pattern.test(String(this.actual)), `expected ${stringify(this.actual)} NOT to match ${pattern}`);
+    } else {
+      assert.ok(pattern.test(String(this.actual)), `expected ${stringify(this.actual)} to match ${pattern}`);
+    }
+  }
+
   toBeGreaterThan(expected: number): void {
     if (this.negated) {
       assert.ok(!((this.actual as number) > expected), `expected ${this.actual} NOT to be > ${expected}`);

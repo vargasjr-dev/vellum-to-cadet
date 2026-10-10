@@ -16,7 +16,7 @@ import { discoverVellumRoots, candidateRoots } from "./discover.js";
 import { migrate, repair } from "./runner.js";
 import { renderUninstallHuman, runUninstall } from "./uninstall.js";
 import { toCadetRoot } from "./steps/detect.js";
-import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepResult } from "./types.js";
+import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepItemEvent, type StepResult } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
   help: boolean;
@@ -198,23 +198,36 @@ function stepIcon(status: StepResult["status"]): string {
 /**
  * Live step progress on stderr: a pending line the moment a step starts,
  * replaced in place by the completed line (icon + summary + issues) when it
- * finishes. Only when stderr is a TTY — piped runs and --json keep their
- * output contracts untouched.
+ * finishes. Steps can stream nested items (e.g. each retired archive) that
+ * open their own pending line under the step and resolve in place. Only when
+ * stderr is a TTY — piped runs and --json keep their output contracts
+ * untouched.
  */
 function createLiveProgress(): {
   onStepStart: (step: string) => void;
   onStepDone: (result: StepResult) => void;
+  onStepItem: (step: string, item: StepItemEvent) => void;
   /** Clear a dangling pending line before the final summary prints. */
   finish: () => void;
 } {
   const live = Boolean(process.stderr.isTTY);
   let pending = false;
+  let openItems = 0; // nested item lines still pending
+  let itemLines = 0; // nested item lines written for the current step
+  const eraseLines = (n: number): void => {
+    for (let i = 0; i < n; i++) process.stderr.write("\u001b[1A\u001b[2K");
+  };
+  const resetItems = (): void => {
+    openItems = 0;
+    itemLines = 0;
+  };
   const clearPending = (): void => {
     if (live && pending) {
-      // Cursor up one line, clear it.
-      process.stderr.write("\u001b[1A\u001b[2K");
+      // Erase the pending step line and every nested line below it.
+      eraseLines(1 + itemLines);
     }
     pending = false;
+    resetItems();
   };
   return {
     onStepStart: (step) => {
@@ -223,10 +236,35 @@ function createLiveProgress(): {
       process.stderr.write(`  ${detail("·")} ${step} …\n`);
       pending = true;
     },
+    onStepItem: (step, item) => {
+      if (!live || !pending) return;
+      if (item.status === "started") {
+        process.stderr.write(`    ${detail("·")} ${item.name} …\n`);
+        openItems++;
+        itemLines++;
+        return;
+      }
+      if (openItems === 0) return;
+      // The open item's line is the last one written — resolve it in place.
+      process.stderr.write("\u001b[1A\u001b[2K");
+      const icon = item.status === "completed" ? colors.green("✓") : colors.yellow("⚠");
+      process.stderr.write(`    ${icon} ${item.name}${item.summary ? ` ${item.summary}` : ""}\n`);
+      openItems--;
+    },
     onStepDone: (result) => {
-      clearPending();
-      if (!live) return;
-      process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+      if (live && pending) {
+        // Rewrite the pending step line above the already-resolved nested
+        // lines (they stay on screen), then hop back down past them.
+        const nested = itemLines;
+        process.stderr.write(`\u001b[${nested + 1}A\u001b[2K`);
+        process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+        process.stderr.write(`\u001b[${nested}B\r`);
+      } else {
+        if (!live) return;
+        process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+      }
+      pending = false;
+      resetItems();
       for (const issue of result.issues ?? []) {
         process.stderr.write(`    ${issueIcon(issue.severity)} ${issue.message}\n`);
       }
@@ -425,6 +463,7 @@ async function main(): Promise<number> {
         verbose: parsed.verbose,
         onStepStart: live ? progress.onStepStart : undefined,
         onStepDone: live ? progress.onStepDone : undefined,
+        onStepItem: live ? progress.onStepItem : undefined,
       });
       progress.finish();
       if (parsed.json) {
@@ -509,6 +548,7 @@ async function main(): Promise<number> {
       ...parsed,
       onStepStart: live ? progress.onStepStart : undefined,
       onStepDone: live ? progress.onStepDone : undefined,
+      onStepItem: live ? progress.onStepItem : undefined,
     });
     progress.finish();
     if (parsed.json) {

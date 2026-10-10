@@ -48,6 +48,16 @@ export interface DetectInfo {
   externalReferences: string[];
 }
 
+/** Live progress: a named item inside the running step (e.g. each retired archive). */
+export interface StepItemEvent {
+  /** Item name shown verbatim in the nested progress line. */
+  name: string;
+  /** "started" opens a pending line; "completed"/"warning" resolve it. */
+  status: "started" | "completed" | "warning";
+  /** Short outcome text appended after the name when resolving. */
+  summary?: string;
+}
+
 export interface MigrateOptions {
   /** Override the default ~/.vellum source root. */
   vellumRoot?: string;
@@ -71,6 +81,8 @@ export interface MigrateOptions {
   onStepStart?: (step: string) => void;
   /** Live progress: called with each step's result as it completes. */
   onStepDone?: (result: StepResult) => void;
+  /** Live progress: nested item progress within the current step. */
+  onStepItem?: (step: string, item: StepItemEvent) => void;
 }
 
 /**

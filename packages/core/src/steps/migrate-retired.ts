@@ -11,7 +11,7 @@ import {
   walkTree,
 } from "../fs-utils.js";
 import { DEFAULT_TARGET_CTX, type MigrationTargetCtx } from "../layout.js";
-import type { StepIssue, StepResult } from "../types.js";
+import type { StepIssue, StepItemEvent, StepResult } from "../types.js";
 import {
   isGatewayDbStateRel,
   migrateAssistantDbAt,
@@ -47,6 +47,7 @@ interface RetiredTarget {
 export async function migrateRetiredArchives(
   cadetRoot: string,
   targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+  onItem?: (item: StepItemEvent) => void,
 ): Promise<StepResult> {
   const step = "migrate-retired";
   const retiredDir = path.join(cadetRoot, "retired");
@@ -101,13 +102,23 @@ export async function migrateRetiredArchives(
   let dbRows = 0;
 
   for (const target of targets) {
+    onItem?.({ name: target.name, status: "started" });
     try {
       const result = await migrateOneArchive(retiredDir, target, targetCtx, issues);
       migrated++;
       contentChanges += result.contentChanges;
       dbRows += result.dbRows;
+      onItem?.({
+        name: target.name,
+        status: "completed",
+        summary:
+          result.contentChanges > 0 || result.dbRows > 0
+            ? `migrated (${result.contentChanges} content change(s), ${result.dbRows} db row(s))`
+            : "migrated",
+      });
     } catch (err) {
       failed++;
+      onItem?.({ name: target.name, status: "warning", summary: "left as-is" });
       issues.push({
         severity: "warning",
         message: `retired archive '${target.name}': ${(err as Error).message} — left as-is, continuing`,
