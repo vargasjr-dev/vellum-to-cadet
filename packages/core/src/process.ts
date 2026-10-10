@@ -1,5 +1,4 @@
-import { execFile, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 
 import { CADET_PROCESS_PATTERNS, MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
@@ -8,12 +7,73 @@ import type { ProcessOps } from "./types.js";
 const execFileAsync = promisify(execFile);
 
 /**
- * The image the docker volume ops mount for their temp containers. The
- * vellum sandbox images are guaranteed present on a docker install (its
- * containers ran from them) — pass a recorded entry image when you have
- * one; this fallback covers the images-less call sites.
+ * The image the docker volume ops mount for their tar helper containers.
+ * The vellum sandbox images are guaranteed present on a docker install
+ * (its containers ran from them) and carry `tar` — pass a recorded entry
+ * image when you have one; this fallback covers the images-less call
+ * sites.
  */
 const VOLUME_HELPER_IMAGE = "vellumai/vellum-assistant:latest";
+
+/**
+ * Wall-clock cap for one docker volume transfer. A docker daemon that
+ * accepts a request and never answers must not hang the migration (the
+ * v0.0.11 run sat on a never-started extract container until the user's
+ * SSH session died) — the children get killed and the step reports a
+ * warning instead.
+ */
+const VOLUME_STREAM_TIMEOUT_MS = 600_000;
+
+/**
+ * Wait for a pipeline of child processes (stdout piped into the next
+ * child's stdin) to finish. Rejects on a nonzero exit, a spawn failure,
+ * or the timeout — on timeout every child is killed first so nothing
+ * keeps running.
+ */
+function settleStreams(children: ChildProcess[], what: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stderrChunks: Buffer[] = [];
+    let stderrLength = 0;
+    let pending = children.length;
+    let failure: Error | null = null;
+    let settled = false;
+    const settle = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      err ? reject(err) : resolve();
+    };
+    const timer = setTimeout(() => {
+      for (const child of children) child.kill("SIGKILL");
+      settle(new Error(`${what}: timed out after ${Math.round(VOLUME_STREAM_TIMEOUT_MS / 1000)}s`));
+    }, VOLUME_STREAM_TIMEOUT_MS);
+    for (const child of children) {
+      let closed = false;
+      const markClosed = (): void => {
+        if (closed) return;
+        closed = true;
+        if (--pending === 0) settle(failure ?? undefined);
+      };
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderrLength < 4096) {
+          stderrChunks.push(chunk);
+          stderrLength += chunk.length;
+        }
+      });
+      child.on("error", (err) => {
+        failure ??= new Error(`${what}: ${(err as Error).message}`);
+        markClosed();
+      });
+      child.on("close", (code) => {
+        if (code !== 0 && !failure) {
+          const stderr = Buffer.concat(stderrChunks).toString("utf8").trim().split("\n").pop() ?? "";
+          failure = new Error(`${what}: exited ${code}${stderr ? ` — ${stderr}` : ""}`);
+        }
+        markClosed();
+      });
+    }
+  });
+}
 
 /**
  * Default process discovery + stop, backed by pgrep and the vellum CLI's
@@ -110,35 +170,68 @@ export const defaultProcessOps: ProcessOps = {
   },
 
   async dockerVolumeToDir(volume, destDir, image) {
-    // docker cp cannot read a volume directly — mount it into a
-    // never-started temp container and cp out of that. The image must be
-    // locally present (docker create never pulls): the recorded entry
-    // images are the reliable choice on a docker install.
-    const container = `vtc-extract-${randomBytes(4).toString("hex")}`;
-    await execFileAsync("docker", ["create", "--name", container, "-v", `${volume}:/data`, image ?? VOLUME_HELPER_IMAGE]);
-    try {
-      await execFileAsync("docker", ["cp", `${container}:/data/.`, destDir]);
-    } finally {
-      await execFileAsync("docker", ["rm", "--force", container]).catch(() => {});
-    }
+    // Stream the volume out as a tar archive: `docker run --rm` starts a
+    // real container that tars the mounted volume to stdout, and the host
+    // untars the stream into destDir. No bind mounts of host tmpdirs (the
+    // macOS/Colima virtiofs share does not expose /var/folders, where
+    // os.tmpdir() resolves), and --rm removes the container even when the
+    // stream fails — nothing left behind in `docker ps -a` (v0.0.11 run
+    // feedback: the old create+cp dance left a never-started container
+    // behind and hung the run until the SSH session died; now a stuck
+    // stream is killed by the settle timeout and reported as a warning).
+    const src = spawn(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "-v",
+        `${volume}:/data`,
+        "--entrypoint",
+        "tar",
+        image ?? VOLUME_HELPER_IMAGE,
+        "-c",
+        "-C",
+        "/data",
+        ".",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const untar = spawn("tar", ["-x", "-C", destDir], { stdio: ["pipe", "ignore", "pipe"] });
+    src.stdout!.pipe(untar.stdin!);
+    await settleStreams([src, untar], `extract ${volume}`);
   },
 
   async dockerDirToVolume(srcDir, volume, image) {
     // Idempotent by itself: `docker volume create` on an existing name is a
-    // no-op. Same temp-container trick, in the other direction.
-    await execFileAsync("docker", ["volume", "create", volume]);
-    const container = `vtc-import-${randomBytes(4).toString("hex")}`;
-    await execFileAsync("docker", ["create", "--name", container, "-v", `${volume}:/data`, image ?? VOLUME_HELPER_IMAGE]);
-    try {
-      await execFileAsync("docker", ["cp", `${srcDir}/.`, `${container}:/data`]);
-    } finally {
-      await execFileAsync("docker", ["rm", "--force", container]).catch(() => {});
-    }
+    // no-op. Import streams the host dir's tar into the mounted volume —
+    // same --rm contract, nothing left behind.
+    await execFileAsync("docker", ["volume", "create", volume], { timeout: 15_000 });
+    const tar = spawn("tar", ["-c", "-C", srcDir, "."], { stdio: ["ignore", "pipe", "pipe"] });
+    const load = spawn(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "-i",
+        "-v",
+        `${volume}:/data`,
+        "--entrypoint",
+        "tar",
+        image ?? VOLUME_HELPER_IMAGE,
+        "-x",
+        "-C",
+        "/data",
+      ],
+      { stdio: ["pipe", "ignore", "pipe"] },
+    );
+    tar.stdout!.pipe(load.stdin!);
+    await settleStreams([tar, load], `import into ${volume}`);
   },
 
   async dockerAvailable() {
     try {
-      await execFileAsync("docker", ["info"]);
+      // A daemon that never answers must not hang detection either.
+      await execFileAsync("docker", ["info"], { timeout: 15_000 });
       return true;
     } catch {
       return false;
