@@ -9,7 +9,9 @@ import {
 } from "../../src/fs-utils.js";
 import {
   consolidateDefaultProvider,
- DEFAULT_TARGET_CTX } from "../../src/layout.js";
+  DEFAULT_TARGET_CTX,
+  renamePlatformConfigSection,
+} from "../../src/layout.js";
 import { expect } from "../helpers/expect.js";
 
 describe("formatBytes", () => {
@@ -206,5 +208,85 @@ describe("consolidateDefaultProvider — the blob is the one selection key", () 
       config({ defaultProvider: { provider: "openai" } }),
     );
     expect(out?.counts["default-provider consolidation"]).toBe(1);
+  });
+});
+
+describe("renamePlatformConfigSection — the config section key", () => {
+  const config = (extra: Record<string, unknown>): string =>
+    JSON.stringify(
+      { llm: {}, twilio: {}, ...extra },
+      null,
+      2,
+    ) + "\n";
+
+  test("renames the top-level platform section, preserving order and contents", () => {
+    const out = renamePlatformConfigSection(
+      config({
+        platform: { baseUrl: "https://cloud.mycadet.ai", subdomain: "apollobot" },
+      }),
+    );
+    expect(out).not.toBeNull();
+    const parsed = JSON.parse(out!);
+    expect(parsed.platform).toBeUndefined();
+    expect(parsed.cloud).toEqual({
+      baseUrl: "https://cloud.mycadet.ai",
+      subdomain: "apollobot",
+    });
+    // cloud lands where platform was — key order is preserved.
+    expect(Object.keys(parsed)).toEqual(["llm", "twilio", "cloud"]);
+  });
+
+  test("is idempotent — the renamed config maps to itself", () => {
+    const once = renamePlatformConfigSection(
+      config({ platform: { subdomain: "apollobot" } }),
+    )!;
+    expect(renamePlatformConfigSection(once)).toBeNull();
+  });
+
+  test("an existing cloud section wins — platform is dropped", () => {
+    const out = renamePlatformConfigSection(
+      config({
+        cloud: { baseUrl: "https://new.example.com" },
+        platform: { baseUrl: "https://old.example.com" },
+      }),
+    );
+    expect(JSON.parse(out!).cloud).toEqual({ baseUrl: "https://new.example.com" });
+  });
+
+  test("nested platform keys elsewhere are untouched", () => {
+    const out = renamePlatformConfigSection(
+      config({
+        platform: { subdomain: "apollobot" },
+        services: { platform: { enabled: true } },
+      }),
+    );
+    const parsed = JSON.parse(out!);
+    expect(parsed.cloud).toEqual({ subdomain: "apollobot" });
+    expect(parsed.services.platform).toEqual({ enabled: true });
+  });
+
+  test("nothing to do returns null", () => {
+    expect(renamePlatformConfigSection(config({}))).toBeNull();
+    expect(renamePlatformConfigSection("not json {{{")).toBeNull();
+    expect(renamePlatformConfigSection('["array"]')).toBeNull();
+    expect(renamePlatformConfigSection("null")).toBeNull();
+    expect(renamePlatformConfigSection("42")).toBeNull();
+  });
+
+  test("the config.json rewrite substep reports the rename", () => {
+    const out = sanctionedContentTransform(
+      "workspace/config.json",
+      config({ platform: { subdomain: "apollobot" } }),
+    );
+    expect(out?.counts["platform-section-key"]).toBe(1);
+    expect(JSON.parse(out!.text).cloud).toEqual({ subdomain: "apollobot" });
+  });
+
+  test("non-config files never see the section rename", () => {
+    const out = sanctionedContentTransform(
+      "workspace/conversations/x/messages.jsonl",
+      '{"platform": {"subdomain": "x"}}',
+    );
+    expect(out?.counts["platform-section-key"]).toBeUndefined();
   });
 });

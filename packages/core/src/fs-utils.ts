@@ -21,6 +21,7 @@ import {
   isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
+  renamePlatformConfigSection,
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
   textSubstitutions,
@@ -377,6 +378,14 @@ export function sanctionedContentTransform(
     if (consolidated !== null) {
       text = consolidated;
       counts["default-provider consolidation"] = 1;
+    }
+    // Cadet renamed the `platform` config section to `cloud` (typed section
+    // writes + the /v1/config/cloud wire rename); vellum-era and pre-rename
+    // cadet configs on disk still carry the old key.
+    const cloudRenamed = renamePlatformConfigSection(text);
+    if (cloudRenamed !== null) {
+      text = cloudRenamed;
+      counts["platform-section-key"] = 1;
     }
     return { substep: "config.json rewrite", text, counts };
   }
