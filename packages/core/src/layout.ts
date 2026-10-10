@@ -491,6 +491,55 @@ export function consolidateDefaultProvider(content: string): string | null {
   return JSON.stringify(root, null, 2) + "\n";
 }
 
+/**
+ * Cadet renamed the config's `platform` section to `cloud` (typed section
+ * writes and the /v1/config/cloud wire rename). Vellum-era and pre-rename
+ * cadet configs on disk still carry the old section key; move it so the
+ * renamed loader reads the connection settings instead of silently dropping
+ * them — the config schema is strip-mode, so an unknown section never
+ * round-trips. JSON-aware and TOP-LEVEL only: the section's
+ * `baseUrl`/`subdomain` fields ride unchanged, key order is preserved
+ * (cloud lands where platform was), and nested keys elsewhere are
+ * untouched. When both spellings exist the newer `cloud` section wins and
+ * `platform` is dropped — the same key-wins rule as
+ * consolidateDefaultProvider. Idempotent: with `platform` gone from the
+ * root there is nothing to rename. Returns the rewritten text, or null
+ * when there was nothing to do (unparseable content, or no top-level
+ * `platform` key).
+ */
+export function renamePlatformConfigSection(content: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  if (root.platform === undefined) {
+    return null;
+  }
+  const renamed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(root)) {
+    if (key === "platform") {
+      if (renamed.cloud === undefined) {
+        renamed.cloud = value;
+      }
+      continue;
+    }
+    if (key === "cloud") {
+      // An existing cloud section is the newer intent — it wins over the
+      // value an earlier platform slot may have stashed here.
+      renamed.cloud = value;
+      continue;
+    }
+    renamed[key] = value;
+  }
+  return JSON.stringify(renamed, null, 2) + "\n";
+}
+
 /** Database artifacts are copied verbatim and recorded for later inspection. */
 export const DB_EXTENSIONS = new Set([".db", ".sqlite", ".sqlite3", ".wal", ".shm"]);
 
