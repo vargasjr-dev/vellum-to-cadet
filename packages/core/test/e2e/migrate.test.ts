@@ -32,6 +32,14 @@ const noopOps: ProcessOps = {
   async cadetSleep() {},
   async installCadet() {},
   async cadetWakeAll() {},
+  async cadetVersion() {
+    return null;
+  },
+  async dockerVolumeToDir() {},
+  async dockerDirToVolume() {},
+  async dockerAvailable() {
+    return false;
+  },
   async cadetLogin() {},
   async cadetBinAvailable() {
     return true;
@@ -455,6 +463,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+      async cadetVersion() {
+        return null;
+      },
+      async dockerVolumeToDir() {},
+      async dockerDirToVolume() {},
+      async dockerAvailable() {
+        return false;
+      },
   async cadetLogin() {},
       async cadetBinAvailable() {
         return true;
@@ -493,6 +509,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+      async cadetVersion() {
+        return null;
+      },
+      async dockerVolumeToDir() {},
+      async dockerDirToVolume() {},
+      async dockerAvailable() {
+        return false;
+      },
   async cadetLogin() {},
       async cadetBinAvailable() {
         return true;
@@ -654,9 +678,53 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       expect(report.detect.deploymentKind).toBe("docker");
       expect(report.detect.docker.instances).toEqual(["velly"]);
       expect(report.detect.docker.images).toEqual(["vellumai/vellum-assistant"]);
+
+      // The detect summary: no parenthetical — each migrating assistant
+      // gets its own nested line, docker ones marked as volume-backed.
+      const detectStep = report.steps.find((s) => s.step === "detect");
+      expect(detectStep?.summary).not.toContain("(");
+      expect(detectStep?.summary).toContain(`└─ migrating assistant velly — docker instance, data lives in docker volumes`);
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
+    }
+  });
+
+  test("a vellum-prefixed docker instance names the migrated install after its own name", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    const prevXdgData = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    try {
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            {
+              assistantId: "vellum-prime-quail-3ezfs4",
+              cloud: "docker",
+              containerInfo: { assistantImage: "vellumai/vellum-assistant" },
+            },
+          ],
+        }),
+      );
+      const report = await migrate({ vellumRoot: root, processOps: noopOps });
+
+      expect(report.ok).toBe(true);
+      // v0.0.10 run feedback: the docker assistant's install landed at
+      // assistants/vellum — the generic legacy name — instead of its own.
+      expect(report.detect.cadetRoot).toBe(
+        path.join(home, ".local", "share", "cadet", "assistants", "prime-quail-3ezfs4"),
+      );
+      expect(report.detect.assistantHandles).toContain("vellum-prime-quail-3ezfs4");
+      const detectStep = report.steps.find((s) => s.step === "detect");
+      expect(detectStep?.summary).toContain("migrating assistant prime-quail-3ezfs4");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgData;
     }
   });
 });
@@ -764,7 +832,9 @@ describe("e2e: modern multi-instance layout", () => {
     expect(config).not.toContain(".vellum");
 
     const env = await fs.readFile(path.join(instance, ".env"), "utf8");
-    expect(env).toContain("CADET_DATA_DIR=~/.local/share/cadet/assistants/vellum");
+    // The instance is named after the handle — recorded legacy-root paths
+    // must agree with the directory the data actually landed in.
+    expect(env).toContain("CADET_DATA_DIR=~/.local/share/cadet/assistants/velly");
     expect(env).not.toContain("VELLUM_");
 
     // Source untouched; manifest records the modern source shape.
@@ -919,6 +989,14 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetVersion() {
+            return null;
+          },
+          async dockerVolumeToDir() {},
+          async dockerDirToVolume() {},
+          async dockerAvailable() {
+            return false;
+          },
   async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
@@ -1043,6 +1121,14 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetVersion() {
+            return null;
+          },
+          async dockerVolumeToDir() {},
+          async dockerDirToVolume() {},
+          async dockerAvailable() {
+            return false;
+          },
   async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
@@ -1115,6 +1201,14 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetVersion() {
+            return null;
+          },
+          async dockerVolumeToDir() {},
+          async dockerDirToVolume() {},
+          async dockerAvailable() {
+            return false;
+          },
   async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
@@ -1155,6 +1249,14 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetVersion() {
+            return null;
+          },
+          async dockerVolumeToDir() {},
+          async dockerDirToVolume() {},
+          async dockerAvailable() {
+            return false;
+          },
   async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
@@ -1347,9 +1449,15 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       async cadetLogin() {
         logins++;
       },
+      async cadetVersion() {
+        return "0.12.7";
+      },
     };
     try {
-      // The vellum lockfile: home-level, vellum-branded, cloud-registered.
+      // The vellum lockfile: home-level, vellum-branded, cloud-registered —
+      // plus the vellum-runtime root bookkeeping the conversion must drop
+      // (v0.0.10 run feedback: it all rode into the cadet lockfile) — and
+      // a docker entry whose containerInfo must repoint at cadet's images.
       await fs.writeFile(
         path.join(home, ".vellum.lock.json"),
         JSON.stringify(
@@ -1374,8 +1482,29 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
                 },
                 signingKey: "signing-key-material",
               },
+              {
+                assistantId: "vellum-prime-quail-3ezfs4",
+                name: "vellum-prime-quail-3ezfs4",
+                cloud: "docker",
+                containerInfo: {
+                  assistantImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/assistant-server@sha256:c737",
+                  gatewayImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/gateway@sha256:beef",
+                  cesImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/ces@sha256:dead",
+                  assistantDigest: "sha256:aaa",
+                  gatewayDigest: "sha256:bbb",
+                  cesDigest: "sha256:ccc",
+                  networkName: "vellum-prime-quail-3ezfs4-net",
+                  assistantPort: 7821,
+                },
+              },
             ],
             activeAssistant: "vellum-grand-ram",
+            serviceGroupVersion: "0.12.6",
+            previousServiceGroupVersion: "0.12.5",
+            previousContainerInfo: { assistantImage: "old" },
+            version: "0.12.6",
+            previousDbMigrationVersion: 119,
+            previousWorkspaceMigrationId: "ws-1",
           },
           null,
           2,
@@ -1426,6 +1555,36 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       // Unknown/sensitive fields ride through untouched.
       expect(entry.signingKey).toBe("signing-key-material");
       expect(lockRaw.activeAssistant).toBe("grand-ram");
+
+      // The vellum-runtime root bookkeeping never rides into the cadet
+      // lockfile — cadet's own upgrade machinery writes its own (v0.0.10
+      // run feedback: it all rode through).
+      for (const field of [
+        "serviceGroupVersion",
+        "previousServiceGroupVersion",
+        "previousContainerInfo",
+        "version",
+        "previousDbMigrationVersion",
+        "previousWorkspaceMigrationId",
+      ]) {
+        expect(field in lockRaw).toBe(false);
+      }
+
+      // The docker entry: images repointed at cadet's (derived from the
+      // installed cadet's version), digest/network bookkeeping dropped.
+      const dockerEntry = lockRaw.assistants.find(
+        (a: { assistantId: string }) => a.assistantId === "prime-quail-3ezfs4",
+      );
+      expect(dockerEntry).toBeDefined();
+      const info = dockerEntry.containerInfo;
+      expect(info.assistantImage).toBe("mycadet/mycadet-assistant:v0.12.7");
+      expect(info.gatewayImage).toBe("mycadet/mycadet-gateway:v0.12.7");
+      expect(info.cesImage).toBe("mycadet/mycadet-credential-executor:v0.12.7");
+      expect("assistantDigest" in info).toBe(false);
+      expect("gatewayDigest" in info).toBe(false);
+      expect("cesDigest" in info).toBe(false);
+      expect("networkName" in info).toBe(false);
+      expect(info.assistantPort).toBe(7821);
 
       // ── The instance dir: renamed out of the brand prefix. ──
       expect(await exists(path.join(cadetRoot, "assistants", "grand-ram"))).toBe(true);

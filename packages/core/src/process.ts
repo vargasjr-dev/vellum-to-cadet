@@ -1,10 +1,19 @@
 import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 
 import { CADET_PROCESS_PATTERNS, MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
 import type { ProcessOps } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The image the docker volume ops mount for their temp containers. The
+ * vellum sandbox images are guaranteed present on a docker install (its
+ * containers ran from them) — pass a recorded entry image when you have
+ * one; this fallback covers the images-less call sites.
+ */
+const VOLUME_HELPER_IMAGE = "vellumai/vellum-assistant:latest";
 
 /**
  * Default process discovery + stop, backed by pgrep and the vellum CLI's
@@ -85,6 +94,55 @@ export const defaultProcessOps: ProcessOps = {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     }
     return true;
+  },
+
+  async cadetVersion() {
+    try {
+      const { stdout } = await execFileAsync("cadet", ["--version"]);
+      // First line only, accepting both "0.12.7" and "cadet 0.12.7". A
+      // non-version answer (an unrelated binary owns the name) yields null
+      // so the lockfile conversion never writes image refs derived from it.
+      const line = stdout.split("\n")[0]?.trim().replace(/^cadet\s+/i, "") ?? "";
+      return /^v?\d/.test(line) ? line.replace(/^v/, "") : null;
+    } catch {
+      return null;
+    }
+  },
+
+  async dockerVolumeToDir(volume, destDir, image) {
+    // docker cp cannot read a volume directly — mount it into a
+    // never-started temp container and cp out of that. The image must be
+    // locally present (docker create never pulls): the recorded entry
+    // images are the reliable choice on a docker install.
+    const container = `vtc-extract-${randomBytes(4).toString("hex")}`;
+    await execFileAsync("docker", ["create", "--name", container, "-v", `${volume}:/data`, image ?? VOLUME_HELPER_IMAGE]);
+    try {
+      await execFileAsync("docker", ["cp", `${container}:/data/.`, destDir]);
+    } finally {
+      await execFileAsync("docker", ["rm", "--force", container]).catch(() => {});
+    }
+  },
+
+  async dockerDirToVolume(srcDir, volume, image) {
+    // Idempotent by itself: `docker volume create` on an existing name is a
+    // no-op. Same temp-container trick, in the other direction.
+    await execFileAsync("docker", ["volume", "create", volume]);
+    const container = `vtc-import-${randomBytes(4).toString("hex")}`;
+    await execFileAsync("docker", ["create", "--name", container, "-v", `${volume}:/data`, image ?? VOLUME_HELPER_IMAGE]);
+    try {
+      await execFileAsync("docker", ["cp", `${srcDir}/.`, `${container}:/data`]);
+    } finally {
+      await execFileAsync("docker", ["rm", "--force", container]).catch(() => {});
+    }
+  },
+
+  async dockerAvailable() {
+    try {
+      await execFileAsync("docker", ["info"]);
+      return true;
+    } catch {
+      return false;
+    }
   },
 
   async npmGlobalRoot() {

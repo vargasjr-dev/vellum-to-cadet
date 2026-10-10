@@ -130,3 +130,71 @@ describe("entry-transform: localRuntimeUrlToLoopback", () => {
     expect(localRuntimeUrlToLoopback("")).toBe("");
   });
 });
+
+describe("entry-transform: docker containerInfo", () => {
+  const vellumImages = {
+    assistantImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/assistant-server@sha256:c737",
+    gatewayImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/gateway@sha256:beef",
+    cesImage: "us-central1-docker.pkg.dev/vellum-ai-prod/sandbox-images/ces@sha256:dead",
+    assistantDigest: "sha256:aaa",
+    gatewayDigest: "sha256:bbb",
+    cesDigest: "sha256:ccc",
+    networkName: "vellum-prime-quail-3ezfs4-net",
+    assistantPort: 7821,
+  };
+
+  test("repoints the service images at cadet's and drops the digest/network bookkeeping", () => {
+    const result = transformAssistantEntry(
+      {
+        assistantId: "vellum-prime-quail-3ezfs4",
+        cloud: "docker",
+        containerInfo: { ...vellumImages },
+      },
+      {
+        mapInstanceDir: (d) => d,
+        defaultInstanceDirFor: () => "/x",
+        cadetImages: {
+          assistant: "mycadet/mycadet-assistant:v0.12.7",
+          gateway: "mycadet/mycadet-gateway:v0.12.7",
+          credentialExecutor: "mycadet/mycadet-credential-executor:v0.12.7",
+        },
+      },
+    );
+    expect(result.changed).toBe(true);
+    expect(result.dockerImagesUnresolved).toBeUndefined();
+    const info = result.entry.containerInfo as Record<string, unknown>;
+    expect(info.assistantImage).toBe("mycadet/mycadet-assistant:v0.12.7");
+    expect(info.gatewayImage).toBe("mycadet/mycadet-gateway:v0.12.7");
+    expect(info.cesImage).toBe("mycadet/mycadet-credential-executor:v0.12.7");
+    for (const field of ["assistantDigest", "gatewayDigest", "cesDigest", "networkName"]) {
+      expect(field in info).toBe(false);
+    }
+    expect(info.assistantPort).toBe(7821);
+  });
+
+  test("without cadet images the vellum refs stay (warned) and the digests still drop", () => {
+    const result = transformAssistantEntry(
+      {
+        assistantId: "vellum-prime-quail-3ezfs4",
+        cloud: "docker",
+        containerInfo: { ...vellumImages },
+      },
+      { mapInstanceDir: (d) => d, defaultInstanceDirFor: () => "/x" },
+    );
+    expect(result.dockerImagesUnresolved).toBe(true);
+    const info = result.entry.containerInfo as Record<string, unknown>;
+    expect(info.assistantImage).toBe(vellumImages.assistantImage);
+    expect("assistantDigest" in info).toBe(false);
+    expect("networkName" in info).toBe(false);
+  });
+
+  test("non-docker entries keep their containerInfo untouched", () => {
+    const containerInfo = { assistantImage: "x", assistantDigest: "sha256:aaa" };
+    const result = transformAssistantEntry(
+      { assistantId: "a", cloud: "local", containerInfo },
+      { mapInstanceDir: (d) => d, defaultInstanceDirFor: () => "/x" },
+    );
+    expect(result.dockerImagesUnresolved).toBeUndefined();
+    expect((result.entry.containerInfo as Record<string, unknown>).assistantDigest).toBe("sha256:aaa");
+  });
+});

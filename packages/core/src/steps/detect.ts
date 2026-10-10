@@ -60,7 +60,10 @@ const EXTERNAL_REFERENCE_PROBES: ReadonlyArray<{ label: string; file: string }> 
 
 export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<DetectInfo> {
   const vellumRoot = options.vellumRoot ?? DEFAULT_VELLUM_ROOT;
-  const cadetRoot = options.cadetRoot ?? toCadetRoot(vellumRoot);
+
+  const docker = await readDockerLockfileEvidence();
+
+  let cadetRoot = options.cadetRoot ?? toCadetRoot(vellumRoot);
 
   const [vellumRootExists, cadetRootExists] = await Promise.all([
     pathExists(vellumRoot),
@@ -81,21 +84,42 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
 
   // Modern-layout assistant dir names (the handles, e.g.
   // "vellum-fresh-eel-8di6pa"). The migration names the cadet instance
-  // after the handle, not our own default.
+  // after the handle, not our own default. Docker-deployed assistants keep
+  // their data in docker volumes — no dirs under the root — so the
+  // lockfile-tracked instance ids are handles too and must join this list,
+  // or the migration falls back to the generic "vellum" instance name
+  // instead of the assistant's own (v0.0.10 run feedback).
   const assistantHandles: string[] = [];
   if (vellumRootExists) {
     try {
       for (const name of await fs.readdir(path.join(vellumRoot, "assistants"), { withFileTypes: true })) {
         if (name.isDirectory()) assistantHandles.push(name.name);
       }
-      assistantHandles.sort();
     } catch {
       // Legacy single-root layout — no assistants/ dir.
     }
   }
+  for (const id of docker.instances) {
+    if (!assistantHandles.includes(id)) assistantHandles.push(id);
+  }
+  assistantHandles.sort();
+
+  // A legacy single-root install migrates INTO a named instance dir. When
+  // we know the real handle (docker ids included), name it after that —
+  // not the generic "vellum" (v0.0.10 run feedback: the docker assistant's
+  // data landed at assistants/vellum instead of its own name).
+  if (
+    options.cadetRoot === undefined &&
+    assistantHandles.length > 0 &&
+    isLegacyRootName(path.basename(vellumRoot))
+  ) {
+    cadetRoot = path.join(
+      path.dirname(cadetRoot),
+      handleToInstanceName(assistantHandles[0] ?? ""),
+    );
+  }
 
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
-  const docker = await readDockerLockfileEvidence();
 
   return {
     vellumRoot,
@@ -106,12 +130,28 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     previousManifest,
     version: (await ops.vellumVersion()) ?? (await detectVersion(vellumRoot)),
     assistantHandles,
+    retiredCount: await countRetiredArchives(vellumRoot),
     deploymentKind: await detectDeploymentKind(vellumRoot, docker),
     docker,
     runningProcesses,
     rootSizeBytes,
     externalReferences: await detectExternalReferences(vellumRoot),
   };
+}
+
+/** The legacy single-root names: `.vellum` and `.vellum-<env>`. */
+function isLegacyRootName(base: string): boolean {
+  return base === ".vellum" || base.startsWith(".vellum-");
+}
+
+/** Retired-assistant archives in the vellum root's retired/ dir. */
+async function countRetiredArchives(vellumRoot: string): Promise<number> {
+  try {
+    const entries = await fs.readdir(path.join(vellumRoot, "retired"));
+    return entries.filter((name) => name.endsWith(".tar.gz")).length;
+  } catch {
+    return 0;
+  }
 }
 
 async function detectVersion(vellumRoot: string): Promise<string | null> {

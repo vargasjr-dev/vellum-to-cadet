@@ -20,6 +20,14 @@ const noopOps: ProcessOps = {
   async cadetSleep() {},
   async installCadet() {},
   async cadetWakeAll() {},
+  async cadetVersion() {
+    return null;
+  },
+  async dockerVolumeToDir() {},
+  async dockerDirToVolume() {},
+  async dockerAvailable() {
+    return false;
+  },
   async cadetLogin() {},
   async cadetBinAvailable() {
     return true;
@@ -171,6 +179,14 @@ describe("uninstall", () => {
         async cadetSleep() {},
         async installCadet() {},
         async cadetWakeAll() {},
+        async cadetVersion() {
+          return null;
+        },
+        async dockerVolumeToDir() {},
+        async dockerDirToVolume() {},
+        async dockerAvailable() {
+          return false;
+        },
   async cadetLogin() {},
         async cadetBinAvailable() {
           return true;
@@ -257,6 +273,14 @@ describe("uninstall", () => {
         async cadetSleep() {},
         async installCadet() {},
         async cadetWakeAll() {},
+        async cadetVersion() {
+          return null;
+        },
+        async dockerVolumeToDir() {},
+        async dockerDirToVolume() {},
+        async dockerAvailable() {
+          return false;
+        },
   async cadetLogin() {},
         async cadetBinAvailable() {
           return true;

@@ -255,14 +255,17 @@ function createLiveProgress(): {
     onStepDone: (result) => {
       if (live && pending) {
         // Rewrite the pending step line above the already-resolved nested
-        // lines (they stay on screen), then hop back down past them.
+        // lines (they stay on screen), then hop back down past them. A
+        // multi-line summary (the nested detect output) pushes those lines
+        // further down by its extra lines — hop accordingly.
         const nested = itemLines;
+        const extra = result.summary.split("\n").length - 1;
         process.stderr.write(`\u001b[${nested + 1}A\u001b[2K`);
         process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
-        process.stderr.write(`\u001b[${nested}B\r`);
+        process.stderr.write(`\u001b[${nested + extra}B\r`);
       } else {
         if (!live) return;
-        process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+        process.stderr.write(stepLines(result).join("\n") + "\n");
       }
       pending = false;
       resetItems();
@@ -272,6 +275,16 @@ function createLiveProgress(): {
     },
     finish: clearPending,
   };
+}
+
+/** A step's display lines: the step line, then nested summary lines indented. */
+function stepLines(result: StepResult): string[] {
+  const [first, ...rest] = result.summary.split("\n");
+  const lines = [`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${first ?? ""}`];
+  for (const line of rest) {
+    lines.push(`    ${line}`);
+  }
+  return lines;
 }
 
 /** Nested bullet for a step issue: red ! for errors, yellow ⚠ for warnings, dim · for info. */
@@ -289,7 +302,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   if (!opts?.stepsStreamedLive) {
     for (const step of report.steps) {
       if (step.quiet) continue;
-      lines.push(`  ${stepIcon(step.status)} ${step.step.padEnd(20)} ${step.summary}`);
+      lines.push(...stepLines(step));
       for (const issue of step.issues ?? []) {
         lines.push(`    ${issueIcon(issue.severity)} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
       }
