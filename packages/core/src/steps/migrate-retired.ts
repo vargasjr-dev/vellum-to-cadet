@@ -22,9 +22,8 @@ const execFile = promisify(execFileCb);
 
 /**
  * Retired-assistant archives (`retired/<name>.tar.gz`, plus the
- * `<name>.tar.gz.tmp` / legacy `<name>.tar.gz.staging` trees an interrupted
- * retire or earlier migration run leaves behind) ride along in the vellum
- * root and land in the cadet root verbatim. They hold the same
+ * `<name>.tar.gz.tmp` scratch trees an interrupted retire leaves behind)
+ * ride along in the vellum root and land in the cadet root verbatim. They hold the same
  * vellum-branded paths, tokens, and dbs as the live tree, so each one is
  * untarred, run through the same assistant-logic migration, and re-tarred.
  *
@@ -35,10 +34,6 @@ const execFile = promisify(execFileCb);
  */
 
 const TMP_SUFFIX = ".tar.gz.tmp";
-/** What this step + the old product's interrupted retires used before .tmp. */
-const LEGACY_STAGING_SUFFIX = ".tar.gz.staging";
-/** Both leftover shapes are discovered; only .tmp is ever created. */
-const LEFTOVER_SUFFIXES = [TMP_SUFFIX, LEGACY_STAGING_SUFFIX];
 
 /** Archive inventory: finished tars + leftover scratch trees. */
 interface RetiredTarget {
@@ -68,9 +63,8 @@ export async function migrateRetiredArchives(
   // so they are migrated before any tar overwrites the scratch location,
   // and finished into a tar when none ever landed.
   for (const entry of entries) {
-    const suffix = LEFTOVER_SUFFIXES.find((s) => entry.isDirectory() && entry.name.endsWith(s));
-    if (!suffix) continue;
-    const name = entry.name.slice(0, -suffix.length);
+    if (!(entry.isDirectory() && entry.name.endsWith(TMP_SUFFIX))) continue;
+    const name = entry.name.slice(0, -TMP_SUFFIX.length);
     const tarPath = path.join(retiredDir, `${name}.tar.gz`);
     targets.push({
       name,

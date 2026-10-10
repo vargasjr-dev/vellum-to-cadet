@@ -1109,20 +1109,12 @@ describe("e2e: retired archives", () => {
     await run("tar", ["-czf", path.join(retiredDir, "grand-assistant.tar.gz"), "-C", scratch1, "."]);
     await fs.rm(scratch1, { recursive: true, force: true });
 
-    // ── Archive 2: an interrupted retire with the LEGACY scratch suffix
-    //    (.tar.gz.staging — what interrupted retires and older migration
-    //    runs wrote) — never tarred.
-    const staging2 = path.join(retiredDir, "interrupted.tar.gz.staging");
+    // ── Archive 2: an interrupted retire — a .tmp scratch tree, never tarred.
+    const staging2 = path.join(retiredDir, "interrupted.tar.gz.tmp");
     await fs.mkdir(path.join(staging2, "workspace", "data", "logs"), { recursive: true });
     await fs.writeFile(path.join(staging2, "workspace", "data", "logs", "day.log"), "vellum://x\n");
 
-    // ── Archive 3: a leftover with the CURRENT .tmp scratch suffix —
-    //    discovered and finished exactly like the legacy shape.
-    const tmpDir = path.join(retiredDir, "fresh.tar.gz.tmp");
-    await fs.mkdir(path.join(tmpDir, "workspace", "data", "logs"), { recursive: true });
-    await fs.writeFile(path.join(tmpDir, "workspace", "data", "logs", "day.log"), "vellum://y\n");
-
-    // ── Archive 4: a corrupt tar — must warn and never fail the run.
+    // ── Archive 3: a corrupt tar — must warn and never fail the run.
     await fs.writeFile(path.join(retiredDir, "broken.tar.gz"), Buffer.from("not a tar at all"));
 
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
@@ -1153,16 +1145,9 @@ describe("e2e: retired archives", () => {
     expect(link.content).toContain("cadet://");
     migratedDb.close();
 
-    // Interrupted retires: completed into tars, scratch trees consumed —
-    // both the legacy .staging suffix and the current .tmp one.
-    for (const leftover of ["interrupted.tar.gz.staging", "fresh.tar.gz.tmp"]) {
-      expect(await exists(path.join(cadetRoot, "retired", leftover))).toBe(false);
-      expect(await exists(path.join(cadetRoot, "retired", leftover.replace(/\.(staging|tmp)$/, "")))).toBe(true);
-    }
-    const freshTar = path.join(retiredDir, "check-fresh");
-    await fs.mkdir(freshTar, { recursive: true });
-    await run("tar", ["-xzf", path.join(cadetRoot, "retired", "fresh.tar.gz"), "-C", freshTar]);
-    expect(await fs.readFile(path.join(freshTar, "workspace/data/logs/day.log"), "utf8")).toContain("cadet://y");
+    // Interrupted retire: completed into a tar, .tmp scratch consumed.
+    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz"))).toBe(true);
+    expect(await exists(path.join(cadetRoot, "retired", "interrupted.tar.gz.tmp"))).toBe(false);
 
     // Corrupt archive: byte-identical, warned, run still ok.
     expect((await fs.readFile(path.join(cadetRoot, "retired", "broken.tar.gz"))).toString()).toBe(
@@ -1172,9 +1157,9 @@ describe("e2e: retired archives", () => {
     expect(broken.length).toBe(1);
     expect(broken[0]?.severity).toBe("warning");
 
-    // No scratch litter left behind under either suffix.
-    const litter = (await fs.readdir(path.join(cadetRoot, "retired"))).filter(
-      (n) => n.endsWith(".tar.gz.staging") || n.endsWith(".tar.gz.tmp"),
+    // No scratch litter left behind anywhere.
+    const litter = (await fs.readdir(path.join(cadetRoot, "retired"))).filter((n) =>
+      n.endsWith(".tar.gz.tmp"),
     );
     expect(litter.length).toBe(0);
   });
