@@ -158,45 +158,41 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   const stop = await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000);
   done(stop);
 
-  // 2. Full backup before any mutation. Quiet in the UI: the vellum root
-  //    is never mutated, so it IS the backup — the line is noise. Still
-  //    recorded in the report/--json, and a FAILURE stays visible.
+  // 2. (No backup step.) The vellum root is a read-only source of truth —
+  //    the migration copies FROM it and never writes to it, so the original
+  //    IS the backup and a full copy only doubles the disk bill (v0.0.9
+  //    run feedback). The timestamp still stamps the layout manifest. Only
+  //    repair mode backs anything up, because IT mutates a root in place
+  //    (the cadet root).
   const timestamp = utcStamp();
-  const bk = await backup(detect.vellumRoot, detect.cadetRoot, timestamp);
-  steps.push(bk);
-  if (bk.status === "failed") {
-    return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.backupFailed);
-  }
-  const backupPath = backupDirFor(detect.cadetRoot, timestamp);
 
   // 3. Migrate the layout (copy + renames + rewrites + manifest).
   start("migrate-layout");
   const mig = await migrateLayout(detect, timestamp, targetCtx);
   done(mig);
   if (mig.status === "failed") {
-    return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.migrationFailed);
+    return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.migrationFailed);
   }
 
-  // 3.5 Rewrite vellum-branded VALUES inside the migrated assistant DB
-  // (channel ids, attachment links, the managed connection row). The
-  // destination path comes from the copy plan so every layout shape agrees.
+  // 3.5 Rewrite vellum-branded VALUES inside EVERY migrated assistant DB
+  // (channel ids, attachment links, the managed connection row). The root
+  // hosts one state tree per assistant, so the copy plan can carry several
+  // assistant dbs — each gets the rewrite (rewriting only the first left
+  // every later workspace branded; v0.0.9 run feedback). Destination paths
+  // come from the copy plan so every layout shape agrees.
+  const assistantDbDests = (mig.files ?? [])
+    .filter((f) => stateRelativePath(f.src) === ASSISTANT_DB_STATE_REL)
+    .map((f) => f.dest);
   start("migrate-assistant-db");
-  done(
-    await migrateAssistantDb(
-      detect,
-      mig.files?.find((f) => stateRelativePath(f.src) === ASSISTANT_DB_STATE_REL)?.dest,
-    ),
-  );
+  done(await migrateAssistantDb(detect, assistantDbDests));
 
-  // 3.6 Same treatment for the gateway DB (its own contact/invite/request/
-  // delivery channel columns). Also destination-path-derived from the plan.
+  // 3.6 Same treatment for every gateway DB (its own contact/invite/request/
+  // delivery channel columns), destination paths from the plan.
+  const gatewayDbDests = (mig.files ?? [])
+    .filter((f) => isGatewayDbStateRel(stateRelativePath(f.src)))
+    .map((f) => f.dest);
   start("migrate-gateway-db");
-  done(
-    await migrateGatewayDb(
-      detect,
-      mig.files?.find((f) => isGatewayDbStateRel(stateRelativePath(f.src)))?.dest,
-    ),
-  );
+  done(await migrateGatewayDb(detect, gatewayDbDests));
 
   // 4. Move a legacy home-level cadet lockfile into the config dir so the
   // migrated install keeps its identity (cadet no longer reads the old name).
@@ -209,7 +205,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("migrate-retired");
   done(await migrateRetiredArchives(detect.cadetRoot, targetCtx, onItem("migrate-retired")));
 
-  // 5. Verify against the backup ground truth. Findings are WARNINGS, not
+  // 5. Verify against the vellum source. Findings are WARNINGS, not
   //    failures: the migration itself is complete, and residual branding in
   //    a cold corner of the data must not scare the user with exit code 7.
   start("verify");
@@ -222,9 +218,9 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   const install = await installCadetCli(ops, assistantCount);
   done(install);
   start("wake-assistants");
-  done(await wakeAssistants(ops, assistantCount, install.data?.["installed"] === true));
+  done(await wakeAssistants(ops, assistantCount, install.data?.["binAvailable"] === true));
 
-  return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.ok);
+  return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.ok);
 }
 
 function finish(
@@ -269,25 +265,25 @@ function cadetStateRel(relPath: string): string {
 const GATEWAY_DB_DEST_REL = "gateway-security/gateway.sqlite";
 
 interface CadetScan {
-  /** Destination-relative paths, ready for the db steps. */
-  assistantDb: string | null;
-  gatewayDb: string | null;
+  /** Destination-relative paths, ready for the db steps. One per assistant workspace. */
+  assistantDbs: string[];
+  gatewayDbs: string[];
   /** Rewrite-eligible, non-db files: destination-relative path + state-relative predicate path. */
   contentFiles: Array<{ destRel: string; stateRel: string }>;
 }
 
 /** One walk of the cadet tree, classified for the repair steps. */
 async function scanCadetTree(cadetRoot: string): Promise<CadetScan> {
-  const scan: CadetScan = { assistantDb: null, gatewayDb: null, contentFiles: [] };
+  const scan: CadetScan = { assistantDbs: [], gatewayDbs: [], contentFiles: [] };
   for (const entry of await walkTree(cadetRoot)) {
     if (entry.isDirectory) continue;
     const stateRel = cadetStateRel(entry.relPath);
     if (stateRel === ASSISTANT_DB_STATE_REL) {
-      scan.assistantDb = entry.relPath;
+      scan.assistantDbs.push(entry.relPath);
       continue;
     }
     if (stateRel === GATEWAY_DB_DEST_REL || isGatewayDbStateRel(stateRel)) {
-      scan.gatewayDb = entry.relPath;
+      scan.gatewayDbs.push(entry.relPath);
       continue;
     }
     if (isDbArtifact(stateRel)) continue;
@@ -341,11 +337,13 @@ async function rewriteContent(
 async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepResult> {
   const issues: StepIssue[] = [];
   let dbsChecked = 0;
-  for (const [destRel, spec] of [
-    [scan.assistantDb, VALUE_MIGRATED_DBS[0]!],
-    [scan.gatewayDb, VALUE_MIGRATED_DBS[1]!],
-  ] as const) {
-    if (!destRel) continue;
+  const assistantSpec = VALUE_MIGRATED_DBS[0]!;
+  const gatewaySpec = VALUE_MIGRATED_DBS[1]!;
+  const dbChecks: Array<[string, typeof assistantSpec]> = [
+    ...scan.assistantDbs.map((d): [string, typeof assistantSpec] => [d, assistantSpec]),
+    ...scan.gatewayDbs.map((d): [string, typeof assistantSpec] => [d, gatewaySpec]),
+  ];
+  for (const [destRel, spec] of dbChecks) {
     dbsChecked++;
     const leftover = await dbVellumRows(path.join(cadetRoot, destRel), spec);
     if (leftover === "unreadable") {
@@ -476,7 +474,7 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
       done({
         step: "repair-plan",
         status: "planned",
-        summary: `dry run in ${root}: ${pending} of ${scan.contentFiles.length} eligible file(s) pending rewrites, ${scan.assistantDb ? 1 : 0} assistant db(s) + ${scan.gatewayDb ? 1 : 0} gateway db(s) to re-check`,
+        summary: `dry run in ${root}: ${pending} of ${scan.contentFiles.length} eligible file(s) pending rewrites, ${scan.assistantDbs.length} assistant db(s) + ${scan.gatewayDbs.length} gateway db(s) to re-check`,
       });
     }
     return finish(detect, steps, "repair", startedAt, null, EXIT_CODES.ok);
@@ -512,11 +510,15 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
 
     // The db value steps, pointed at this root. All guarded and
     // idempotent: WHERE col = 'vellum' matches nothing on a clean root.
-    start("migrate-assistant-db");
-    done(await migrateAssistantDbAt(root, scan.assistantDb ?? undefined));
+    for (const destRel of scan.assistantDbs) {
+      start("migrate-assistant-db");
+      done(await migrateAssistantDbAt(root, destRel));
+    }
 
-    start("migrate-gateway-db");
-    done(await migrateGatewayDbAt(root, scan.gatewayDb ?? undefined));
+    for (const destRel of scan.gatewayDbs) {
+      start("migrate-gateway-db");
+      done(await migrateGatewayDbAt(root, destRel));
+    }
 
     // Verify: dbs must have zero vellum rows; sanctioned content must be
     // transform-idempotent (rewriting an already-clean file changes nothing).

@@ -106,7 +106,7 @@ const HELP = `migrate-vellum-assistant-to-cadet
 
 Migrate a vellum assistant workspace to cadet.
 
-Steps: discover → detect → preflight → stop assistant → backup → migrate → lockfile → verify
+Steps: discover → detect → preflight → stop assistant → migrate → lockfile → retired → verify → install cadet → wake assistants
 
 Usage:
   npx migrate-vellum-assistant-to-cadet [flags]
@@ -130,8 +130,9 @@ repairs roots this migrator created), stops all cadet assistants with
 verifies in place. No layout copy, no renames, no vellum-root involvement.
 
 The vellum root is a read-only source of truth: nothing in it is ever
-modified or deleted. A timestamped full backup with sha256 manifests is
-written next to the cadet root before anything is migrated.
+modified or deleted, and nothing is copied out for backup — the untouched
+original IS the backup. (Repair mode, which mutates a cadet root in place,
+does take a timestamped backup of that root first.)
 
 Exit codes:
   0  success (or already migrated + verified)
@@ -312,9 +313,6 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     lines.push(`  ${successIcon()} ${colors.green("Migration complete.")} Your assistant data now lives in:`);
     lines.push(`    ${command(report.detect.cadetRoot)}`);
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
-    if (report.backupPath) {
-      lines.push(`    ${detail(`A full backup of the vellum root is at ${report.backupPath}`)}`);
-    }
     lines.push("");
     lines.push(`  ${header("Optional next steps")}`);
     lines.push(`    · Install and launch the cadet assistant, then sign in`);
@@ -322,9 +320,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     lines.push(`      ${command(`npx migrate-vellum-assistant-to-cadet uninstall`)}`);
   } else {
     lines.push(`  ${failIcon()} ${colors.red("Migration did not complete.")} ${detail("Nothing was deleted.")}`);
-    if (report.backupPath) {
-      lines.push(`    ${detail(`Your data is safe: ${report.backupPath}`)}`);
-    }
+    lines.push(`    ${detail(`Your data is safe: the vellum root at ${report.detect.vellumRoot} was not modified — it is your record.`)}`);
     lines.push(`    ${detail(`Exit code: ${report.exitCode}`)}`);
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
   }

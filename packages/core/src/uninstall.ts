@@ -147,7 +147,7 @@ async function assertSafeTarget(p: string): Promise<void> {
  * and data dirs are namespaced by name; the home-level lockfiles are the
  * legacy pre-XDG identity files.
  */
-export async function gatherUninstallTargets(): Promise<UninstallTarget[]> {
+export async function gatherUninstallTargets(ops: ProcessOps = defaultProcessOps): Promise<UninstallTarget[]> {
   const { discoverVellumRoots } = await import("./discover.js");
   const discovered = await discoverVellumRoots();
 
@@ -207,6 +207,43 @@ export async function gatherUninstallTargets(): Promise<UninstallTarget[]> {
   for (const name of [".vellum.lock.json", ".vellum.lockfile.json"]) {
     const p = path.join(home(), name);
     targets.push({ path: p, origin: "legacy home-level lockfile", kind: "file", markerGated: false });
+  }
+
+  // The installed program itself: the npm global package (`vellum`) and the
+  // binaries it links into the PATH (vellum, gateway). Data dirs without the
+  // program left behind a machine that still can't spell vellum — v0.0.9
+  // run feedback ("The full list" was missing the binary/package). The npm
+  // global root is probed via ops (npm may be absent); the bun global layout
+  // is checked by path. Everything is exists-gated and passes the same
+  // assertSafeTarget guard as the rest of the list.
+  const GLOBAL_PACKAGE = "vellum";
+  const GLOBAL_BINS = ["vellum", "gateway"];
+  const packageDirs: Array<{ dir: string; origin: string }> = [];
+  const binParents: Array<{ dir: string; origin: string }> = [];
+  const npmRoot = await ops.npmGlobalRoot();
+  if (npmRoot) {
+    packageDirs.push({ dir: path.join(npmRoot, GLOBAL_PACKAGE), origin: "npm global package" });
+    // `npm root -g` is <prefix>/node_modules (unix); the bins it links live
+    // in <prefix>/bin. Custom layouts without that shape skip the bin probe.
+    if (path.basename(npmRoot) === "node_modules") {
+      binParents.push({
+        dir: path.join(path.dirname(path.dirname(npmRoot)), "bin"),
+        origin: "npm global package",
+      });
+    }
+  }
+  packageDirs.push({
+    dir: path.join(home(), ".bun", "install", "global", "node_modules", GLOBAL_PACKAGE),
+    origin: "bun global package",
+  });
+  binParents.push({ dir: path.join(home(), ".bun", "bin"), origin: "bun global package" });
+  for (const { dir, origin } of packageDirs) {
+    targets.push({ path: dir, origin: `${origin} (${GLOBAL_PACKAGE})`, kind: "dir", markerGated: false });
+  }
+  for (const { dir, origin } of binParents) {
+    for (const bin of GLOBAL_BINS) {
+      targets.push({ path: path.join(dir, bin), origin: `${origin} binary`, kind: "file", markerGated: false });
+    }
   }
 
   // Dedupe by realpath — discovery and the XDG sweep can agree on a root.
@@ -277,7 +314,7 @@ export async function runUninstall(options: UninstallOptions = {}): Promise<Unin
     }
   }
 
-  const targets = await gatherUninstallTargets();
+  const targets = await gatherUninstallTargets(ops);
   for (const target of targets) {
     await assertSafeTarget(target.path);
   }

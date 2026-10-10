@@ -30,8 +30,8 @@ export interface StepResult {
   issues?: StepIssue[];
   /**
    * Display-quiet: recorded in the report and --json, but excluded from the
-   * live step stream and the human summary list (e.g. backup — the vellum
-   * root is the real backup, so the line is noise).
+   * live step stream and the human summary list — e.g. a step whose success
+   * line is pure noise in the UI while failures stay visible.
    */
   quiet?: boolean;
   data?: Record<string, unknown>;
@@ -117,6 +117,10 @@ export interface ProcessOps {
   installCadet(): Promise<void>;
   /** Wake every cadet assistant (`cadet wake --all`). */
   cadetWakeAll(): Promise<void>;
+  /** True when the `cadet` binary resolves on PATH (`cadet --version`). */
+  cadetBinAvailable(): Promise<boolean>;
+  /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */
+  npmGlobalRoot(): Promise<string | null>;
 }
 
 /**
@@ -138,6 +142,7 @@ export interface MigrationReport {
   mode: "plan" | "migrate" | "verify-only" | "repair";
   detect: DetectInfo;
   steps: StepResult[];
+  /** Repair mode only: the cadet-root backup written before in-place mutation. */
   backupPath: string | null;
   startedAt: string;
   finishedAt: string;

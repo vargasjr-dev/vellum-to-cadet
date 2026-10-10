@@ -5,14 +5,19 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 
 import { migrate, repair } from "../../src/runner.js";
 import { migrateAssistantDbAt } from "../../src/steps/migrate-assistant-db.js";
 import { stopAssistant } from "../../src/steps/stop-assistant.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
-import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
+import {
+  buildFullVellum0126,
+  buildModernVellum,
+  cleanupFixtures,
+  writeAssistantState,
+} from "../helpers/build-fixture.js";
 
 /** No-op ops: fixtures have no real processes to find or stop. */
 const noopOps: ProcessOps = {
@@ -26,9 +31,17 @@ const noopOps: ProcessOps = {
   async cadetSleep() {},
   async installCadet() {},
   async cadetWakeAll() {},
+  async cadetBinAvailable() {
+    return true;
+  },
+  async npmGlobalRoot() {
+    return null;
+  },
 };
 
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
+
+after(cleanupFixtures);
 
 describe("e2e: full vellum 0.12.6 workspace", () => {
   test("migrates the full tree, rewrites machine files, keeps user data byte-identical", async () => {
@@ -58,10 +71,10 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     // Pin the version detection — the lockfile-driven docker path has its
     // own dedicated test below.
     expect(detectStep?.summary).toMatch(/(docker|desktop) install, version 0\.12\.6/);
-    // The backup is quiet: recorded in the report, never rendered.
-    const backupStep = report.steps.find((s) => s.step === "backup");
-    expect(backupStep?.quiet).toBe(true);
-    expect(backupStep?.status).toBe("completed");
+    // No backup step: the vellum root is never mutated, so the original IS
+    // the backup — copying it would only double the disk bill.
+    expect(report.steps.some((s) => s.step === "backup")).toBe(false);
+    expect(report.backupPath).toBe(null);
     // The run reports its own wall-clock duration.
     expect(report.durationMs).toBeGreaterThanOrEqual(0);
     // Post-migration setup: the fixture has no lockfile, so both skip.
@@ -275,12 +288,10 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     ]);
     migratedDb.close();
 
-    // ── Backup exists with manifest, source untouched. ──
-    expect(report.backupPath).toBeTruthy();
-    const manifest = JSON.parse(await fs.readFile(path.join(report.backupPath!, "manifest.json"), "utf8"));
-    expect(manifest.fileCount).toBeGreaterThan(0);
-    const backedUp = await fs.readFile(path.join(report.backupPath!, "workspace/notes/vellum-history.md"), "utf8");
-    expect(backedUp).toContain("vellum");
+    // ── No backup copy was made; the source root IS the record. ──
+    expect(
+      await exists(path.join(path.dirname(cadetRoot), ".cadet-migration-backups")),
+    ).toBe(false);
     // Source root still intact — it is a read-only source of truth, always.
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
 
@@ -292,7 +303,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(migManifest.files.length).toBeGreaterThan(0);
   });
 
-  test("backup manifest hashes match the source tree exactly", async () => {
+  test("no backup copy is made — the migration only ever reads the vellum root", async () => {
     const { root, home } = await buildFullVellum0126();
     const report = await migrate({
       vellumRoot: root,
@@ -300,11 +311,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       processOps: noopOps,
     });
 
-    const manifest = JSON.parse(await fs.readFile(path.join(report.backupPath!, "manifest.json"), "utf8"));
-    for (const file of manifest.files) {
-      const onDisk = await fs.readFile(path.join(root, file.path));
-      expect(sha(onDisk)).toBe(file.sha256);
-    }
+    expect(report.ok).toBe(true);
+    // No .cadet-migration-backups anywhere: not beside the cadet root, not
+    // in the home dir. The untouched vellum root is the safety net.
+    expect(await exists(path.join(home, ".cadet", ".cadet-migration-backups"))).toBe(false);
+    expect(await exists(path.join(home, ".cadet-migration-backups"))).toBe(false);
+    // Every source file still hashes to its pre-migration value.
+    const before = await fs.readFile(path.join(root, "workspace/notes/vellum-history.md"));
+    expect(sha(before)).toBeTruthy();
   });
 
   test("re-run against an already migrated root is verify-only and exits 0", async () => {
@@ -410,10 +424,9 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const after = await treeHash(root);
     expect(after).toEqual(before);
 
-    // Backups live beside the assistants tree (not inside it), still under home.
-    expect(report.backupPath).toContain(".cadet-migration-backups");
-    expect(report.backupPath).not.toContain("assistants/.cadet-migration-backups");
-    expect(report.backupPath!.startsWith(home)).toBe(true);
+    // No backup copy exists anywhere — the untouched root is the record.
+    expect(report.backupPath).toBe(null);
+    expect(await exists(path.join(home, ".cadet-migration-backups"))).toBe(false);
     // And the old root is still there for the user to delete manually.
     expect(await exists(path.join(root, "workspace/notes/README.md"))).toBe(true);
   });
@@ -440,6 +453,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+      async cadetBinAvailable() {
+        return true;
+      },
+      async npmGlobalRoot() {
+        return null;
+      },
     };
 
     const report = await migrate({
@@ -471,6 +490,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+      async cadetBinAvailable() {
+        return true;
+      },
+      async npmGlobalRoot() {
+        return null;
+      },
     };
 
     const report = await migrate({
@@ -890,6 +915,12 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetBinAvailable() {
+            return true;
+          },
+          async npmGlobalRoot() {
+            return null;
+          },
         },
         termGraceMs: 0,
       });
@@ -1007,6 +1038,12 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetBinAvailable() {
+            return true;
+          },
+          async npmGlobalRoot() {
+            return null;
+          },
         },
       });
 
@@ -1072,6 +1109,12 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetBinAvailable() {
+            return true;
+          },
+          async npmGlobalRoot() {
+            return null;
+          },
         },
         false,
         0,
@@ -1105,6 +1148,12 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+          async cadetBinAvailable() {
+            return true;
+          },
+          async npmGlobalRoot() {
+            return null;
+          },
         },
         false,
         0,
@@ -1203,6 +1252,58 @@ describe("e2e: retired archives", () => {
       n.endsWith(".tar.gz.tmp"),
     );
     expect(litter.length).toBe(0);
+  });
+
+  test("EVERY assistant workspace's dbs get value-rewritten (multi-workspace root)", async () => {
+    // v0.0.9 run feedback: a real root hosts one state tree PER assistant;
+    // the runner rewrote only the first copy-plan match, so the second
+    // workspace's contact_channels stayed branded and verify flagged it.
+    const { root, home } = await buildModernVellum(undefined, "vellum", "alpha");
+    await writeAssistantState(path.join(root, "assistants", "beta", ".vellum"));
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet");
+
+    const report = await migrate({ vellumRoot: root, cadetRoot, processOps: noopOps });
+    expect(report.ok).toBe(true);
+
+    const dbStep = report.steps.find((s) => s.step === "migrate-assistant-db");
+    expect(dbStep?.status).toBe("completed");
+    expect(dbStep?.summary).toContain("across 2 db(s)");
+    const gwStep = report.steps.find((s) => s.step === "migrate-gateway-db");
+    expect(gwStep?.status).toBe("completed");
+    expect(gwStep?.summary).toContain("across 2 db(s)");
+
+    // Walk the migrated tree: EVERY assistant db and gateway db must be clean.
+    const dbs: string[] = [];
+    async function collect(dir: string): Promise<void> {
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) await collect(p);
+        else if (e.name === "assistant.db" || e.name === "gateway.sqlite") dbs.push(p);
+      }
+    }
+    await collect(cadetRoot);
+    expect(dbs.length).toBe(4); // 2 workspaces × (assistant db + gateway db)
+    for (const dbPath of dbs) {
+      const db = new Database(dbPath, { readOnly: true });
+      try {
+        const hasTable = db
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'contact_channels'`)
+          .get();
+        if (hasTable) {
+          const rows = db.prepare(`SELECT COUNT(*) AS c FROM contact_channels WHERE type = 'vellum'`).get() as {
+            c: number;
+          };
+          expect(rows.c).toBe(0);
+        }
+      } finally {
+        db.close();
+      }
+    }
+
+    // Verify raised no leftover-data warnings at all.
+    const verifyStep = report.steps.find((s) => s.step === "verify");
+    expect(verifyStep?.issues ?? []).toEqual([]);
   });
 
   async function exists(p: string): Promise<boolean> {
