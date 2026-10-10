@@ -52,7 +52,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     // the clause is omitted unless a version was actually determined.
     const detectStep = report.steps.find((s) => s.step === "detect");
     expect(detectStep?.summary).not.toContain("version unknown");
-    expect(detectStep?.summary).toContain("docker install, version 0.12.6");
+    // The install kind is environment-dependent for this desktop-shaped
+    // fixture: /.dockerenv wins over the marker check, so the same tree
+    // reports "docker" inside containers and "desktop" on a clean runner.
+    // Pin the version detection — the lockfile-driven docker path has its
+    // own dedicated test below.
+    expect(detectStep?.summary).toMatch(/(docker|desktop) install, version 0\.12\.6/);
     // The backup is quiet: recorded in the report, never rendered.
     const backupStep = report.steps.find((s) => s.step === "backup");
     expect(backupStep?.quiet).toBe(true);
