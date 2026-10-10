@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 
 import { expect } from "../helpers/expect.js";
-import { installCadetCli, wakeAssistants } from "../../src/steps/wake.js";
+import { cadetLoginStep, installCadetCli, wakeAssistants } from "../../src/steps/wake.js";
 import type { ProcessOps } from "../../src/types.js";
 
 /** Shared no-op members; tests override the ones they exercise. */
@@ -129,5 +129,49 @@ describe("wake steps: install-cadet / wake-assistants", () => {
     expect(wake.status).toBe("completed");
     expect(wake.issues?.[0]?.severity).toBe("warning");
     expect(wake.summary).toContain("`cadet wake --all` manually");
+  });
+});
+
+describe("cadet-login step", () => {
+  test("skips when nothing was detected", async () => {
+    let logins = 0;
+    const result = await cadetLoginStep(baseOps({ cadetLogin: () => { logins++; return Promise.resolve(); } }), {
+      binAvailable: true,
+      detected: false,
+    });
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("not needed");
+    expect(logins).toBe(0);
+  });
+
+  test("skips when the cadet binary is missing", async () => {
+    let logins = 0;
+    const result = await cadetLoginStep(baseOps({ cadetLogin: () => { logins++; return Promise.resolve(); } }), {
+      binAvailable: false,
+      detected: true,
+    });
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("no `cadet` binary");
+    expect(logins).toBe(0);
+  });
+
+  test("runs the login and reports completion", async () => {
+    let logins = 0;
+    const result = await cadetLoginStep(baseOps({ cadetLogin: () => { logins++; return Promise.resolve(); } }), {
+      binAvailable: true,
+      detected: true,
+    });
+    expect(result.status).toBe("completed");
+    expect(logins).toBe(1);
+  });
+
+  test("a failed login warns but never fails the migration", async () => {
+    const result = await cadetLoginStep(
+      baseOps({ cadetLogin: () => Promise.reject(new Error("no browser")) }),
+      { binAvailable: true, detected: true },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.summary).toContain("`cadet login` manually");
+    expect(result.issues?.[0]?.severity).toBe("warning");
   });
 });

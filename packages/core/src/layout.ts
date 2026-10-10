@@ -159,6 +159,17 @@ export function textSubstitutions(
     replace: (match: string) => match.replace(/[/\\]\.vellum$/, ""),
   },
   {
+    name: "instance-name-prefix",
+    // Machine files referencing an instance dir by its vellum-era name
+    // (assistants/vellum-grand-ram/…) — the migrated instance dir drops the
+    // brand prefix (same rule as dissolveInstanceState), so recorded paths
+    // must agree. A dir named exactly "vellum" never matches (no dash).
+    // A function: applySubstitutions returns string replaces verbatim, so a
+    // "$1" there would land in the file literally.
+    pattern: /\bassistants([/\\])vellum-(?=[^/\\\s"'])/g,
+    replace: (match: string) => match.replace(/^(assistants([/\\]))vellum-/, "$1"),
+  },
+  {
     name: "xdg-root-paths",
     // The modern XDG data root: .local/share/vellum[-env] → .local/share/cadet[-env].
     pattern: /\.local([/\\])share\1vellum(-[A-Za-z0-9-]+)?(?![A-Za-z0-9-])/g,

@@ -4,13 +4,17 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 
 import {
+  makeInstanceDirMapper,
+  transformAssistantEntry,
+} from "../entry-transform.js";
+import {
   isDbArtifact,
   isRewriteEligible,
   sanctionedContentTransform,
   stateRelativePath,
   walkTree,
 } from "../fs-utils.js";
-import { DEFAULT_TARGET_CTX, type MigrationTargetCtx } from "../layout.js";
+import { DEFAULT_TARGET_CTX, handleToInstanceName, type MigrationTargetCtx } from "../layout.js";
 import type { StepIssue, StepItemEvent, StepResult } from "../types.js";
 import {
   isGatewayDbStateRel,
@@ -48,6 +52,7 @@ export async function migrateRetiredArchives(
   cadetRoot: string,
   targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
   onItem?: (item: StepItemEvent) => void,
+  manifestOpts?: { vellumRoot: string; applyRenames: boolean },
 ): Promise<StepResult> {
   const step = "migrate-retired";
   const retiredDir = path.join(cadetRoot, "retired");
@@ -100,6 +105,7 @@ export async function migrateRetiredArchives(
   let failed = 0;
   let contentChanges = 0;
   let dbRows = 0;
+  const failedNames = new Set<string>();
 
   for (const target of targets) {
     onItem?.({ name: target.name, status: "started" });
@@ -118,6 +124,7 @@ export async function migrateRetiredArchives(
       });
     } catch (err) {
       failed++;
+      failedNames.add(target.name);
       onItem?.({ name: target.name, status: "warning", summary: "left as-is" });
       issues.push({
         severity: "warning",
@@ -134,7 +141,146 @@ export async function migrateRetiredArchives(
     failed > 0
       ? `retired archives: ${migrated} migrated, ${failed} left as-is`
       : `retired archives: ${migrated} migrated (${contentChanges} content change(s), ${dbRows} db row(s))`;
-  return { step, status: "completed", summary, issues, data: { migrated, failed, contentChanges, dbRows } };
+
+  // The metadata manifests + file names ride along after the tar work.
+  if (!manifestOpts) {
+    return { step, status: "completed", summary, issues, data: { migrated, failed, contentChanges, dbRows } };
+  }
+  const manifests = await migrateRetiredManifests(cadetRoot, {
+    ...manifestOpts,
+    // A failed archive stays exactly as it was — name included.
+    skipNames: failedNames,
+  });
+  issues.push(...(manifests.issues ?? []));
+  return {
+    step,
+    status: "completed",
+    summary: `${summary}; ${manifests.summary}`,
+    issues,
+    data: { migrated, failed, contentChanges, dbRows, ...manifests.data },
+  };
+}
+
+export interface RetiredManifestCounts {
+  manifestsCleaned: number;
+  filesRenamed: number;
+}
+
+/**
+ * Clean the retired-assistant metadata manifests and drop the `vellum-`
+ * brand prefix from the retired file names. Every retired assistant keeps a
+ * `<name>.json` manifest beside its `<name>.tar.gz` archive — the full
+ * assistant entry as vellum serialized it at retire time, which carries
+ * exactly the stale values the v0.0.9 run feedback flagged: data dirs
+ * pointing at vellum paths, a `species` field cadet never had, runtime urls
+ * pointing at the machine's mDNS hostname, and the `vellum-` prefix on the
+ * id and name (and on the FILE names themselves).
+ *
+ * Idempotent: already-clean manifests transform to themselves and the
+ * renamed files no longer match. Failures warn and leave the file untouched.
+ */
+export async function migrateRetiredManifests(
+  cadetRoot: string,
+  manifestOpts: {
+    vellumRoot: string;
+    applyRenames: boolean;
+    /** Archive base names whose migration failed — their names stay untouched. */
+    skipNames?: Set<string>;
+  },
+): Promise<StepResult> {
+  const step = "migrate-retired";
+  const retiredDir = path.join(cadetRoot, "retired");
+  let entries;
+  try {
+    entries = await fs.readdir(retiredDir, { withFileTypes: true });
+  } catch {
+    return { step, status: "skipped", summary: "no retired directory in the migrated root" };
+  }
+
+  const mapInstanceDir = makeInstanceDirMapper({
+    vellumRoot: manifestOpts.vellumRoot,
+    cadetRoot,
+    applyRenames: manifestOpts.applyRenames,
+  });
+  const issues: StepIssue[] = [];
+  const counts: RetiredManifestCounts = { manifestsCleaned: 0, filesRenamed: 0 };
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const isManifest = entry.name.endsWith(".json");
+    const isArchive = entry.name.endsWith(".tar.gz");
+    if (!isManifest && !isArchive) continue;
+    const extension = isManifest ? ".json" : ".tar.gz";
+    const rawName = entry.name.slice(0, -extension.length);
+    if (isArchive && manifestOpts.skipNames?.has(rawName)) continue;
+    const strippedName = handleToInstanceName(rawName);
+    const absPath = path.join(retiredDir, entry.name);
+
+    if (isManifest) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await fs.readFile(absPath, "utf8"));
+      } catch (err) {
+        issues.push({
+          severity: "warning",
+          message: `retired manifest '${entry.name}': not readable JSON (${(err as Error).message}) — left as-is`,
+        });
+        continue;
+      }
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed) ||
+        typeof (parsed as Record<string, unknown>).assistantId !== "string"
+      ) {
+        continue; // Not an assistant manifest — leave it alone.
+      }
+      const result = transformAssistantEntry(parsed as Record<string, unknown>, {
+        mapInstanceDir,
+        defaultInstanceDirFor: (id) => path.join(cadetRoot, "assistants", id),
+      });
+      if (result.changed) {
+        try {
+          await fs.writeFile(absPath, JSON.stringify(result.entry, null, 2) + "\n", "utf8");
+          counts.manifestsCleaned++;
+        } catch (err) {
+          issues.push({
+            severity: "warning",
+            message: `retired manifest '${entry.name}': could not rewrite (${(err as Error).message}) — left as-is`,
+          });
+          continue;
+        }
+      }
+    }
+
+    // Both files drop the vellum- prefix from their names — the manifest
+    // lookup is by assistant id, which no longer carries it either.
+    if (strippedName !== rawName) {
+      const destName = `${strippedName}${extension}`;
+      if (await fileExists(path.join(retiredDir, destName))) {
+        issues.push({
+          severity: "warning",
+          message: `retired '${entry.name}': ${destName} already exists — kept the original name`,
+        });
+        continue;
+      }
+      try {
+        await fs.rename(absPath, path.join(retiredDir, destName));
+        counts.filesRenamed++;
+      } catch (err) {
+        issues.push({
+          severity: "warning",
+          message: `retired '${entry.name}': could not rename to ${destName} (${(err as Error).message}) — left as-is`,
+        });
+      }
+    }
+  }
+
+  const summary =
+    counts.manifestsCleaned + counts.filesRenamed > 0
+      ? `retired manifests: ${counts.manifestsCleaned} cleaned, ${counts.filesRenamed} renamed`
+      : "retired manifests: nothing stale found";
+  return { step, status: "completed", summary, issues, data: { ...counts } };
 }
 
 /** Explain a truncated gzip stream: the archive was never fully written. */

@@ -81,6 +81,21 @@ export async function migrateLayout(
     // render as nested bullets (only the ones that actually changed
     // something — "0 change(s)" lines are noise).
     const takeaways: StepIssue[] = [];
+
+    // Instance-dir renames (vellum-<x> → <x>) can theoretically collide when
+    // two source assistants collapse onto one name — never let that eat data
+    // silently.
+    const seenDests = new Set<string>();
+    for (const p of plan) {
+      if (seenDests.has(p.dest)) {
+        takeaways.push({
+          severity: "warning",
+          message: `multiple source paths map to ${p.dest} (last copy wins) — review the migrated root`,
+        });
+      }
+      seenDests.add(p.dest);
+    }
+
     if (rewrites.length + renamed.length + dbs.length > 0) {
       takeaways.push({
         severity: "info",

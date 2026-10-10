@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 import { CADET_PROCESS_PATTERNS, MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
@@ -59,6 +59,21 @@ export const defaultProcessOps: ProcessOps = {
 
   async cadetWakeAll() {
     await execFileAsync("cadet", ["wake", "--all"]);
+  },
+
+  async cadetLogin() {
+    // Interactive by design: the browser PKCE flow. stdio inherit so the
+    // user sees the browser handoff and any prompts — resolves when the
+    // flow finishes; a nonzero exit rejects.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("cadet", ["login"], { stdio: "inherit" });
+      child.on("error", reject);
+      child.on("close", (code) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`cadet login exited ${code ?? "without a code"}`)),
+      );
+    });
   },
 
   async cadetBinAvailable() {

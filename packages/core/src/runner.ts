@@ -15,10 +15,11 @@ import {
   migrateGatewayDb,
   migrateGatewayDbAt,
 } from "./steps/migrate-assistant-db.js";
-import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
-import { migrateRetiredArchives } from "./steps/migrate-retired.js";
+import { migrateLockfile } from "./steps/migrate-lockfile.js";
+import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
+import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
 import { readLockfileAssistants } from "./steps/detect.js";
-import { installCadetCli, wakeAssistants } from "./steps/wake.js";
+import { cadetLoginStep, installCadetCli, wakeAssistants } from "./steps/wake.js";
 import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
@@ -126,10 +127,45 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     detect.cadetRoot = target.cadetRoot;
   }
 
-  // Already-migrated path: verify-only.
+  // Already-migrated path: the idempotent fix steps first — a re-run after a
+  // migrator upgrade heals an install an older version left incomplete (no
+  // cadet lockfile written, stale retired manifests, legacy credentials
+  // kept) — then verify. The layout itself is never touched here.
   if (target.kind === "already-migrated") {
+    start("migrate-credentials");
+    const reCredentials = await migrateCredentialsStep(detect.cadetRoot);
+    done(reCredentials);
+    start("migrate-lockfile");
+    const reLockfile = await migrateLockfile({
+      vellumRoot: detect.vellumRoot,
+      cadetRoot: detect.cadetRoot,
+      envSuffix: envSuffixFor(detect.vellumRoot),
+      applyRenames: false,
+    });
+    done(reLockfile);
+    start("migrate-retired");
+    done(
+      await migrateRetiredManifests(detect.cadetRoot, {
+        vellumRoot: detect.vellumRoot,
+        applyRenames: false,
+      }),
+    );
+
     start("verify");
     done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
+
+    const reDetected =
+      reCredentials.data?.["detected"] === true ||
+      reLockfile.data?.["legacyPlatformCredentials"] === true;
+    if (reDetected) {
+      start("cadet-login");
+      done(
+        await cadetLoginStep(ops, {
+          binAvailable: await ops.cadetBinAvailable(),
+          detected: true,
+        }),
+      );
+    }
     return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
   }
 
@@ -194,16 +230,39 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("migrate-gateway-db");
   done(await migrateGatewayDb(detect, gatewayDbDests));
 
-  // 4. Move a legacy home-level cadet lockfile into the config dir so the
-  // migrated install keeps its identity (cadet no longer reads the old name).
+  // 3.7 Remove the legacy vellum platform credentials from the migrated
+  //     tree — the cloud api key and webhook secret can't be kept; `cadet
+  //     login` (below, before wake) establishes fresh ones.
+  start("migrate-credentials");
+  const credentials = await migrateCredentialsStep(detect.cadetRoot);
+  done(credentials);
+
+  // 4. Convert the vellum lockfile into the cadet canonical config-dir
+  //    lockfile (transformed entries, the path the cadet CLI reads), and
+  //    move a legacy home-level cadet lockfile aside for identity
+  //    continuity.
   start("migrate-lockfile");
-  done(await migrateHomeLockfile(envSuffixFor(detect.vellumRoot)));
+  const lockfile = await migrateLockfile({
+    vellumRoot: detect.vellumRoot,
+    cadetRoot: detect.cadetRoot,
+    envSuffix: envSuffixFor(detect.vellumRoot),
+    applyRenames: true,
+  });
+  done(lockfile);
 
   // 4.5 Retired-assistant archives ride along verbatim — untar each one,
   // run the same assistant-logic migration over the extracted tree, re-tar.
   // Success is optional by design: failures warn and never fail the run.
+  // The sibling metadata manifests + file names get the same cleaning.
   start("migrate-retired");
-  done(await migrateRetiredArchives(detect.cadetRoot, targetCtx, onItem("migrate-retired")));
+  done(
+    await migrateRetiredArchives(
+      detect.cadetRoot,
+      targetCtx,
+      onItem("migrate-retired"),
+      { vellumRoot: detect.vellumRoot, applyRenames: true },
+    ),
+  );
 
   // 5. Verify against the vellum source. Findings are WARNINGS, not
   //    failures: the migration itself is complete, and residual branding in
@@ -212,11 +271,22 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
 
   // 6. When the migrated lockfile tracked assistants, put the cadet CLI on
-  //    the machine and wake everything it knows about.
+  //    the machine, log in to cadet cloud when the migration detected (and
+  //    removed) legacy vellum platform credentials, and wake everything it
+  //    knows about.
   const assistantCount = (await readLockfileAssistants()).length;
   start("install-cadet");
   const install = await installCadetCli(ops, assistantCount);
   done(install);
+  start("cadet-login");
+  done(
+    await cadetLoginStep(ops, {
+      binAvailable: install.data?.["binAvailable"] === true,
+      detected:
+        credentials.data?.["detected"] === true ||
+        lockfile.data?.["legacyPlatformCredentials"] === true,
+    }),
+  );
   start("wake-assistants");
   done(await wakeAssistants(ops, assistantCount, install.data?.["binAvailable"] === true));
 

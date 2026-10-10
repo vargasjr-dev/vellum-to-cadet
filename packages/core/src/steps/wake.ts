@@ -96,3 +96,51 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, bi
     };
   }
 }
+
+/**
+ * The cadet-login step: when the migration detected legacy vellum cloud
+ * credentials (the api key / webhook secret can't be kept), the migrated
+ * assistants need fresh cadet cloud credentials — `cadet login` runs the
+ * browser PKCE flow and re-registers them. Interactive by design, so it
+ * runs BEFORE wake with the terminal handed to the user; a failure (user
+ * skips it, no browser, no network) warns and the migration still completes.
+ */
+export async function cadetLoginStep(
+  ops: ProcessOps,
+  opts: { binAvailable: boolean; detected: boolean },
+): Promise<StepResult> {
+  if (!opts.detected) {
+    return {
+      step: "cadet-login",
+      status: "skipped",
+      summary: "no legacy vellum platform credentials detected — login not needed",
+    };
+  }
+  if (!opts.binAvailable) {
+    return {
+      step: "cadet-login",
+      status: "skipped",
+      summary: "skipped — no `cadet` binary on PATH (see install-cadet ⚠)",
+    };
+  }
+  try {
+    await ops.cadetLogin();
+    return {
+      step: "cadet-login",
+      status: "completed",
+      summary: "cadet login complete — fresh cloud credentials established",
+    };
+  } catch (err) {
+    return {
+      step: "cadet-login",
+      status: "completed",
+      summary: "cadet login did not complete (see ⚠) — run `cadet login` manually before using cloud features",
+      issues: [
+        {
+          severity: "warning",
+          message: `cadet login failed: ${(err as Error).message.split("\n")[0]}`,
+        },
+      ],
+    };
+  }
+}
