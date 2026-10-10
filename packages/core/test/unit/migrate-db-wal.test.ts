@@ -86,7 +86,7 @@ describe("migrate-assistant-db: write-ahead replay", () => {
 
     // The source connection stays OPEN (no checkpoint on close yet).
     const destRel = "workspace/data/db/assistant.db";
-    const result = await migrateAssistantDb(detectFor(tmp), destRel);
+    const result = await migrateAssistantDb(detectFor(tmp), [destRel]);
     source.close();
 
     expect(result.status).toBe("completed");
@@ -136,7 +136,7 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     // Garbage sidecar (not a valid WAL) — e.g. truncated or foreign bytes.
     await fs.writeFile(`${dbPath}-wal`, "not-a-real-wal-file");
 
-    const result = await migrateAssistantDb(detectFor(tmp), "workspace/data/db/assistant.db");
+    const result = await migrateAssistantDb(detectFor(tmp), ["workspace/data/db/assistant.db"]);
     expect(result.status).toBe("completed");
 
     const after = new Database(dbPath, { readOnly: true })

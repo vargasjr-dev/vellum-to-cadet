@@ -106,13 +106,23 @@ export function isGatewayDbStateRel(stateRel: string): boolean {
 
 export async function migrateAssistantDb(
   detect: DetectInfo,
-  /** Destination-relative path of the assistant db, derived from the copy plan. */
-  destRel: string | undefined,
+  /**
+   * Destination-relative paths of EVERY assistant db in the copy plan — the
+   * root can host multiple assistant workspaces, each with its own db, and
+   * every one of them needs the value rewrite.
+   */
+  destRels: ReadonlyArray<string>,
 ): Promise<StepResult> {
-  return migrateAssistantDbAt(detect.cadetRoot, destRel);
+  return migrateDbsAt(detect.cadetRoot, destRels, {
+    step: "migrate-assistant-db",
+    label: "assistant db",
+    columns: CHANNEL_COLUMNS,
+    rewriteMessages: true,
+    rewriteConnections: true,
+  });
 }
 
-/** Repair-mode entry: same step, aimed at an already-migrated cadet root. */
+/** Repair-mode entry: same step, aimed at one db in an already-migrated cadet root. */
 export async function migrateAssistantDbAt(
   cadetRoot: string,
   destRel: string | undefined,
@@ -124,9 +134,7 @@ export async function migrateAssistantDbAt(
       summary: "no assistant db in the migrated workspace",
     };
   }
-  return migrateDbValues({
-    cadetRoot,
-    destRel,
+  return migrateDbsAt(cadetRoot, [destRel], {
     step: "migrate-assistant-db",
     label: "assistant db",
     columns: CHANNEL_COLUMNS,
@@ -137,13 +145,20 @@ export async function migrateAssistantDbAt(
 
 export async function migrateGatewayDb(
   detect: DetectInfo,
-  /** Destination-relative path of the gateway db, derived from the copy plan. */
-  destRel: string | undefined,
+  /**
+   * Destination-relative paths of EVERY gateway db in the copy plan — one per
+   * assistant workspace, same multi-workspace rule as the assistant db.
+   */
+  destRels: ReadonlyArray<string>,
 ): Promise<StepResult> {
-  return migrateGatewayDbAt(detect.cadetRoot, destRel);
+  return migrateDbsAt(detect.cadetRoot, destRels, {
+    step: "migrate-gateway-db",
+    label: "gateway db",
+    columns: GATEWAY_CHANNEL_COLUMNS,
+  });
 }
 
-/** Repair-mode entry: same step, aimed at an already-migrated cadet root. */
+/** Repair-mode entry: same step, aimed at one db in an already-migrated cadet root. */
 export async function migrateGatewayDbAt(
   cadetRoot: string,
   destRel: string | undefined,
@@ -155,13 +170,77 @@ export async function migrateGatewayDbAt(
       summary: "no gateway db in the migrated workspace",
     };
   }
-  return migrateDbValues({
-    cadetRoot,
-    destRel,
+  return migrateDbsAt(cadetRoot, [destRel], {
     step: "migrate-gateway-db",
     label: "gateway db",
     columns: GATEWAY_CHANNEL_COLUMNS,
   });
+}
+
+/**
+ * Run the value rewrite against every db the copy plan produced and fold the
+ * per-db results into one step result. The vellum root hosts one state tree
+ * PER assistant (`assistants/<name>/.vellum/…` all normalize to the same
+ * state-relative form), so a real machine carries several copies of each db —
+ * rewriting only the first left every later workspace's contact_channels
+ * branded (v0.0.9 run feedback).
+ */
+async function migrateDbsAt(
+  cadetRoot: string,
+  destRels: ReadonlyArray<string>,
+  options: Omit<DbValuesOptions, "cadetRoot" | "destRel">,
+): Promise<StepResult> {
+  if (destRels.length === 0) {
+    return {
+      step: options.step,
+      status: "skipped",
+      summary: `no ${options.label} in the migrated workspace`,
+    };
+  }
+  const results: StepResult[] = [];
+  for (const destRel of destRels) {
+    results.push(await migrateDbValues({ ...options, cadetRoot, destRel }));
+  }
+  if (results.length === 1) return results[0]!;
+
+  // Multi-db fold: per-db info bullets carry their path so N workspaces read
+  // as N lines, and the headline reports the combined row count.
+  const issues: StepIssue[] = [];
+  let totalRows = 0;
+  let completed = 0;
+  for (const [i, r] of results.entries()) {
+    const destRel = destRels[i]!;
+    if (r.status === "completed") completed++;
+    for (const issue of r.issues ?? []) {
+      issues.push(
+        issue.severity === "info"
+          ? { ...issue, message: `${destRel} — ${issue.message}` }
+          : { ...issue, message: `${destRel}: ${issue.message}` },
+      );
+    }
+    const rows = Object.values(
+      (r.data?.["substeps"] as Record<string, number> | undefined) ?? {},
+    ).reduce((a, b) => a + b, 0);
+    totalRows += rows;
+  }
+  const allSkipped = completed === 0;
+  const warningNote = issues.some((i) => i.severity === "warning")
+    ? ` — ${issues.filter((i) => i.severity === "warning").length} skipped (see ⚠)`
+    : "";
+  return {
+    step: options.step,
+    status: allSkipped ? "skipped" : "completed",
+    summary: allSkipped
+      ? results[0]!.summary
+      : `${options.label}s — ${totalRows} row(s) across ${destRels.length} db(s)${warningNote}`,
+    issues,
+    data: {
+      dbs: destRels.map((destRel, i) => ({
+        dbPath: destRel,
+        substeps: results[i]!.data?.["substeps"] ?? {},
+      })),
+    },
+  };
 }
 
 type DbValuesOptions = {

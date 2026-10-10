@@ -21,6 +21,7 @@ export interface BuiltFixture {
 /** The full 0.12.6-shaped tree: every directory the assistant ever wrote. */
 export async function buildFullVellum0126(home?: string): Promise<BuiltFixture> {
   const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "vellum-migrate-")));
+  if (!home) tempHomes.push(tempHome);
   const root = path.join(tempHome, ".vellum");
   await writeAssistantState(root);
   return { root, home: tempHome };
@@ -40,14 +41,30 @@ export async function buildModernVellum(
   // Neutral prefix — the temp home shows up verbatim inside machine files
   // that embed absolute state paths.
   const tempHome = home ?? (await fs.mkdtemp(path.join(os.tmpdir(), "cadet-migrate-")));
+  if (!home) tempHomes.push(tempHome);
   const root = path.join(tempHome, ".local", "share", dirName);
   const state = path.join(root, "assistants", assistantName, ".vellum");
   await writeAssistantState(state);
   return { root, home: tempHome };
 }
 
+/**
+ * Every temp home this module created, for `cleanupFixtures()`. The e2e
+ * trees are MBs each — without an after-hook they accumulate across local
+ * runs until the disk files a complaint.
+ */
+const tempHomes: string[] = [];
+
+/** Remove every fixture temp home created so far. Safe to call twice. */
+export async function cleanupFixtures(): Promise<void> {
+  const homes = tempHomes.splice(0, tempHomes.length);
+  for (const home of homes) {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+}
+
 /** Writes the full 0.12.6 assistant state tree into `root`. */
-async function writeAssistantState(root: string): Promise<void> {
+export async function writeAssistantState(root: string): Promise<void> {
   // User-facing workspace (a git repo — the assistant commits to it).
   await mkdirs(root, [
     "workspace",

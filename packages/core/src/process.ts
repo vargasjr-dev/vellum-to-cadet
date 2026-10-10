@@ -50,11 +50,36 @@ export const defaultProcessOps: ProcessOps = {
   },
 
   async installCadet() {
-    await execFileAsync("npm", ["install", "-g", "cadet"]);
+    // The cadet CLI's npm package is `mycadet` (scoped siblings aside, that
+    // is the name on npm — `cadet` is an unrelated third-party package, and
+    // installing IT is how v0.0.9 "installed" something that shipped no
+    // cadet binary).
+    await execFileAsync("npm", ["install", "-g", "mycadet"]);
   },
 
   async cadetWakeAll() {
     await execFileAsync("cadet", ["wake", "--all"]);
+  },
+
+  async cadetBinAvailable() {
+    try {
+      await execFileAsync("cadet", ["--version"]);
+    } catch (err) {
+      // ENOENT is the only signal that the binary is absent; any other
+      // failure (bad flags, nonzero exit) still proves it resolves.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    }
+    return true;
+  },
+
+  async npmGlobalRoot() {
+    try {
+      const { stdout } = await execFileAsync("npm", ["root", "-g"]);
+      const root = stdout.trim();
+      return root.length > 0 ? root : null;
+    } catch {
+      return null;
+    }
   },
 };
 

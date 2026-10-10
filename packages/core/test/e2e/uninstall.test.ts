@@ -1,12 +1,12 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 
 import { runUninstall, type UninstallReport } from "../../src/uninstall.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
-import { buildFullVellum0126, buildModernVellum } from "../helpers/build-fixture.js";
+import { buildFullVellum0126, buildModernVellum, cleanupFixtures } from "../helpers/build-fixture.js";
 
 /** No-op ops: fixtures have no real processes to find or stop. */
 const noopOps: ProcessOps = {
@@ -20,6 +20,12 @@ const noopOps: ProcessOps = {
   async cadetSleep() {},
   async installCadet() {},
   async cadetWakeAll() {},
+  async cadetBinAvailable() {
+    return true;
+  },
+  async npmGlobalRoot() {
+    return null;
+  },
 };
 
 /**
@@ -84,6 +90,8 @@ async function buildCadetSide(home: string): Promise<{ cadetRoot: string; backup
   await fs.writeFile(path.join(backups, "20260101T000000", "manifest.json"), "{}\n");
   return { cadetRoot, backups };
 }
+
+after(cleanupFixtures);
 
 describe("uninstall", () => {
   test("deletes every vellum location and keeps the cadet side intact", async () => {
@@ -162,12 +170,68 @@ describe("uninstall", () => {
         async cadetSleep() {},
         async installCadet() {},
         async cadetWakeAll() {},
+        async cadetBinAvailable() {
+          return true;
+        },
+        async npmGlobalRoot() {
+          return null;
+        },
       };
       const report = await runUninstall({ yes: true, processOps: ops });
       expect(report.ok).toBe(true);
       expect(report.slept).toBe(true);
       expect(sleeps).toBe(1);
       expect(await exists(s.root)).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  test("the list includes the vellum npm/bun package itself and its binaries", async () => {
+    // v0.0.9 run feedback: "The full list" stopped at data/config dirs —
+    // the installed program (the global `vellum` package and the vellum +
+    // gateway binaries it links) survived an uninstall that claimed to be
+    // complete. Both global layouts are enumerated; existing paths only.
+    const s = await buildLegacyScenario();
+    const restore = pinHome(s.home);
+    try {
+      // Fake npm global tree INSIDE the fixture home (never the home itself).
+      const npmRoot = path.join(s.home, ".nvm", "versions", "node", "v22", "lib", "node_modules");
+      await fs.mkdir(path.join(npmRoot, "vellum"), { recursive: true });
+      await fs.writeFile(path.join(npmRoot, "vellum", "package.json"), "{}");
+      const binDir = path.join(s.home, ".nvm", "versions", "node", "v22", "bin");
+      await fs.mkdir(binDir, { recursive: true });
+      await fs.writeFile(path.join(binDir, "vellum"), "#!/usr/bin/env node");
+      await fs.writeFile(path.join(binDir, "gateway"), "#!/usr/bin/env node");
+      // A bun global install too — package + one of its two bins.
+      const bunPkg = path.join(s.home, ".bun", "install", "global", "node_modules", "vellum");
+      await fs.mkdir(bunPkg, { recursive: true });
+      await fs.mkdir(path.join(s.home, ".bun", "bin"), { recursive: true });
+      await fs.writeFile(path.join(s.home, ".bun", "bin", "vellum"), "#!/usr/bin/env bun");
+
+      const report = await runUninstall({
+        yes: true,
+        processOps: {
+          ...noopOps,
+          async npmGlobalRoot() {
+            return npmRoot;
+          },
+        },
+      });
+
+      expect(report.ok).toBe(true);
+      const paths = report.targets.map((t) => t.path);
+      expect(paths).toContain(path.join(npmRoot, "vellum"));
+      expect(paths).toContain(path.join(binDir, "vellum"));
+      expect(paths).toContain(path.join(binDir, "gateway"));
+      expect(paths).toContain(bunPkg);
+      expect(paths).toContain(path.join(s.home, ".bun", "bin", "vellum"));
+      // And they were actually deleted, not just listed.
+      for (const p of [path.join(npmRoot, "vellum"), path.join(binDir, "vellum"), bunPkg]) {
+        expect(await exists(p)).toBe(false);
+      }
+      const pkg = report.targets.find((t) => t.path === path.join(npmRoot, "vellum"));
+      expect(pkg?.origin).toContain("npm global package");
     } finally {
       restore();
     }
@@ -191,6 +255,12 @@ describe("uninstall", () => {
         async cadetSleep() {},
         async installCadet() {},
         async cadetWakeAll() {},
+        async cadetBinAvailable() {
+          return true;
+        },
+        async npmGlobalRoot() {
+          return null;
+        },
       };
       const report = await runUninstall({ dryRun: true, yes: true, processOps: ops });
       expect(report.ok).toBe(true);

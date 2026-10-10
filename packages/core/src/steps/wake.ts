@@ -18,11 +18,31 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
   }
   try {
     await ops.installCadet();
+    // The install command exiting 0 is not the claim — the binary being
+    // resolvable is. v0.0.9 "installed" an unrelated npm package that
+    // happened to own the `cadet` name and reported success while
+    // `cadet wake --all` died on ENOENT.
+    const binAvailable = await ops.cadetBinAvailable();
+    if (!binAvailable) {
+      return {
+        step: "install-cadet",
+        status: "completed",
+        summary: "mycadet installed — no `cadet` binary on PATH yet, wake skipped (see ⚠)",
+        issues: [
+          {
+            severity: "warning",
+            message:
+              "the mycadet package is installed (`npm ls -g mycadet` shows it) but it ships no `cadet` bin yet — wake the assistants manually once the cadet CLI ships a binary",
+          },
+        ],
+        data: { installed: true, binAvailable: false },
+      };
+    }
     return {
       step: "install-cadet",
       status: "completed",
       summary: "cadet CLI installed globally",
-      data: { installed: true },
+      data: { installed: true, binAvailable: true },
     };
   } catch (err) {
     return {
@@ -32,7 +52,7 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
       issues: [
         {
           severity: "warning",
-          message: `npm install -g cadet failed: ${(err as Error).message.split("\n")[0]}`,
+          message: `npm install -g mycadet failed: ${(err as Error).message.split("\n")[0]}`,
         },
       ],
       data: { installed: false },
@@ -40,7 +60,7 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
   }
 }
 
-export async function wakeAssistants(ops: ProcessOps, assistantCount: number, installOk: boolean): Promise<StepResult> {
+export async function wakeAssistants(ops: ProcessOps, assistantCount: number, binAvailable: boolean): Promise<StepResult> {
   if (assistantCount === 0) {
     return {
       step: "wake-assistants",
@@ -48,11 +68,11 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, in
       summary: "no lockfile-tracked assistant(s) to wake",
     };
   }
-  if (!installOk) {
+  if (!binAvailable) {
     return {
       step: "wake-assistants",
       status: "skipped",
-      summary: "skipped — the cadet CLI is not installed (see install-cadet ⚠)",
+      summary: "skipped — no `cadet` binary on PATH (see install-cadet ⚠)",
     };
   }
   try {
