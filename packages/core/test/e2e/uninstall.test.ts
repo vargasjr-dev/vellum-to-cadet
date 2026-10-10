@@ -18,6 +18,8 @@ const noopOps: ProcessOps = {
   },
   async vellumSleep() {},
   async cadetSleep() {},
+  async installCadet() {},
+  async cadetWakeAll() {},
 };
 
 /**
@@ -158,6 +160,8 @@ describe("uninstall", () => {
           sleeps++;
         },
         async cadetSleep() {},
+        async installCadet() {},
+        async cadetWakeAll() {},
       };
       const report = await runUninstall({ yes: true, processOps: ops });
       expect(report.ok).toBe(true);
@@ -185,6 +189,8 @@ describe("uninstall", () => {
           sleeps++;
         },
         async cadetSleep() {},
+        async installCadet() {},
+        async cadetWakeAll() {},
       };
       const report = await runUninstall({ dryRun: true, yes: true, processOps: ops });
       expect(report.ok).toBe(true);

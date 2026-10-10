@@ -84,18 +84,18 @@ export async function verify(
         // value-migration step leaves non-sqlite files verbatim).
         if (!(await bytesMatch(entry.absPath, path.join(cadetRoot, renameRelativePath(entry.relPath))))) {
           issues.push({
-            severity: "error",
+            severity: "warning",
             path: entry.relPath,
             message: "db differs from backup source and could not be checked semantically",
           });
         } else {
           byteIdentical++;
         }
-      } else if (leftover > 0) {
+      } else if (leftover.total > 0) {
         issues.push({
-          severity: "error",
+          severity: "warning",
           path: entry.relPath,
-          message: `${leftover} vellum-branded row(s)/link(s) remain in ${migratedDb.stateRel}`,
+          message: `vellum-branded data remains — ${leftover.details.join("; ")}`,
         });
       } else {
         dbsChecked++;
@@ -108,7 +108,7 @@ export async function verify(
     const destAbs = path.join(cadetRoot, destRel);
 
     if (!(await exists(destAbs))) {
-      issues.push({ severity: "error", path: entry.relPath, message: "missing in cadet root" });
+      issues.push({ severity: "warning", path: entry.relPath, message: "missing in cadet root" });
       continue;
     }
     checked++;
@@ -151,7 +151,7 @@ export async function verify(
           rewrittenClean++;
         } else {
           issues.push({
-            severity: "error",
+            severity: "warning",
             path: entry.relPath,
             message: `${sanctioned.substep}: destination differs from the sanctioned rewrite`,
           });
@@ -162,7 +162,7 @@ export async function verify(
       const leftovers = text.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
       if (leftovers && leftovers.length > 0) {
         issues.push({
-          severity: "error",
+          severity: "warning",
           path: destRel,
           message: `${leftovers.length} leftover vellum token(s) after rewrite`,
         });
@@ -171,23 +171,25 @@ export async function verify(
       }
     } else {
       issues.push({
-        severity: "error",
+        severity: "warning",
         path: entry.relPath,
         message: "verbatim file differs from backup source",
       });
     }
   }
 
-  const errors = issues.filter((i) => i.severity === "error");
+  // Findings never fail the migration (the runner no longer aborts on
+  // verify): they surface as warnings under the completed step line.
+  const problems = issues.filter((i) => i.severity === "warning");
   return {
     step: "verify",
-    status: errors.length > 0 ? "failed" : "completed",
+    status: "completed",
     summary:
-      errors.length > 0
-        ? `verify failed: ${errors.length} problem(s) across ${checked} files`
+      problems.length > 0
+        ? `verified ${checked} files with ${problems.length} warning(s) (see ⚠)`
         : `verified ${checked} files (${byteIdentical} byte-identical, ${rewrittenClean} rewritten clean, ${dbsChecked} db value-checked)`,
     issues,
-    data: { checked, byteIdentical, rewrittenClean, dbsChecked },
+    data: { checked, byteIdentical, rewrittenClean, dbsChecked, warnings: problems.length },
   };
 }
 
@@ -202,7 +204,7 @@ export async function verify(
 export async function dbVellumRows(
   dbPath: string,
   spec: { columns: ReadonlyArray<{ table: string; column: string }>; messages?: boolean; connections?: boolean },
-): Promise<number | "unreadable"> {
+): Promise<{ total: number; details: string[] } | "unreadable"> {
   let db: SqliteDatabase;
   try {
     db = openSqliteDatabase(dbPath, { readonly: true });
@@ -211,6 +213,13 @@ export async function dbVellumRows(
   }
   try {
     let total = 0;
+    const details: string[] = [];
+    const bump = (label: string, c: number): void => {
+      if (c > 0) {
+        total += c;
+        details.push(`${label} (${c} row(s))`);
+      }
+    };
     const tableExists = (name: string): boolean =>
       !!db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
     const columnExists = (table: string, column: string): boolean =>
@@ -224,20 +233,20 @@ export async function dbVellumRows(
       const row = db
         .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} = 'vellum'`)
         .get() as { c: number } | null;
-      total += row?.c ?? 0;
+      bump(`${table}.${column} = 'vellum'`, row?.c ?? 0);
     }
     if (spec.messages && tableExists("messages")) {
       if (columnExists("messages", "content")) {
         const links = db
           .prepare(`SELECT COUNT(*) AS c FROM messages WHERE content LIKE '%vellum://%'`)
           .get() as { c: number } | null;
-        total += links?.c ?? 0;
+        bump("messages.content contains a vellum:// link", links?.c ?? 0);
       }
       if (columnExists("messages", "metadata")) {
         const meta = db
           .prepare(`SELECT COUNT(*) AS c FROM messages WHERE metadata LIKE '%"vellum"%'`)
           .get() as { c: number } | null;
-        total += meta?.c ?? 0;
+        bump("messages.metadata references 'vellum'", meta?.c ?? 0);
       }
     }
     if (spec.connections && tableExists("provider_connections")) {
@@ -246,9 +255,9 @@ export async function dbVellumRows(
           `SELECT COUNT(*) AS c FROM provider_connections WHERE name = 'vellum' OR provider = 'vellum'`,
         )
         .get() as { c: number } | null;
-      total += conns?.c ?? 0;
+      bump("provider_connections name/provider = 'vellum'", conns?.c ?? 0);
     }
-    return total;
+    return { total, details };
   } catch {
     return "unreadable";
   } finally {

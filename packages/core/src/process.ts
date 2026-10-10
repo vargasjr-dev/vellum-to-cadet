@@ -48,6 +48,14 @@ export const defaultProcessOps: ProcessOps = {
     // every assistant under the root, not just one.
     await execFileAsync("cadet", ["sleep", "--all"]);
   },
+
+  async installCadet() {
+    await execFileAsync("npm", ["install", "-g", "cadet"]);
+  },
+
+  async cadetWakeAll() {
+    await execFileAsync("cadet", ["wake", "--all"]);
+  },
 };
 
 async function defaultFind(patterns: string[]) {

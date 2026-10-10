@@ -80,6 +80,9 @@ export async function backup(vellumRoot: string, cadetRoot: string, timestamp: s
     return {
       step: "backup",
       status: "completed",
+      // Quiet: the vellum root is never written, so it IS the backup — the
+      // success line is noise in the UI (failures stay visible).
+      quiet: true,
       summary: `backed up ${fileCount} files (${(byteCount / 1_000_000).toFixed(1)}MB) → ${backupRoot}`,
       data: { backupRoot, fileCount, byteCount },
     };

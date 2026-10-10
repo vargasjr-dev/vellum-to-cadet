@@ -302,14 +302,15 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     const parts = Object.entries(substeps)
       .filter(([, n]) => n > 0)
       .map(([name, n]) => `${name}: ${n} row(s)`);
+    const totalRows = Object.values(substeps).reduce((a, b) => a + b, 0);
     const warningNote = issues.length > 0 ? ` — ${issues.length} skipped (see ⚠)` : "";
     return {
       step,
       status: "completed",
-      summary: parts.length > 0
-        ? `${label} — ${parts.join(", ")}${warningNote}`
-        : `${label} — nothing to rewrite${warningNote}`,
-      issues,
+      // The headline carries just the total; each table's count renders as
+      // a nested bullet below the step line.
+      summary: totalRows > 0 ? `${label} — ${totalRows} row(s)${warningNote}` : `${label} — nothing to rewrite${warningNote}`,
+      issues: [...parts.map((p): StepIssue => ({ severity: "info", message: p })), ...issues],
       data: { substeps, dbPath: destRel },
     };
   } catch (err) {

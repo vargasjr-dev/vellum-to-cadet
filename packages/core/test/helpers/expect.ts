@@ -63,6 +63,17 @@ class Match<T> {
     }
   }
 
+  toBeGreaterThanOrEqual(expected: number): void {
+    if (this.negated) {
+      assert.ok(
+        !((this.actual as number) >= expected),
+        `expected ${this.actual} NOT to be >= ${expected}`,
+      );
+    } else {
+      assert.ok((this.actual as number) >= expected, `expected ${this.actual} to be >= ${expected}`);
+    }
+  }
+
   toHaveLength(expected: number): void {
     const len = (this.actual as { length?: number })?.length;
     if (this.negated) assert.notStrictEqual(len, expected);

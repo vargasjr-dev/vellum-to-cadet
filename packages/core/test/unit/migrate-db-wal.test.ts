@@ -90,7 +90,9 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     source.close();
 
     expect(result.status).toBe("completed");
-    expect(result.summary).toContain("channel values: 2 row(s)");
+    // The count surfaces as the per-table info bullet; the headline total.
+    expect(result.summary).toContain("assistant db — 2 row(s)");
+    expect(result.issues ?? []).toEqual([{ severity: "info", message: "channel values: 2 row(s)" }]);
 
     // The close checkpointed the destination: no -wal sidecar survives.
     // (Asserted BEFORE the readonly inspection below — any open of a

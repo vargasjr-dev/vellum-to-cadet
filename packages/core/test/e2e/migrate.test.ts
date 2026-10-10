@@ -24,6 +24,8 @@ const noopOps: ProcessOps = {
   },
   async vellumSleep() {},
   async cadetSleep() {},
+  async installCadet() {},
+  async cadetWakeAll() {},
 };
 
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
@@ -44,6 +46,25 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
     expect(report.ok).toBe(true);
     expect(report.exitCode).toBe(0);
+
+    // ── Output-contract pins from the v0.0.8 run feedback. ──
+    // The root-level version is per-assistant in practice — never "unknown":
+    // the clause is omitted unless a version was actually determined.
+    const detectStep = report.steps.find((s) => s.step === "detect");
+    expect(detectStep?.summary).not.toContain("version unknown");
+    expect(detectStep?.summary).toContain("docker install, version 0.12.6");
+    // The backup is quiet: recorded in the report, never rendered.
+    const backupStep = report.steps.find((s) => s.step === "backup");
+    expect(backupStep?.quiet).toBe(true);
+    expect(backupStep?.status).toBe("completed");
+    // The run reports its own wall-clock duration.
+    expect(report.durationMs).toBeGreaterThanOrEqual(0);
+    // Post-migration setup: the fixture has no lockfile, so both skip.
+    const install = report.steps.find((s) => s.step === "install-cadet");
+    expect(install?.status).toBe("skipped");
+    expect(install?.summary).toContain("no lockfile-tracked assistant(s)");
+    const wake = report.steps.find((s) => s.step === "wake-assistants");
+    expect(wake?.status).toBe("skipped");
 
     // ── User workspace: byte-for-byte, including vellum prose. ──
     const userNote = await fs.readFile(path.join(cadetRoot, "workspace/notes/vellum-history.md"), "utf8");
@@ -412,6 +433,8 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
         sleeps.push(1);
       },
       async cadetSleep() {},
+      async installCadet() {},
+      async cadetWakeAll() {},
     };
 
     const report = await migrate({
@@ -441,6 +464,8 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       },
       async vellumSleep() {},
       async cadetSleep() {},
+      async installCadet() {},
+      async cadetWakeAll() {},
     };
 
     const report = await migrate({
@@ -518,10 +543,11 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
 
     // The step keeps going: completed, no warnings, nothing about columns.
     expect(result.status).toBe("completed");
-    expect(result.issues ?? []).toEqual([]);
+    // The phase that COULD run (attachment links) still ran — as the
+    // per-table info bullet under the step line.
+    expect(result.issues ?? []).toEqual([{ severity: "info", message: "attachment links: 1 row(s)" }]);
     expect(result.summary).not.toContain("no such column");
-    // The phase that COULD run (attachment links) still ran.
-    expect(result.summary).toContain("attachment links: 1 row(s)");
+    expect(result.summary).toContain("assistant db — 1 row(s)");
   });
 
   test("a newer-vellum assistant db (schema 120+ shape) verifies semantically", async () => {
@@ -857,6 +883,8 @@ describe("e2e: repair mode", () => {
           async cadetSleep() {
             cadetSleeps++;
           },
+          async installCadet() {},
+          async cadetWakeAll() {},
         },
         termGraceMs: 0,
       });
@@ -972,6 +1000,8 @@ describe("e2e: repair mode", () => {
           async cadetSleep() {
             cadetSleeps++;
           },
+          async installCadet() {},
+          async cadetWakeAll() {},
         },
       });
 
@@ -1035,6 +1065,8 @@ describe("stop-assistant: vellum lockfile iteration", () => {
             slept.push(assistant);
           },
           async cadetSleep() {},
+          async installCadet() {},
+          async cadetWakeAll() {},
         },
         false,
         0,
@@ -1066,6 +1098,8 @@ describe("stop-assistant: vellum lockfile iteration", () => {
             slept.push(assistant);
           },
           async cadetSleep() {},
+          async installCadet() {},
+          async cadetWakeAll() {},
         },
         false,
         0,
@@ -1126,6 +1160,8 @@ describe("e2e: retired archives", () => {
 
     const retired = report.steps.find((s) => s.step === "migrate-retired");
     expect(retired?.status).toBe("completed");
+    // No "(optional by design…)" parenthetical — the ⚠ bullets say it all.
+    expect(retired?.summary).toBe("retired archives: 2 migrated, 1 left as-is");
 
     // Finished archive: re-tarred with migrated content inside.
     const extracted = path.join(retiredDir, "check-grand");

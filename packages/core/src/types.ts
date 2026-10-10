@@ -28,6 +28,12 @@ export interface StepResult {
   summary: string;
   files?: FileAction[];
   issues?: StepIssue[];
+  /**
+   * Display-quiet: recorded in the report and --json, but excluded from the
+   * live step stream and the human summary list (e.g. backup — the vellum
+   * root is the real backup, so the line is noise).
+   */
+  quiet?: boolean;
   data?: Record<string, unknown>;
 }
 
@@ -107,6 +113,10 @@ export interface ProcessOps {
    * about — a cadet root can have several running at once.
    */
   cadetSleep(): Promise<void>;
+  /** Install the cadet CLI globally (`npm install -g cadet`). */
+  installCadet(): Promise<void>;
+  /** Wake every cadet assistant (`cadet wake --all`). */
+  cadetWakeAll(): Promise<void>;
 }
 
 /**
@@ -131,6 +141,8 @@ export interface MigrationReport {
   backupPath: string | null;
   startedAt: string;
   finishedAt: string;
+  /** Wall-clock duration of the whole run, in milliseconds. */
+  durationMs: number;
 }
 
 export const EXIT_CODES = {
@@ -139,7 +151,6 @@ export const EXIT_CODES = {
   preflightFailed: 3,
   backupFailed: 5,
   migrationFailed: 6,
-  verifyFailed: 7,
   cadetRootConflict: 8,
   /** Discovery found multiple plausible vellum roots in a non-interactive run. */
   ambiguousRoot: 9,
