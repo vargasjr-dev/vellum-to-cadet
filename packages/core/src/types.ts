@@ -47,6 +47,11 @@ export interface DetectInfo {
   version: string | null;
   /** Modern-layout assistant dir names (the handles), sorted. Empty for legacy roots. */
   assistantHandles: string[];
+  /**
+   * Retired-assistant archives discovered in the vellum root's retired/ dir
+   * — they migrate too, and the detect summary reports the count when > 0.
+   */
+  retiredCount: number;
   deploymentKind: "desktop" | "docker" | "local";
   docker: DockerDeployment;
   runningProcesses: Array<{ pid: number; command: string }>;
@@ -89,6 +94,11 @@ export interface MigrateOptions {
   onStepDone?: (result: StepResult) => void;
   /** Live progress: nested item progress within the current step. */
   onStepItem?: (step: string, item: StepItemEvent) => void;
+  /**
+   * Test seam: override the docker volume ops (volume → dir and dir →
+   * volume copies). Defaults to the real docker CLI via temp containers.
+   */
+  dockerOps?: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
 }
 
 /**
@@ -125,6 +135,20 @@ export interface ProcessOps {
   cadetLogin(): Promise<void>;
   /** True when the `cadet` binary resolves on PATH (`cadet --version`). */
   cadetBinAvailable(): Promise<boolean>;
+  /**
+   * Ask the cadet CLI its own version (`cadet --version`), or null. The
+   * migrated docker entries must record the CADet image refs for the
+   * installed cadet (the images are tagged per cadet version) — so the
+   * version is captured right after the CLI is installed, before the
+   * lockfile conversion writes containerInfo.
+   */
+  cadetVersion(): Promise<string | null>;
+  /** Copy a docker volume's contents down to a host dir (temp container + docker cp). */
+  dockerVolumeToDir(volume: string, destDir: string, image?: string): Promise<void>;
+  /** Copy a host dir's contents up into a docker volume (created if missing). */
+  dockerDirToVolume(srcDir: string, volume: string, image?: string): Promise<void>;
+  /** True when the docker CLI has a usable daemon (`docker info` succeeds). */
+  dockerAvailable(): Promise<boolean>;
   /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */
   npmGlobalRoot(): Promise<string | null>;
 }

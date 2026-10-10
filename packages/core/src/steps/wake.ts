@@ -38,11 +38,15 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
         data: { installed: true, binAvailable: false },
       };
     }
+    // The installed cadet's own version — the lockfile conversion derives
+    // the docker entries' container image refs from it (the images are
+    // tagged per cadet release).
+    const version = await ops.cadetVersion();
     return {
       step: "install-cadet",
       status: "completed",
-      summary: "cadet CLI installed globally",
-      data: { installed: true, binAvailable: true },
+      summary: `cadet CLI installed globally${version ? ` (v${version})` : ""}`,
+      data: { installed: true, binAvailable: true, version },
     };
   } catch (err) {
     return {
@@ -83,6 +87,20 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, bi
       summary: `woke ${assistantCount} assistant(s) via \`cadet wake --all\``,
     };
   } catch (err) {
+    // The node exec error's message is just "Command failed: cadet wake
+    // --all" — the actual reason (docker's stderr, the daemon's refusal)
+    // lives on err.stderr. Surface it, or the user is told the command
+    // failed by being told the command failed (v0.0.10 run feedback).
+    const execErr = err as Error & { stderr?: string | Buffer };
+    const detail = [
+      typeof execErr.stderr === "string" ? execErr.stderr : execErr.stderr?.toString(),
+      execErr.message,
+    ]
+      .find((s) => s && s.trim().length > 0)
+      ?.trim()
+      .split("\n")
+      .filter((line) => line.trim().length > 0 && !line.startsWith("Command failed:"))
+      .join(" — ");
     return {
       step: "wake-assistants",
       status: "completed",
@@ -90,7 +108,7 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, bi
       issues: [
         {
           severity: "warning",
-          message: `cadet wake --all failed: ${(err as Error).message.split("\n")[0]}`,
+          message: `cadet wake --all failed: ${detail ?? "unknown reason (re-run with --verbose)"}`,
         },
       ],
     };

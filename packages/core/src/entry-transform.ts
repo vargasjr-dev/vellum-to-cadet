@@ -33,6 +33,14 @@ export interface EntryTransformOptions {
    * receives the ALREADY-stripped assistant id.
    */
   defaultInstanceDirFor: (strippedAssistantId: string) => string;
+  /**
+   * The cadet docker image refs for the installed cadet CLI. Docker
+   * entries' containerInfo must record THESE — the vellum images the
+   * containers ran before are worthless to cadet (v0.0.10 run feedback).
+   * When absent (cadet could not be installed), the image refs ride
+   * through with a warning issue and the digests are still stripped.
+   */
+  cadetImages?: { assistant: string; gateway: string; credentialExecutor: string };
 }
 
 export interface EntryTransformResult {
@@ -44,6 +52,8 @@ export interface EntryTransformResult {
    * fresh cloud credentials before the migrated assistants use cloud features.
    */
   hadLegacyPlatformCredentials: boolean;
+  /** The entry's docker images could not be repointed at cadet's. */
+  dockerImagesUnresolved?: boolean;
 }
 
 export function transformAssistantEntry(
@@ -138,7 +148,37 @@ export function transformAssistantEntry(
     changed = true;
   }
 
-  return { entry, changed, hadLegacyPlatformCredentials };
+  // containerInfo: docker entries record the images to run. The vellum
+  // images are worthless to cadet — repoint the three service images at
+  // the refs derived from the installed cadet's version, and drop the
+  // digest/network bookkeeping (cadet no longer reads or writes them:
+  // the digests pinned hatch-time image state that cadet re-derives at
+  // upgrade, and the network name is derived from the instance name).
+  let dockerImagesUnresolved = false;
+  if (entry.cloud === "docker" && isRecord(entry.containerInfo)) {
+    const containerInfo = entry.containerInfo;
+    if (opts.cadetImages) {
+      containerInfo["assistantImage"] = opts.cadetImages.assistant;
+      containerInfo["gatewayImage"] = opts.cadetImages.gateway;
+      containerInfo["cesImage"] = opts.cadetImages.credentialExecutor;
+      changed = true;
+    } else if (typeof containerInfo["assistantImage"] === "string") {
+      dockerImagesUnresolved = true;
+    }
+    for (const field of ["assistantDigest", "gatewayDigest", "cesDigest", "networkName"] as const) {
+      if (field in containerInfo) {
+        delete containerInfo[field];
+        changed = true;
+      }
+    }
+  }
+
+  return {
+    entry,
+    changed,
+    hadLegacyPlatformCredentials,
+    ...(dockerImagesUnresolved ? { dockerImagesUnresolved: true } : {}),
+  };
 }
 
 /**

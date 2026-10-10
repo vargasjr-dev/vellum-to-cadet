@@ -18,11 +18,13 @@ import {
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
+import { migrateDockerVolumes, verifyDockerVolumes } from "./steps/migrate-docker-volumes.js";
 import { readLockfileAssistants } from "./steps/detect.js";
-import { cadetLoginStep, installCadetCli, wakeAssistants } from "./steps/wake.js";
+import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
+import { cadetImageRefs } from "./cadet-images.js";
+import { handleToInstanceName, DEFAULT_TARGET_CTX } from "./layout.js";
 import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
-import { DEFAULT_TARGET_CTX } from "./layout.js";
 import {
   applySubstitutions,
   isDbArtifact,
@@ -66,18 +68,27 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   start("detect");
   const detect: DetectInfo = await detectStep(options, ops);
-  const dockerNote =
-    detect.docker.instances.length > 0
-      ? `, docker instances: ${detect.docker.instances.join(", ")}`
-      : "";
   done({
     step: "detect",
     status: "completed",
     // The root-level version is only known for some installs — and per-
     // assistant versions can differ — so "version unknown" is noise: show
-    // the clause only when a version was actually determined.
+    // the clause only when a version was actually determined. No parens:
+    // each assistant being migrates gets its own nested line (v0.0.10 run
+    // feedback — a parenthetical docker list read like an afterthought and
+    // hid the assistants).
     summary: detect.vellumRootExists
-      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind} install${detect.version ? `, version ${detect.version}` : ""}${dockerNote})`
+      ? [
+          `vellum root at ${detect.vellumRoot} — ${detect.deploymentKind} install${detect.version ? `, version ${detect.version}` : ""}`,
+          ...detect.assistantHandles.map((handle, i) => {
+            const last = i === detect.assistantHandles.length - 1 && detect.retiredCount === 0;
+            const branch = last ? "└─" : "├─";
+            return `${branch} migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " — docker instance, data lives in docker volumes" : ""}`;
+          }),
+          ...(detect.retiredCount > 0
+            ? [`└─ ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
+            : []),
+        ].join("\n")
       : `no vellum root at ${detect.vellumRoot}`,
     data: {
       vellumRoot: detect.vellumRoot,
@@ -115,10 +126,19 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.cadetRootConflict);
   }
   // Path rewrites must point at the directory the files actually land in.
+  // On a clear target the instance is named after the first real assistant
+  // handle (docker instance ids included — v0.0.10 run feedback: the
+  // generic "vellum" name leaked into every recorded legacy path), never
+  // the brand default.
   const targetCtx =
     target.kind === "fresh"
       ? { instanceName: target.freshName, nested: true }
-      : DEFAULT_TARGET_CTX;
+      : detect.assistantHandles.length > 0
+        ? {
+            instanceName: handleToInstanceName(detect.assistantHandles[0] ?? ""),
+            nested: false,
+          }
+        : DEFAULT_TARGET_CTX;
   if (target.kind === "fresh") {
     detect.cadetRoot = target.cadetRoot;
     detect.cadetRootExists = false;
@@ -135,12 +155,17 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     start("migrate-credentials");
     const reCredentials = await migrateCredentialsStep(detect.cadetRoot);
     done(reCredentials);
+    // Same image-ref contract as the fresh path: when a cadet CLI is
+    // present, its version derives the docker entries' cadet images.
+    const reBinAvailable = await ops.cadetBinAvailable();
+    const reVersion = reBinAvailable ? await ops.cadetVersion() : null;
     start("migrate-lockfile");
     const reLockfile = await migrateLockfile({
       vellumRoot: detect.vellumRoot,
       cadetRoot: detect.cadetRoot,
       envSuffix: envSuffixFor(detect.vellumRoot),
       applyRenames: false,
+      cadetImages: reVersion ? cadetImageRefs(reVersion) : null,
     });
     done(reLockfile);
     start("migrate-retired");
@@ -230,7 +255,35 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("migrate-gateway-db");
   done(await migrateGatewayDb(detect, gatewayDbDests));
 
-  // 3.7 Remove the legacy vellum platform credentials from the migrated
+  // 3.7 Put the cadet CLI on the machine — EARLY, before the lockfile
+  //     conversion: the migrated docker entries must record the CADet image
+  //     refs for the installed cadet version (v0.0.10 run feedback: the
+  //     containerInfo pointed at the vellum images the containers ran
+  //     before). Its version is captured right after the install.
+  const assistantCount = (await readLockfileAssistants()).length;
+  start("install-cadet");
+  const install = await installCadetCli(ops, assistantCount);
+  done(install);
+  const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
+  const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;
+
+  // 3.8 Docker deployments keep the assistant's real data in docker
+  //     volumes (workspace, gateway security, CES security) — the host
+  //     root only carries the CLI's own state. Extract each instance's
+  //     volumes, run the same value steps over them, and write them into
+  //     the cadet volumes under the migrated name (v0.0.10 run feedback:
+  //     every volume-data step failed against the host root).
+  start("migrate-docker-volumes");
+  const dockerVolumesResult = await migrateDockerVolumes({
+    ops,
+    dockerOps: options.dockerOps ?? ops,
+    instances: detect.docker.instances,
+    images: detect.docker.images,
+    onItem: onItem("migrate-docker-volumes"),
+  });
+  done(dockerVolumesResult);
+
+  // 3.9 Remove the legacy vellum platform credentials from the migrated
   //     tree — the cloud api key and webhook secret can't be kept; `cadet
   //     login` (below, before wake) establishes fresh ones.
   start("migrate-credentials");
@@ -240,13 +293,15 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // 4. Convert the vellum lockfile into the cadet canonical config-dir
   //    lockfile (transformed entries, the path the cadet CLI reads), and
   //    move a legacy home-level cadet lockfile aside for identity
-  //    continuity.
+  //    continuity. The docker entries' containerInfo gets the cadet image
+  //    refs for the installed cadet — never the vellum images.
   start("migrate-lockfile");
   const lockfile = await migrateLockfile({
     vellumRoot: detect.vellumRoot,
     cadetRoot: detect.cadetRoot,
     envSuffix: envSuffixFor(detect.vellumRoot),
     applyRenames: true,
+    cadetImages,
   });
   done(lockfile);
 
@@ -270,14 +325,20 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("verify");
   done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
 
-  // 6. When the migrated lockfile tracked assistants, put the cadet CLI on
-  //    the machine, log in to cadet cloud when the migration detected (and
-  //    removed) legacy vellum platform credentials, and wake everything it
-  //    knows about.
-  const assistantCount = (await readLockfileAssistants()).length;
-  start("install-cadet");
-  const install = await installCadetCli(ops, assistantCount);
-  done(install);
+  // 5.5 Same verification for the docker volumes — the host-root verify
+  //     above never sees them (v0.0.10 run feedback: the volume dbs and
+  //     credential store went unverified).
+  start("verify-docker-volumes");
+  done(
+    await verifyDockerVolumes({
+      ops,
+      dockerOps: options.dockerOps ?? ops,
+      instances: detect.docker.instances,
+      images: detect.docker.images,
+      onItem: onItem("verify-docker-volumes"),
+    }),
+  );
+
   start("cadet-login");
   done(
     await cadetLoginStep(ops, {
@@ -495,6 +556,7 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
     previousManifest: false,
     version: null,
     assistantHandles: [],
+    retiredCount: 0,
     deploymentKind: "local",
     docker: { instances: [], images: [] },
     runningProcesses: [],

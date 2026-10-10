@@ -49,6 +49,13 @@ export interface MigrateLockfileOptions {
    * where the recorded dirs are the physical ones.
    */
   applyRenames: boolean;
+  /**
+   * The cadet docker image refs for the installed cadet CLI — written into
+   * docker entries' containerInfo (never the vellum images). Null when the
+   * cadet CLI could not be installed/asked; the digests are stripped
+   * regardless.
+   */
+  cadetImages?: { assistant: string; gateway: string; credentialExecutor: string } | null;
 }
 
 /**
@@ -102,6 +109,13 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
     if (converted.legacyPlatformCredentials) {
       data["legacyPlatformCredentials"] = true;
     }
+    if (converted.dockerImagesUnresolved) {
+      issues.push({
+        severity: "warning",
+        message:
+          "docker assistant(s) kept their vellum image refs — the cadet CLI version was unavailable to resolve cadet's. Wake will fail until `cadet hatch` or `cadet upgrade` refreshes them.",
+      });
+    }
   }
 
   // ── 2. Move a legacy home-level cadet lockfile into the canonical path. ──
@@ -113,11 +127,34 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
   return { step: "migrate-lockfile", status: "completed", summary, issues, data };
 }
 
+/**
+ * Vellum-runtime root fields that must NOT ride into the cadet lockfile
+ * (v0.0.10 run feedback: the converted lockfile carried them all). They
+ * describe the VELLUM install's upgrade state — cadet's own upgrade
+ * machinery writes its own from scratch, and inheriting vellum's makes
+ * cadet believe it has a deployed service group it has never deployed:
+ * the rollback fields (previous*), the db/workspace migration watermarks,
+ * and the vellum service-group version pin.
+ */
+const VELLUM_ROOT_FIELDS_TO_DROP: ReadonlyArray<string> = [
+  "serviceGroupVersion",
+  "previousServiceGroupVersion",
+  "previousContainerInfo",
+  "version",
+  "previousDbMigrationVersion",
+  "previousWorkspaceMigrationId",
+];
+
 /** Convert the raw vellum lockfile JSON into its cadet form. */
 function convertVellumLockfile(
   raw: Record<string, unknown>,
   opts: MigrateLockfileOptions,
-): { lockfile: Record<string, unknown>; assistantCount: number; legacyPlatformCredentials: boolean } {
+): {
+  lockfile: Record<string, unknown>;
+  assistantCount: number;
+  legacyPlatformCredentials: boolean;
+  dockerImagesUnresolved: boolean;
+} {
   const mapInstanceDir = makeInstanceDirMapper({
     vellumRoot: opts.vellumRoot,
     cadetRoot: opts.cadetRoot,
@@ -127,6 +164,7 @@ function convertVellumLockfile(
   const rawAssistants = Array.isArray(raw.assistants) ? raw.assistants : [];
   const assistants: Record<string, unknown>[] = [];
   let legacyPlatformCredentials = false;
+  let dockerImagesUnresolved = false;
   for (const entry of rawAssistants) {
     if (
       typeof entry !== "object" ||
@@ -140,19 +178,24 @@ function convertVellumLockfile(
     const result = transformAssistantEntry(entry as Record<string, unknown>, {
       mapInstanceDir,
       defaultInstanceDirFor: (id) => path.join(opts.cadetRoot, "assistants", id),
+      cadetImages: opts.cadetImages ?? undefined,
     });
     if (result.hadLegacyPlatformCredentials) legacyPlatformCredentials = true;
+    if (result.dockerImagesUnresolved) dockerImagesUnresolved = true;
     assistants.push(result.entry);
   }
 
-  // Unknown top-level fields ride through (cadet's parser ignores what it
-  // doesn't know); the active assistant's id drops the brand prefix too.
+  // Known-good root fields ride through (device identity, tokens, whatever
+  // cadet's parser reads); the vellum-runtime upgrade bookkeeping does not.
   const lockfile: Record<string, unknown> = { ...raw, assistants };
+  for (const field of VELLUM_ROOT_FIELDS_TO_DROP) {
+    delete lockfile[field];
+  }
   if (typeof raw.activeAssistant === "string" && raw.activeAssistant.length > 0) {
     lockfile.activeAssistant = raw.activeAssistant.replace(/^vellum-/, "");
   }
 
-  return { lockfile, assistantCount: assistants.length, legacyPlatformCredentials };
+  return { lockfile, assistantCount: assistants.length, legacyPlatformCredentials, dockerImagesUnresolved };
 }
 
 /**

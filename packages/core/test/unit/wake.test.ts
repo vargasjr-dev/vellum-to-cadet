@@ -17,6 +17,14 @@ function baseOps(overrides: Partial<ProcessOps> = {}): ProcessOps {
     async cadetSleep() {},
     async installCadet() {},
     async cadetWakeAll() {},
+    async cadetVersion() {
+      return null;
+    },
+    async dockerVolumeToDir() {},
+    async dockerDirToVolume() {},
+    async dockerAvailable() {
+      return false;
+    },
     async cadetBinAvailable() {
       return true;
     },
