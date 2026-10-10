@@ -31,6 +31,25 @@ describe("entry-transform: assistant entries", () => {
     expect(result.entry.hatchedAt).toBe("2026-09-01T10:00:00.000Z");
   });
 
+  test("strips the renamed cloud spellings of the same vellum identity", () => {
+    const result = transformAssistantEntry(
+      {
+        assistantId: "grand-ram",
+        name: "grand-ram",
+        cloud: "local",
+        cloudBaseUrl: "https://platform.vellum.ai",
+        cloudOrganizationId: "org_2",
+        hatchedAt: "2026-09-01T10:00:00.000Z",
+      },
+      { mapInstanceDir: (d) => d, defaultInstanceDirFor: () => "/cadet/assistants/x" },
+    );
+    expect(result.changed).toBe(true);
+    expect(result.hadLegacyPlatformCredentials).toBe(true);
+    expect("cloudBaseUrl" in result.entry).toBe(false);
+    expect("cloudOrganizationId" in result.entry).toBe(false);
+    expect(result.entry.hatchedAt).toBe("2026-09-01T10:00:00.000Z");
+  });
+
   test("rewrites the runtime url to loopback for local assistants only", () => {
     const local = transformAssistantEntry(
       { assistantId: "a", cloud: "local", runtimeUrl: "http://MacBook-Pro-8.local:7830" },
