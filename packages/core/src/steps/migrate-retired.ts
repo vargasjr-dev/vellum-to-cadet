@@ -121,7 +121,7 @@ export async function migrateRetiredArchives(
       onItem?.({ name: target.name, status: "warning", summary: "left as-is" });
       issues.push({
         severity: "warning",
-        message: `retired archive '${target.name}': ${(err as Error).message} — left as-is, continuing`,
+        message: `retired archive '${target.name}': ${(err as Error).message}${truncationHint(err)} — left as-is, continuing`,
       });
       // Our scratch dir goes; anything pre-existing stays untouched.
       if (target.scratchIsOurs && target.scratchPath) {
@@ -132,9 +132,16 @@ export async function migrateRetiredArchives(
 
   const summary =
     failed > 0
-      ? `retired archives: ${migrated} migrated, ${failed} left as-is (optional by design — see ⚠)`
+      ? `retired archives: ${migrated} migrated, ${failed} left as-is`
       : `retired archives: ${migrated} migrated (${contentChanges} content change(s), ${dbRows} db row(s))`;
   return { step, status: "completed", summary, issues, data: { migrated, failed, contentChanges, dbRows } };
+}
+
+/** Explain a truncated gzip stream: the archive was never fully written. */
+function truncationHint(err: unknown): string {
+  return /truncated gzip|unexpected end of file/i.test((err as Error).message)
+    ? " — the archive looks truncated (an interrupted retire never finished writing it; the data past that point is unrecoverable)"
+    : "";
 }
 
 async function migrateOneArchive(

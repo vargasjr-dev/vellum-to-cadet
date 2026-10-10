@@ -67,4 +67,35 @@ describe("migrate-retired: per-archive progress events", () => {
     const result = await migrateRetiredArchives(cadetRoot, DEFAULT_TARGET_CTX);
     expect(result.status).toBe("skipped");
   });
+
+  test("a truncated tar.gz warns with the interrupted-retire hint and stays untouched", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-retired-truncated-"));
+    const cadetRoot = path.join(root, "cadet");
+    const retiredDir = path.join(cadetRoot, "retired");
+    await fs.mkdir(retiredDir, { recursive: true });
+
+    // A VALID archive, then cut in half: the gzip stream ends early — the
+    // signature of a retire killed mid-write.
+    const scratch = path.join(root, "build", "truncated");
+    await fs.mkdir(path.join(scratch, "workspace", "data", "logs"), { recursive: true });
+    await fs.writeFile(path.join(scratch, "workspace", "data", "logs", "day.log"), "vellum://x\n");
+    const tarPath = path.join(retiredDir, "truncated.tar.gz");
+    await run("tar", ["-czf", tarPath, "-C", scratch, "."]);
+    const bytes = await fs.readFile(tarPath);
+    await fs.writeFile(tarPath, bytes.subarray(0, Math.floor(bytes.length / 2)));
+
+    const issues: StepItemEvent[] = [];
+    const result = await migrateRetiredArchives(cadetRoot, DEFAULT_TARGET_CTX, (item) => {
+      issues.push(item);
+    });
+
+    expect(result.status).toBe("completed"); // optional by design
+    const truncated = issues.find((e) => e.name === "truncated" && e.status === "warning");
+    expect(truncated?.summary).toBe("left as-is");
+    const warn = result.issues?.find((i) => i.message.includes("'truncated'"));
+    expect(warn?.severity).toBe("warning");
+    expect(warn?.message).toContain("archive looks truncated");
+    // Cold storage is never touched on failure.
+    expect((await fs.readFile(tarPath))).toEqual(bytes.subarray(0, Math.floor(bytes.length / 2)));
+  });
 });

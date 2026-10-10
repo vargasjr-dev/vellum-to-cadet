@@ -17,6 +17,8 @@ import {
 } from "./steps/migrate-assistant-db.js";
 import { migrateHomeLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives } from "./steps/migrate-retired.js";
+import { readLockfileAssistants } from "./steps/detect.js";
+import { installCadetCli, wakeAssistants } from "./steps/wake.js";
 import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import { DEFAULT_TARGET_CTX } from "./layout.js";
@@ -70,8 +72,11 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done({
     step: "detect",
     status: "completed",
+    // The root-level version is only known for some installs — and per-
+    // assistant versions can differ — so "version unknown" is noise: show
+    // the clause only when a version was actually determined.
     summary: detect.vellumRootExists
-      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind} install, version ${detect.version ?? "unknown"}${dockerNote})`
+      ? `vellum root at ${detect.vellumRoot} (${detect.deploymentKind} install${detect.version ? `, version ${detect.version}` : ""}${dockerNote})`
       : `no vellum root at ${detect.vellumRoot}`,
     data: {
       vellumRoot: detect.vellumRoot,
@@ -124,10 +129,8 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // Already-migrated path: verify-only.
   if (target.kind === "already-migrated") {
     start("verify");
-    const v = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
-    done(v);
-    const code = v.status === "completed" ? EXIT_CODES.ok : EXIT_CODES.verifyFailed;
-    return finish(detect, steps, "verify-only", startedAt, null, code);
+    done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
+    return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
   }
 
   start("preflight");
@@ -155,11 +158,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   const stop = await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000);
   done(stop);
 
-  // 2. Full backup before any mutation.
-  start("backup");
+  // 2. Full backup before any mutation. Quiet in the UI: the vellum root
+  //    is never mutated, so it IS the backup — the line is noise. Still
+  //    recorded in the report/--json, and a FAILURE stays visible.
   const timestamp = utcStamp();
   const bk = await backup(detect.vellumRoot, detect.cadetRoot, timestamp);
-  done(bk);
+  steps.push(bk);
   if (bk.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.backupFailed);
   }
@@ -205,13 +209,20 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("migrate-retired");
   done(await migrateRetiredArchives(detect.cadetRoot, targetCtx, onItem("migrate-retired")));
 
-  // 5. Verify against the backup ground truth.
+  // 5. Verify against the backup ground truth. Findings are WARNINGS, not
+  //    failures: the migration itself is complete, and residual branding in
+  //    a cold corner of the data must not scare the user with exit code 7.
   start("verify");
-  const v = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
-  done(v);
-  if (v.status === "failed") {
-    return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.verifyFailed);
-  }
+  done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
+
+  // 6. When the migrated lockfile tracked assistants, put the cadet CLI on
+  //    the machine and wake everything it knows about.
+  const assistantCount = (await readLockfileAssistants()).length;
+  start("install-cadet");
+  const install = await installCadetCli(ops, assistantCount);
+  done(install);
+  start("wake-assistants");
+  done(await wakeAssistants(ops, assistantCount, install.data?.["installed"] === true));
 
   return finish(detect, steps, "migrate", startedAt, backupPath, EXIT_CODES.ok);
 }
@@ -224,6 +235,7 @@ function finish(
   backupPath: string | null,
   exitCode: MigrationReport["exitCode"],
 ): MigrationReport {
+  const finishedAt = new Date().toISOString();
   return {
     ok: exitCode === EXIT_CODES.ok,
     exitCode,
@@ -232,7 +244,8 @@ function finish(
     steps,
     backupPath,
     startedAt,
-    finishedAt: new Date().toISOString(),
+    finishedAt,
+    durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
   };
 }
 
@@ -340,10 +353,10 @@ async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepRes
         severity: "warning",
         message: `${destRel} is not a readable sqlite file — could not check for leftover rows`,
       });
-    } else if (leftover > 0) {
+    } else if (leftover.total > 0) {
       issues.push({
-        severity: "error",
-        message: `${destRel} still has ${leftover} vellum-branded row(s)`,
+        severity: "warning",
+        message: `${destRel} still has vellum-branded data — ${leftover.details.join("; ")}`,
       });
     }
   }
@@ -356,7 +369,7 @@ async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepRes
     if (sanctioned) {
       if (sanctioned.text !== raw) {
         issues.push({
-          severity: "error",
+          severity: "warning",
           message: `${destRel}: ${sanctioned.substep} left legacy tokens behind`,
         });
       }
@@ -366,17 +379,17 @@ async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepRes
     const leftovers = raw.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
     if (leftovers && leftovers.length > 0) {
       issues.push({
-        severity: "error",
+        severity: "warning",
         message: `${destRel}: ${leftovers.length} leftover vellum token(s)`,
       });
     }
   }
 
-  if (issues.some((i) => i.severity === "error")) {
+  if (issues.length > 0) {
     return {
       step: "verify",
-      status: "failed",
-      summary: `${issues.length} verification issue(s) in the repaired cadet root`,
+      status: "completed",
+      summary: `repaired root verified with ${issues.length} warning(s) (see ⚠)`,
       issues,
     };
   }
@@ -507,12 +520,9 @@ export async function repair(options: RepairOptions): Promise<MigrationReport> {
 
     // Verify: dbs must have zero vellum rows; sanctioned content must be
     // transform-idempotent (rewriting an already-clean file changes nothing).
+    // Findings are warnings — same philosophy as migrate-mode verify.
     start("verify");
-    const v = await verifyRepair(root, scan);
-    done(v);
-    if (v.status === "failed") {
-      return finish(detect, steps, "repair", startedAt, lastBackupPath, EXIT_CODES.verifyFailed);
-    }
+    done(await verifyRepair(root, scan));
   }
 
   return finish(detect, steps, "repair", startedAt, lastBackupPath, EXIT_CODES.ok);

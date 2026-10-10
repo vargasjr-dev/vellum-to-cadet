@@ -287,6 +287,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   // them here would print the run twice.
   if (!opts?.stepsStreamedLive) {
     for (const step of report.steps) {
+      if (step.quiet) continue;
       lines.push(`  ${stepIcon(step.status)} ${step.step.padEnd(20)} ${step.summary}`);
       for (const issue of step.issues ?? []) {
         lines.push(`    ${issueIcon(issue.severity)} ${issue.path ? `${issue.path}: ` : ""}${issue.message}`);
@@ -301,6 +302,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
         `  ${successIcon()} ${colors.green("Repair complete.")} The cadet root was re-verified in place:`,
       );
       lines.push(`    ${command(report.detect.cadetRoot)}`);
+      lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
       if (report.backupPath) {
         lines.push(`    ${detail(`A full backup of the cadet root is at ${report.backupPath}`)}`);
       }
@@ -309,6 +311,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     }
     lines.push(`  ${successIcon()} ${colors.green("Migration complete.")} Your assistant data now lives in:`);
     lines.push(`    ${command(report.detect.cadetRoot)}`);
+    lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
     if (report.backupPath) {
       lines.push(`    ${detail(`A full backup of the vellum root is at ${report.backupPath}`)}`);
     }
@@ -323,9 +326,21 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
       lines.push(`    ${detail(`Your data is safe: ${report.backupPath}`)}`);
     }
     lines.push(`    ${detail(`Exit code: ${report.exitCode}`)}`);
+    lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/** Wall-clock duration, human-formatted: 1h 2m 3s / 4m 12s / 38s. */
+function humanDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m ${sec}s`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
 }
 
 /** First node version where node:sqlite is no longer experimental (v25.7 made it a release candidate). */

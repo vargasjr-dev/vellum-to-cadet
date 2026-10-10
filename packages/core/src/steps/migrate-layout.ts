@@ -13,7 +13,7 @@ import {
   walkTree,
 } from "../fs-utils.js";
 import { DEFAULT_TARGET_CTX, USER_WORKSPACE_DIR, type MigrationTargetCtx } from "../layout.js";
-import type { FileAction, DetectInfo, StepResult } from "../types.js";
+import type { FileAction, DetectInfo, StepIssue, StepResult } from "../types.js";
 
 /**
  * Build the full copy plan (dry-run safe — pure filesystem reads), then
@@ -77,20 +77,31 @@ export async function migrateLayout(
     const dbs = plan.filter((p) => isDbArtifact(stateRelativePath(p.src)));
     const runtimeData = plan.filter((p) => isUnderWorkspaceRuntime(stateRelativePath(p.src)));
 
-    // The headline stays short; the per-transform takeaways render as
-    // nested bullets (only the ones that actually changed something —
-    // "0 change(s)" lines are noise).
-    const takeaways = Object.entries(substeps)
-      .filter(([, s]) => s.changes > 0)
-      .map(([name, s]) => ({
-        severity: "info" as const,
-        message: `${name}: ${s.changes} change(s) in ${s.files} file(s)`,
-      }));
+    // The headline stays short; the breakdown and per-transform takeaways
+    // render as nested bullets (only the ones that actually changed
+    // something — "0 change(s)" lines are noise).
+    const takeaways: StepIssue[] = [];
+    if (rewrites.length + renamed.length + dbs.length > 0) {
+      takeaways.push({
+        severity: "info",
+        message: `${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim`,
+      });
+    }
+    takeaways.push(
+      ...Object.entries(substeps)
+        .filter(([, s]) => s.changes > 0)
+        .map(
+          ([name, s]): StepIssue => ({
+            severity: "info",
+            message: `${name}: ${s.changes} change(s) in ${s.files} file(s)`,
+          }),
+        ),
+    );
 
     return {
       step: "migrate-layout",
       status: "completed",
-      summary: `migrated ${fileCount} entries → ${detect.cadetRoot} (${rewrites.length} rewritten, ${renamed.length} renamed, ${dbs.length} db artifact(s) verbatim)`,
+      summary: `migrated ${fileCount} entries → ${detect.cadetRoot}`,
       issues: takeaways,
       files: plan,
       data: {
