@@ -13,6 +13,7 @@ import {
   VERBATIM_DIRS,
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
+  handleToInstanceName,
   isConversationLog,
   isPersonaPrompt,
   consolidateDefaultProvider,
@@ -51,7 +52,11 @@ export function renameSegment(name: string): string {
 export function dissolveInstanceState(relPath: string): string {
   const m = relPath.match(/^(assistants\/[^/]+)\/\.vellum(\/|$)/);
   if (!m) return relPath;
-  return `${m[1]}${m[2]}${relPath.slice(m[0].length)}`;
+  // The instance dir drops the vellum- brand prefix (vellum-grand-ram →
+  // grand-ram) — cadet assistants are named for their handle alone, same
+  // rule as handleToInstanceName.
+  const name = handleToInstanceName((m[1] ?? "assistants/").slice("assistants/".length));
+  return `assistants/${name}${m[2] ?? "/"}${relPath.slice(m[0].length)}`;
 }
 
 /**
@@ -82,7 +87,14 @@ export function applyPathMoves(stateRel: string): string | null {
 
 /** Apply the full rename map to a relative path, segment by segment. */
 export function renameRelativePath(relPath: string): string {
-  const stateRel = dissolveInstanceState(relPath);
+  // The bare instance dir (no .vellum level — e.g. a recorded instanceDir)
+  // strips the brand prefix too. dissolveInstanceState covers the nested
+  // form; this covers the dir itself.
+  const prefixStripped = relPath.replace(
+    /^(assistants\/)vellum-(?=[^/\\])/,
+    "$1",
+  );
+  const stateRel = dissolveInstanceState(prefixStripped);
   const moved = applyPathMoves(stateRel);
   if (moved) return moved;
   return dissolveProtectedDir(

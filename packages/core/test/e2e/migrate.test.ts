@@ -14,6 +14,7 @@ import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
 import {
   buildFullVellum0126,
+  buildMinimal,
   buildModernVellum,
   cleanupFixtures,
   writeAssistantState,
@@ -31,6 +32,7 @@ const noopOps: ProcessOps = {
   async cadetSleep() {},
   async installCadet() {},
   async cadetWakeAll() {},
+  async cadetLogin() {},
   async cadetBinAvailable() {
     return true;
   },
@@ -453,6 +455,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+  async cadetLogin() {},
       async cadetBinAvailable() {
         return true;
       },
@@ -490,6 +493,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async cadetSleep() {},
       async installCadet() {},
       async cadetWakeAll() {},
+  async cadetLogin() {},
       async cadetBinAvailable() {
         return true;
       },
@@ -847,7 +851,7 @@ describe("e2e: legacy home-level lockfile move", () => {
       expect(report.ok).toBe(true);
       const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
       expect(lockStep?.status).toBe("completed");
-      expect(lockStep?.summary).toContain("left untouched");
+      expect(lockStep?.summary).toContain("left in place");
       expect(lockStep?.issues?.[0]?.severity).toBe("warning");
       // Neither file was destroyed.
       expect(
@@ -915,6 +919,7 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+  async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
           },
@@ -1038,6 +1043,7 @@ describe("e2e: repair mode", () => {
           },
           async installCadet() {},
           async cadetWakeAll() {},
+  async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
           },
@@ -1109,6 +1115,7 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+  async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
           },
@@ -1148,6 +1155,7 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async cadetSleep() {},
           async installCadet() {},
           async cadetWakeAll() {},
+  async cadetLogin() {},
           async cadetBinAvailable() {
             return true;
           },
@@ -1215,7 +1223,9 @@ describe("e2e: retired archives", () => {
     const retired = report.steps.find((s) => s.step === "migrate-retired");
     expect(retired?.status).toBe("completed");
     // No "(optional by design…)" parenthetical — the ⚠ bullets say it all.
-    expect(retired?.summary).toBe("retired archives: 2 migrated, 1 left as-is");
+    expect(retired?.summary).toBe(
+      "retired archives: 2 migrated, 1 left as-is; retired manifests: nothing stale found",
+    );
 
     // Finished archive: re-tarred with migrated content inside.
     const extracted = path.join(retiredDir, "check-grand");
@@ -1316,3 +1326,364 @@ describe("e2e: retired archives", () => {
   }
 });
 
+
+// ── Run-feedback batch 3: the cadet lockfile conversion, instance-name
+//    prefix strips, retired-manifest cleaning, and the legacy-credential
+//    removal — everything the v0.0.9 run feedback flagged. ──
+
+describe("e2e: cadet lockfile conversion + legacy credentials", () => {
+  test("writes the cadet lockfile, renames the instance dir, scrubs the encrypted store, logs in", async () => {
+    const { root, home } = await buildModernVellum(undefined, "vellum", "vellum-grand-ram");
+    const state = path.join(root, "assistants", "vellum-grand-ram", ".vellum");
+    const prevHome = process.env.HOME;
+    const prevXdgDataHome = process.env.XDG_DATA_HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    let logins = 0;
+    const ops: ProcessOps = {
+      ...noopOps,
+      async cadetLogin() {
+        logins++;
+      },
+    };
+    try {
+      // The vellum lockfile: home-level, vellum-branded, cloud-registered.
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify(
+          {
+            assistants: [
+              {
+                assistantId: "vellum-grand-ram",
+                name: "vellum-grand-ram",
+                cloud: "local",
+                runtimeUrl: "http://MacBook-Pro-8.local:7830",
+                species: "cinderling",
+                hatchedAt: "2026-09-01T10:00:00.000Z",
+                baseDataDir: String(root),
+                organizationId: "org_vellum_1",
+                platformAssistantId: "pa_vellum_1",
+                platformBaseUrl: "https://platform.vellum.ai",
+                platformOrganizationId: "org_vellum_2",
+                resources: {
+                  instanceDir: path.join(root, "assistants", "vellum-grand-ram"),
+                  gatewayPort: 7830,
+                  daemonPort: 7821,
+                },
+                signingKey: "signing-key-material",
+              },
+            ],
+            activeAssistant: "vellum-grand-ram",
+          },
+          null,
+          2,
+        ),
+      );
+
+      // The encrypted credential store: vellum cloud entries + a BYOK key.
+      await fs.mkdir(path.join(state, "protected"), { recursive: true });
+      await fs.writeFile(
+        path.join(state, "protected", "keys.enc"),
+        JSON.stringify(
+          {
+            version: 2,
+            entries: {
+              "credential/vellum/assistant_api_key": { iv: "aa", tag: "bb", data: "cc" },
+              "credential/vellum/webhook_secret": { iv: "dd", tag: "ee", data: "ff" },
+              "credential/anthropic/api_key": { iv: "11", tag: "22", data: "33" },
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const report = await migrate({ vellumRoot: root, processOps: ops });
+      expect(report.ok).toBe(true);
+
+      const cadetRoot = path.join(home, ".local", "share", "cadet");
+
+      // ── The cadet lockfile: written to the canonical config-dir path the
+      //    cadet CLI reads, entries fully transformed. ──
+      const lockStep = report.steps.find((s) => s.step === "migrate-lockfile");
+      expect(lockStep?.summary).toContain(path.join(home, ".config", "cadet", "lockfile.json"));
+      const lockRaw = JSON.parse(
+        await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+      );
+      const entry = lockRaw.assistants[0];
+      expect(entry.assistantId).toBe("grand-ram");
+      expect(entry.name).toBe("grand-ram");
+      expect("species" in entry).toBe(false);
+      expect(entry.runtimeUrl).toBe("http://127.0.0.1:7830");
+      expect(entry.resources.instanceDir).toBe(path.join(cadetRoot, "assistants", "grand-ram"));
+      expect(entry.baseDataDir).toBe(path.join(cadetRoot, "assistants", "grand-ram"));
+      expect("organizationId" in entry).toBe(false);
+      expect("platformAssistantId" in entry).toBe(false);
+      expect("platformBaseUrl" in entry).toBe(false);
+      expect("platformOrganizationId" in entry).toBe(false);
+      // Unknown/sensitive fields ride through untouched.
+      expect(entry.signingKey).toBe("signing-key-material");
+      expect(lockRaw.activeAssistant).toBe("grand-ram");
+
+      // ── The instance dir: renamed out of the brand prefix. ──
+      expect(await exists(path.join(cadetRoot, "assistants", "grand-ram"))).toBe(true);
+      expect(await exists(path.join(cadetRoot, "assistants", "vellum-grand-ram"))).toBe(false);
+
+      // ── The encrypted store: vellum entries gone, the BYOK key kept. ──
+      const storeRaw = JSON.parse(
+        await fs.readFile(
+          path.join(cadetRoot, "assistants", "grand-ram", "ces-security", "keys.enc"),
+          "utf8",
+        ),
+      );
+      expect(Object.keys(storeRaw.entries)).toEqual(["credential/anthropic/api_key"]);
+      const credStep = report.steps.find((s) => s.step === "migrate-credentials");
+      expect(credStep?.data?.["detected"]).toBe(true);
+      expect(credStep?.data?.["entriesRemoved"]).toBe(2);
+
+      // ── The login step: detection fired → the login ran. ──
+      expect(logins).toBe(1);
+      const loginStep = report.steps.find((s) => s.step === "cadet-login");
+      expect(loginStep?.status).toBe("completed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgDataHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+
+  test("no legacy credentials detected → cadet-login skips", async () => {
+    const { root, home } = await buildMinimal();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const prevHome = process.env.HOME;
+    const prevXdgDataHome = process.env.XDG_DATA_HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    let logins = 0;
+    const ops: ProcessOps = {
+      ...noopOps,
+      async cadetLogin() {
+        logins++;
+      },
+    };
+    try {
+      // A lockfile with NO vellum cloud identity and no encrypted store.
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify(
+          {
+            assistants: [
+              {
+                assistantId: "velly",
+                cloud: "local",
+                resources: {
+                  instanceDir: path.join(root),
+                  gatewayPort: 7830,
+                  daemonPort: 7821,
+                },
+              },
+            ],
+            activeAssistant: "velly",
+          },
+          null,
+          2,
+        ),
+      );
+      const report = await migrate({ vellumRoot: root, processOps: ops });
+      expect(report.ok).toBe(true);
+      const credStep = report.steps.find((s) => s.step === "migrate-credentials");
+      expect(credStep?.status).toBe("skipped");
+      const loginStep = report.steps.find((s) => s.step === "cadet-login");
+      expect(loginStep?.status).toBe("skipped");
+      expect(logins).toBe(0);
+      // The lockfile conversion still ran — the assistant rides along.
+      const lockRaw = JSON.parse(
+        await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+      );
+      expect(lockRaw.assistants[0].assistantId).toBe("velly");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgDataHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+
+  test("cleans the retired manifests and drops the vellum- prefix from retired file names", async () => {
+    const { root, home } = await buildModernVellum(undefined, "vellum", "vellum-grand-ram");
+    const retiredDir = path.join(root, "retired");
+    await fs.mkdir(retiredDir, { recursive: true });
+
+    // A retired manifest, exactly as vellum's retire wrote it: the full
+    // entry, stale values included.
+    await fs.writeFile(
+      path.join(retiredDir, "vellum-old-duck.json"),
+      JSON.stringify(
+        {
+          assistantId: "vellum-old-duck",
+          name: "vellum-old-duck",
+          cloud: "local",
+          runtimeUrl: "http://MacBook-Pro-8.local:7830",
+          species: "cinderling",
+          baseDataDir: String(root),
+          resources: {
+            instanceDir: path.join(root, "assistants", "vellum-old-duck"),
+            gatewayPort: 7830,
+            daemonPort: 7821,
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Its archive, vellum-prefixed like the manifest.
+    const scratch = path.join(retiredDir, "vellum-old-duck.staging");
+    await fs.mkdir(path.join(scratch, "workspace"), { recursive: true });
+    await fs.writeFile(path.join(scratch, "workspace", "note.txt"), "vellum://a.png\n");
+    const run = promisify(execFileCb);
+    await run("tar", ["-czf", path.join(retiredDir, "vellum-old-duck.tar.gz"), "-C", scratch, "."]);
+    await fs.rm(scratch, { recursive: true, force: true });
+
+    const cadetRoot = path.join(home, ".local", "share", "cadet");
+    const prevHome = process.env.HOME;
+    const prevXdgDataHome = process.env.XDG_DATA_HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    try {
+      const report = await migrate({ vellumRoot: root, processOps: noopOps });
+      expect(report.ok).toBe(true);
+
+      // ── The retired files: renamed out of the brand prefix. ──
+      expect(await exists(path.join(cadetRoot, "retired", "old-duck.json"))).toBe(true);
+      expect(await exists(path.join(cadetRoot, "retired", "old-duck.tar.gz"))).toBe(true);
+      expect(await exists(path.join(cadetRoot, "retired", "vellum-old-duck.json"))).toBe(false);
+      expect(await exists(path.join(cadetRoot, "retired", "vellum-old-duck.tar.gz"))).toBe(false);
+
+      // ── The manifest: every stale value fixed. ──
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(cadetRoot, "retired", "old-duck.json"), "utf8"),
+      );
+      expect(manifest.assistantId).toBe("old-duck");
+      expect(manifest.name).toBe("old-duck");
+      expect("species" in manifest).toBe(false);
+      expect(manifest.runtimeUrl).toBe("http://127.0.0.1:7830");
+      expect(manifest.resources.instanceDir).toBe(
+        path.join(cadetRoot, "assistants", "old-duck"),
+      );
+      // baseDataDir ends with the assistant's name, not /vellum.
+      expect(manifest.baseDataDir).toBe(path.join(cadetRoot, "assistants", "old-duck"));
+
+      const retired = report.steps.find((s) => s.step === "migrate-retired");
+      expect(retired?.summary).toContain("1 cleaned, 2 renamed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgDataHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+
+  test("re-running on an already-migrated root heals the lockfile and retired manifests", async () => {
+    const { root, home } = await buildModernVellum(undefined, "vellum", "vellum-grand-ram");
+    const state = path.join(root, "assistants", "vellum-grand-ram", ".vellum");
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const prevHome = process.env.HOME;
+    const prevXdgDataHome = process.env.XDG_DATA_HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    let logins = 0;
+    const ops: ProcessOps = {
+      ...noopOps,
+      async cadetLogin() {
+        logins++;
+      },
+    };
+    try {
+      // The vellum install a re-run sees: the lockfile (with its cloud
+      // registration — the vellum root is never mutated) and an unscrubbed
+      // encrypted store.
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify(
+          {
+            assistants: [
+              {
+                assistantId: "vellum-grand-ram",
+                cloud: "local",
+                platformAssistantId: "pa_vellum_1",
+                resources: {
+                  instanceDir: path.join(root, "assistants", "vellum-grand-ram"),
+                  gatewayPort: 7830,
+                  daemonPort: 7821,
+                },
+              },
+            ],
+            activeAssistant: "vellum-grand-ram",
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.mkdir(path.join(state, "protected"), { recursive: true });
+      await fs.writeFile(
+        path.join(state, "protected", "keys.enc"),
+        JSON.stringify(
+          { version: 2, entries: { "credential/vellum/webhook_secret": { iv: "dd", tag: "ee", data: "ff" } } },
+          null,
+          2,
+        ),
+      );
+
+      const first = await migrate({ vellumRoot: root, processOps: ops });
+      expect(first.ok).toBe(true);
+      expect(await exists(path.join(home, ".config", "cadet", "lockfile.json"))).toBe(true);
+
+      // Remove the migrated lockfile to simulate an install that predates
+      // the conversion — the re-run must heal it.
+      await fs.rm(path.join(home, ".config", "cadet", "lockfile.json"));
+
+      const second = await migrate({ vellumRoot: root, processOps: ops });
+      expect(second.ok).toBe(true);
+      expect(second.mode).toBe("verify-only");
+
+      // The fix steps ran on the already-migrated path…
+      const lockStep = second.steps.find((s) => s.step === "migrate-lockfile");
+      expect(lockStep?.status).toBe("completed");
+      expect(
+        await exists(path.join(home, ".config", "cadet", "lockfile.json")),
+      ).toBe(true);
+      const credStep = second.steps.find((s) => s.step === "migrate-credentials");
+      expect(credStep?.status).toBe("skipped"); // already scrubbed on run 1
+
+      // …and the retired manifests were already cleaned on run 1.
+      const retiredStep = second.steps.find((s) => s.step === "migrate-retired");
+      expect(retiredStep?.status).toBe("skipped");
+
+      // Run 1 logged in (cloud registration detected); run 2's fresh
+      // lockfile conversion re-detected it and logged in again.
+      expect(logins).toBe(2);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgDataHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+});

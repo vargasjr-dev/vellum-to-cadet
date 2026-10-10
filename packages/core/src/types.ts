@@ -117,6 +117,12 @@ export interface ProcessOps {
   installCadet(): Promise<void>;
   /** Wake every cadet assistant (`cadet wake --all`). */
   cadetWakeAll(): Promise<void>;
+  /**
+   * Run the cadet CLI's interactive cloud login (browser PKCE), so the
+   * migrated assistants get fresh cloud credentials when the vellum ones
+   * were removed. stdio is inherited — the user completes the flow.
+   */
+  cadetLogin(): Promise<void>;
   /** True when the `cadet` binary resolves on PATH (`cadet --version`). */
   cadetBinAvailable(): Promise<boolean>;
   /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */

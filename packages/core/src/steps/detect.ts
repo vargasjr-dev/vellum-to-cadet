@@ -215,6 +215,36 @@ async function lockfileCandidates(): Promise<string[]> {
 }
 
 /**
+ * Read the FIRST existing vellum lockfile as raw JSON — unknown fields
+ * intact, priority order the same one the vellum CLI reads in. Returns null
+ * when no candidate exists or none parses. The lockfile conversion uses
+ * this (not readLockfileEntries, which narrows to a few fields) so the
+ * cadet lockfile it writes preserves every field the entry carried.
+ */
+export async function readRawVellumLockfile(): Promise<{
+  path: string;
+  data: Record<string, unknown>;
+} | null> {
+  for (const candidate of await lockfileCandidates()) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(candidate, "utf8");
+    } catch {
+      continue;
+    }
+    try {
+      const data = JSON.parse(raw) as Record<string, unknown>;
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        return { path: candidate, data };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
  * Read every assistant entry the vellum lockfiles record — the same record
  * `vellum ps` is derived from. Best-effort: missing, malformed, or lockless
  * installs yield nothing.

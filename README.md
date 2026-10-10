@@ -36,9 +36,8 @@ the `uninstall` subcommand to retire vellum for good).
 ## Guarantees
 
 - The vellum root is a **read-only source of truth**: nothing in it is ever
-  modified or deleted by this tool.
-- A timestamped full backup with a sha256 manifest is written to
-  `~/.cadet-migration-backups/<timestamp>` (cadet side) before any migration.
+  modified or deleted by this tool — the original IS the backup, so no
+  separate backup copy is made.
 - `.cadet-migration-manifest.json` in the cadet root records what happened and
   makes re-runs verify-only.
 - Running vellum assistant processes are stopped automatically before the
