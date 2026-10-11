@@ -300,6 +300,18 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)}KB`;
   return `${bytes}B`;
 }
+
+/**
+ * Byte progress for a long transfer: `1.2GB/4.0GB (30%)` when the total is
+ * known, bytes-so-far when it is not (the size pre-pass failed).
+ */
+export function formatProgress(bytes: number, totalBytes?: number): string {
+  if (totalBytes !== undefined && totalBytes > 0) {
+    const pct = Math.min(100, Math.floor((bytes / totalBytes) * 100));
+    return `${formatBytes(bytes)}/${formatBytes(totalBytes)} (${pct}%)`;
+  }
+  return formatBytes(bytes);
+}
 /**
  * Precise legacy-token rewrites for machine-ish text that embeds history:
  * links, channel values, moved paths, env names, npm scope. A quoted

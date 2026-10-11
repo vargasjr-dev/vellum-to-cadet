@@ -9,13 +9,25 @@ import { createInterface } from "node:readline/promises";
 
 import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon, warnText } from "./colors.js";
 import { errPath } from "./steps/migrate-layout.js";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync as fsExistsSync } from "node:fs";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { appendFileSync, existsSync as fsExistsSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { promises as fsPromises } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import * as os from "node:os";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
+import { formatProgress } from "./fs-utils.js";
 import { migrate, repair } from "./runner.js";
 import { renderUninstallHuman, runUninstall } from "./uninstall.js";
 import { toCadetRoot } from "./steps/detect.js";
+import {
+  acquireRunLock,
+  newRunLogPath,
+  pidAlive,
+  readRunLock,
+  releaseRunLock,
+  runLockPath,
+  type RunLockInfo,
+} from "./run-log.js";
 import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepItemEvent, type StepResult } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
@@ -26,6 +38,14 @@ interface ParsedArgs extends MigrateOptions {
   repair: boolean;
   /** True when invoked as `uninstall [flags]` (point of no return). */
   uninstall: boolean;
+  /** Run in this process (opt out of detaching — no relay, live TTY progress). */
+  foreground: boolean;
+  /** --internal-run: this process IS the detached migration (its stdio is the run-log). */
+  internalRun: boolean;
+  /** The run-log path handed down by the detaching parent (--run-log). */
+  runLog?: string;
+  /** The lock file handed down by the detaching parent (--internal-lock). */
+  internalLock?: string;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -36,6 +56,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     cadetRootExplicit: false,
     repair: false,
     uninstall: false,
+    foreground: false,
+    internalRun: false,
   };
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -56,6 +78,22 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--verbose":
         parsed.verbose = true;
+        break;
+      case "--foreground":
+        parsed.foreground = true;
+        break;
+      // Internal: the detaching parent hands these to the detached child.
+      case "--run-log":
+        parsed.runLog = requireValue(argv[++i], arg);
+        break;
+      case "--internal-run":
+        parsed.internalRun = true;
+        break;
+      case "--internal-lock":
+        parsed.internalLock = requireValue(argv[++i], arg);
+        break;
+      case "--internal-vellum-root":
+        parsed.vellumRoot = requireValue(argv[++i], arg);
         break;
       case "--help":
       case "-h":
@@ -119,6 +157,8 @@ Flags:
   --yes                    Non-interactive; assume yes
   --json                   Machine-readable JSON report on stdout
   --verbose                Log every step to stderr
+  --foreground             Run in this process (default: detached — survives
+                           disconnects; logs: ~/.cadet-migration-logs/)
   -h, --help               Show this help
 
 Repair mode re-runs the idempotent value steps (content rewrites + db value
@@ -200,21 +240,28 @@ function stepIcon(status: StepResult["status"]): string {
  * Live step progress on stderr: a pending line the moment a step starts,
  * replaced in place by the completed line (icon + summary + issues) when it
  * finishes. Steps can stream nested items (e.g. each retired archive) that
- * open their own pending line under the step and resolve in place. Only when
- * stderr is a TTY — piped runs and --json keep their output contracts
- * untouched.
+ * open their own pending line under the step and resolve in place.
+ *
+ * mode "auto" (default): only when stderr is a TTY — piped runs and --json
+ * keep their output contracts untouched.
+ * mode "log": always print, APPEND-ONLY — the detached child writes to the
+ * run-log file, where cursor math is useless; every line lands under
+ * `tail -f`, with progress lines throttled so the log stays readable.
  */
-function createLiveProgress(): {
+function createLiveProgress(mode: "auto" | "log" = "auto"): {
   onStepStart: (step: string) => void;
   onStepDone: (result: StepResult) => void;
   onStepItem: (step: string, item: StepItemEvent) => void;
   /** Clear a dangling pending line before the final summary prints. */
   finish: () => void;
 } {
-  const live = Boolean(process.stderr.isTTY);
+  const live = mode === "log" ? true : Boolean(process.stderr.isTTY);
+  const appendOnly = mode === "log";
   let pending = false;
   let openItems = 0; // nested item lines still pending
   let itemLines = 0; // nested item lines written for the current step
+  let lastProgressSummary = "";
+  let lastProgressAt = 0;
   const eraseLines = (n: number): void => {
     for (let i = 0; i < n; i++) process.stderr.write("\u001b[1A\u001b[2K");
   };
@@ -239,6 +286,24 @@ function createLiveProgress(): {
     },
     onStepItem: (step, item) => {
       if (!live || !pending) return;
+      if (item.status === "progress" && item.progress) {
+        const summary = progressSummary(item.progress);
+        if (summary === lastProgressSummary) return;
+        if (appendOnly) {
+          // A log file: one line per meaningful change, throttled, keeps
+          // `tail -f` readable instead of a line per 300ms tick.
+          if (Date.now() - lastProgressAt < 2000) return;
+          lastProgressAt = Date.now();
+          lastProgressSummary = summary;
+          process.stderr.write(`    ${detail("·")} ${item.name} … ${summary}\n`);
+        } else {
+          // TTY: the open item's line is the last one written — rewrite it
+          // in place with the fresh counts.
+          process.stderr.write("\u001b[1A\u001b[2K");
+          process.stderr.write(`    ${detail("·")} ${item.name} … ${summary}\n`);
+        }
+        return;
+      }
       if (item.status === "started") {
         process.stderr.write(`    ${detail("·")} ${item.name} …\n`);
         openItems++;
@@ -290,6 +355,188 @@ function stepLines(result: StepResult): string[] {
 /** Nested bullet for a step issue: red ! for errors, yellow ⚠ for warnings, dim · for info. */
 function issueIcon(severity: StepIssue["severity"]): string {
   return severity === "error" ? colors.red("!") : severity === "warning" ? colors.yellow("⚠") : detail("·");
+}
+
+/** `1.2GB/4.0GB (30%)` with an optional volume label. */
+function progressSummary(p: NonNullable<StepItemEvent["progress"]>): string {
+  const size = formatProgress(p.bytes, p.totalBytes);
+  return p.label ? `${p.label} ${size}` : size;
+}
+
+/** Already-running banner: who owns the run lock, and how to watch it. */
+function printAlreadyRunning(lock: RunLockInfo): void {
+  console.error(warnText(`  ⚠ a migration is already running (pid ${lock.pid}${lock.startedAt ? `, started ${lock.startedAt}` : ""})`));
+  console.error(`    logs: ${lock.logPath}`);
+  console.error(`    ${detail("follow along:")} tail -f ${lock.logPath}`);
+}
+
+/** The started line: icon + padded label + text, matching the step lines' shape. */
+function printStarted(pid: number, logPath: string): void {
+  process.stdout.write(`  ${successIcon()} ${"started".padEnd(20)} Begun migration at pid ${pid}, logs: ${logPath}\n`);
+  process.stdout.write(`  ${detail("└─ the migration survives disconnects — follow along with:")} tail -f ${logPath}\n`);
+}
+
+/**
+ * The default `migrate` flow (v0.0.12 run feedback: the SSH session died
+ * mid fetch-docker-volumes and took the migration with it). The heavy work
+ * runs in a DETACHED child that survives disconnects; this process
+ * resolves the vellum root while the terminal is still attached (a
+ * multi-root prompt needs stdin, which the detached child will not have),
+ * takes the run lock, prints the started line with the child's pid + the
+ * run-log path, then relays the log to stdout until the child exits —
+ * with the session gone, the log file is the migration's tail-able record.
+ */
+async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
+  const lockPath = runLockPath();
+
+  // An already-running migration wins: point at it and get out.
+  const existing = await readRunLock(lockPath);
+  if (existing && pidAlive(existing.pid)) {
+    printAlreadyRunning(existing);
+    return EXIT_CODES.alreadyRunning;
+  }
+
+  // Resolve the vellum root HERE — interactively, while stdin still works.
+  let resolved: string;
+  try {
+    resolved = await resolveRoot();
+  } catch (err) {
+    console.error(errorText(`could not determine which vellum installation to migrate: ${(err as Error).message}`));
+    return EXIT_CODES.ambiguousRoot;
+  }
+  if (resolved === "") {
+    const searched = candidateRoots().map((c) => c.root).join(", ");
+    console.error(errorText(`no vellum installation found (searched: ${searched})`));
+    return EXIT_CODES.nothingToMigrate;
+  }
+  parsed.vellumRoot = resolved;
+  if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
+
+  const logPath = newRunLogPath();
+  const startedAt = new Date().toISOString();
+  if (!(await acquireRunLock(lockPath, { pid: process.pid, startedAt, logPath }))) {
+    const holder = await readRunLock(lockPath);
+    if (holder) printAlreadyRunning(holder);
+    return EXIT_CODES.alreadyRunning;
+  }
+
+  // Re-exec this same entry fully detached. Both the published alias shim
+  // and dist/cli.js are plain node entry points; --internal-run stops the
+  // child from detaching again. The log file doubles as the child's
+  // stdout + stderr, so every line the child prints lands in the log.
+  const entry = process.argv[1];
+  if (!entry) {
+    console.error(errorText("could not resolve the CLI entry point to detach"));
+    await releaseRunLock(lockPath, process.pid);
+    return EXIT_CODES.migrationFailed;
+  }
+  const logFd = openSync(logPath, "a");
+  const child = spawn(
+    process.execPath,
+    [
+      entry,
+      ...process.argv.slice(2),
+      "--internal-run",
+      "--run-log",
+      logPath,
+      "--internal-lock",
+      lockPath,
+      "--internal-vellum-root",
+      resolved,
+    ],
+    { detached: true, stdio: ["ignore", logFd, logFd] },
+  );
+  child.unref();
+
+  // The child outlives this process (that is the point) — the lock must
+  // name IT, so a re-run while the relay is dead still finds the owner.
+  await fsPromises.writeFile(
+    lockPath,
+    JSON.stringify({ pid: child.pid ?? process.pid, startedAt, logPath } satisfies RunLockInfo),
+  );
+
+  printStarted(child.pid ?? process.pid, logPath);
+  const code = await relayChild(logPath, child);
+  await releaseRunLock(lockPath, child.pid ?? -1);
+  return code;
+}
+
+/**
+ * Relay the detached child's run-log to this process's stdout until the
+ * child exits — the caller sees the migration as if it ran in-process,
+ * while the child itself is immune to the SSH session dying. Reads by
+ * byte offset (the file is appended by another process) with a final
+ * drain after the child closes.
+ */
+async function relayChild(logPath: string, child: ChildProcess): Promise<number> {
+  let exitCode: number | null = null;
+  const exited = new Promise<number>((resolve) => {
+    child.on("error", () => resolve(EXIT_CODES.migrationFailed));
+    child.on("close", (code) => resolve(code ?? EXIT_CODES.migrationFailed));
+  });
+  let offset = 0;
+  for (;;) {
+    await drainLog();
+    if (exitCode !== null) return exitCode;
+    const winner = await Promise.race([
+      exited.then((code) => ({ done: true as const, code })),
+      new Promise<{ done: false }>((r) => setTimeout(() => r({ done: false }), 200)),
+    ]);
+    if (winner.done) exitCode = winner.code;
+  }
+
+  async function drainLog(): Promise<void> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await fsPromises.open(logPath, "r");
+      const { size } = await handle.stat();
+      if (size <= offset) return;
+      const buffer = Buffer.alloc(size - offset);
+      await handle.read(buffer, 0, buffer.length, offset);
+      offset += buffer.length;
+      process.stdout.write(buffer);
+    } catch {
+      // The log file may not exist yet (child still spinning up).
+    } finally {
+      await handle?.close();
+    }
+  }
+}
+
+/** Sync exit-handler lock release — 'exit' handlers must not await. */
+function releaseLockOnExit(lockPath: string): void {
+  process.on("exit", () => {
+    try {
+      const holder = JSON.parse(readFileSync(lockPath, "utf8")) as RunLockInfo;
+      if (holder.pid === process.pid) unlinkSync(lockPath);
+    } catch {
+      // Nothing to release (never acquired, or already broken by a re-run).
+    }
+  });
+}
+
+/**
+ * Mirror every stdout/stderr write into the run-log (--foreground mode).
+ * Cursor-movement escapes are stripped so the file reads as clean lines —
+ * a disconnect kills a foreground run, but not its record.
+ */
+function teeProcessOutput(logPath: string): void {
+  const stripCursorCodes = (chunk: string | Uint8Array): string => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return text.replace(/\u001b\[\d*[A-K]/g, "");
+  };
+  for (const stream of [process.stdout, process.stderr]) {
+    const original = stream.write.bind(stream) as (chunk: string | Uint8Array, cb?: () => void) => boolean;
+    stream.write = ((chunk: string | Uint8Array, ...rest: unknown[]): boolean => {
+      try {
+        appendFileSync(logPath, stripCursorCodes(chunk));
+      } catch {
+        // The log is best-effort — never block the run on it.
+      }
+      const cb = [...rest].reverse().find((r): r is () => void => typeof r === "function");
+      return original(chunk, cb);
+    }) as typeof stream.write;
+  }
 }
 
 function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boolean }): string {
@@ -535,38 +782,98 @@ async function main(): Promise<number> {
     }
   }
 
-  // Discover the vellum root.
-  let resolved: string;
-  try {
-    resolved = await resolveRoot();
-  } catch (err) {
-    // No way to ask the user which root to migrate.
-    if (parsed.json) {
-      process.stdout.write(
-        `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.ambiguousRoot, error: (err as Error).message }, null, 2)}\n`,
-      );
-    } else {
-      console.error(errorText(`could not determine which vellum installation to migrate: ${(err as Error).message}`));
-    }
-    return EXIT_CODES.ambiguousRoot;
+  // The default run DETACHES (v0.0.12 run feedback: the SSH session died
+  // mid fetch-docker-volumes and took the migration with it). --json
+  // (scripts parse this process's stdout), --dry-run (read-only, quick),
+  // --foreground (opt back into the old in-process behavior) and
+  // --internal-run (this IS the detached child) stay here.
+  if (!parsed.json && !parsed.dryRun && !parsed.foreground && !parsed.internalRun) {
+    return await detachedMigrate(parsed);
   }
-  if (resolved === "") {
-    const searched = candidateRoots().map((c) => c.root).join(", ");
-    const message = `no vellum installation found (searched: ${searched})`;
-    if (parsed.json) {
-      process.stdout.write(
-        `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched: candidateRoots() }, null, 2)}\n`,
-      );
-    } else {
-      console.error(errorText(message));
+
+  // Foreground runs tee everything into a run-log too — a disconnect
+  // kills the run, but not its record.
+  if (parsed.foreground && !parsed.json && !parsed.runLog) {
+    parsed.runLog = newRunLogPath();
+    teeProcessOutput(parsed.runLog);
+  }
+
+  // Discover the vellum root — except for the detached child, which was
+  // handed the resolved one (discovery ran in the parent, where prompts
+  // still had a terminal).
+  let resolved: string;
+  if (parsed.internalRun && parsed.vellumRoot) {
+    resolved = parsed.vellumRoot;
+  } else {
+    try {
+      resolved = await resolveRoot();
+    } catch (err) {
+      // No way to ask the user which root to migrate.
+      if (parsed.json) {
+        process.stdout.write(
+          `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.ambiguousRoot, error: (err as Error).message }, null, 2)}\n`,
+        );
+      } else {
+        console.error(errorText(`could not determine which vellum installation to migrate: ${(err as Error).message}`));
+      }
+      return EXIT_CODES.ambiguousRoot;
     }
-    return EXIT_CODES.nothingToMigrate;
+    if (resolved === "") {
+      const searched = candidateRoots().map((c) => c.root).join(", ");
+      const message = `no vellum installation found (searched: ${searched})`;
+      if (parsed.json) {
+        process.stdout.write(
+          `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched: candidateRoots() }, null, 2)}\n`,
+        );
+      } else {
+        console.error(errorText(message));
+      }
+      return EXIT_CODES.nothingToMigrate;
+    }
   }
   parsed.vellumRoot = resolved;
   if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
 
-  const live = !parsed.json && !parsed.verbose && Boolean(process.stderr.isTTY);
-  const progress = createLiveProgress();
+  // The run lock: one migration at a time. The detached child's parent
+  // already took it (the path was handed down via --internal-lock); every
+  // other real run takes it here and releases it on exit. --dry-run
+  // touches nothing and skips it.
+  if (!parsed.dryRun) {
+    const lockPath = parsed.internalLock ?? runLockPath();
+    if (parsed.internalRun) {
+      releaseLockOnExit(lockPath);
+    } else {
+      const acquired = await acquireRunLock(lockPath, {
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        logPath: parsed.runLog ?? "(in-process run)",
+      });
+      if (!acquired) {
+        const holder = await readRunLock(lockPath);
+        if (parsed.json) {
+          process.stdout.write(
+            `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.alreadyRunning, error: `a migration is already running (pid ${holder?.pid ?? "unknown"})` }, null, 2)}\n`,
+          );
+        } else if (holder) {
+          printAlreadyRunning(holder);
+        }
+        return EXIT_CODES.alreadyRunning;
+      }
+      releaseLockOnExit(lockPath);
+    }
+  }
+
+  // The started line: the detach flow prints it from the parent; a
+  // foreground run prints it here (its own pid, its own log path).
+  if (parsed.foreground && !parsed.json && parsed.runLog) {
+    printStarted(process.pid, parsed.runLog);
+  }
+
+  // The detached child renders in LOG mode: its stderr IS the run-log
+  // file, so lines append (no cursor math) and progress stays tail-able.
+  const logMode = parsed.internalRun === true;
+  const live = !parsed.json && !parsed.verbose && (logMode || Boolean(process.stderr.isTTY));
+  const progress = createLiveProgress(logMode ? "log" : "auto");
   try {
     const report = await migrate({
       ...parsed,

@@ -11,7 +11,7 @@ import {
 import { handleToInstanceName } from "../layout.js";
 import { findStateDbs } from "./migrate-assistant-db.js";
 import { dbVellumRows, VALUE_MIGRATED_DBS } from "./verify.js";
-import type { ProcessOps, StepIssue, StepResult } from "../types.js";
+import type { ProcessOps, StepIssue, StepItemEvent, StepResult } from "../types.js";
 
 /**
  * Docker deployments keep the assistant's real data in docker volumes —
@@ -70,7 +70,7 @@ export interface DockerVolumeFlowOptions {
   images: ReadonlyArray<string>;
   /** Scratch root the extracted trees live under. */
   workRoot: string;
-  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void;
+  onItem?: (item: StepItemEvent) => void;
 }
 
 /** The docker daemon unreachable warning, word-for-word in fetch and load. */
@@ -113,7 +113,11 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
       for (const vol of dockerVolumes(instanceId, migratedName)) {
         const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
         await fs.mkdir(extractDir, { recursive: true });
-        await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0]);
+        await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0], (bytes, totalBytes) => {
+          // Byte progress rides the item events — the renderer refreshes
+          // the instance's nested line (`workspace 1.2GB/4.0GB (30%)`).
+          opts.onItem?.({ name: instanceId, status: "progress", progress: { bytes, totalBytes, label: vol.kind } });
+        });
         extracted.push(vol.kind);
         if (vol.kind === "workspace") {
           rewrittenFiles += await applyWorkspaceContentTransforms(extractDir);
@@ -205,7 +209,9 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
       for (const vol of dockerVolumes(instanceId, migratedName)) {
         const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
         if (!(await exists(extractDir))) continue; // fetch failed for this kind — already warned
-        await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0]);
+        await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0], (bytes, totalBytes) => {
+          opts.onItem?.({ name: instanceId, status: "progress", progress: { bytes, totalBytes, label: vol.kind } });
+        });
         loaded++;
       }
       const summary = `${loaded} cadet volume(s) written`;
