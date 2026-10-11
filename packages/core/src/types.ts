@@ -105,9 +105,13 @@ export interface MigrateOptions {
   onStepItem?: (step: string, item: StepItemEvent) => void;
   /**
    * Test seam: override the docker volume ops (volume → dir and dir →
-   * volume copies). Defaults to the real docker CLI via temp containers.
+   * volume copies, plus the size/free-space probes preflight's disk guard
+   * reads). Defaults to the real docker CLI via temp containers.
    */
-  dockerOps?: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
+  dockerOps?: Pick<
+    ProcessOps,
+    "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable" | "dockerVolumeSize" | "dockerDiskFree"
+  >;
 }
 
 /**
@@ -173,6 +177,30 @@ export interface ProcessOps {
   ): Promise<void>;
   /** True when the docker CLI has a usable daemon (`docker info` succeeds). */
   dockerAvailable(): Promise<boolean>;
+  /**
+   * A volume's content size in bytes (`du -sk` inside a throwaway container),
+   * or undefined when it cannot be measured — the progress denominator for
+   * the volume copies; preflight's disk guard sums these per instance.
+   */
+  dockerVolumeSize?(volume: string, image?: string): Promise<number | undefined>;
+  /**
+   * The docker daemon's free disk bytes (`df` inside a throwaway container —
+   * volumes live on the daemon's own filesystem, which host-side statfs
+   * cannot see), or undefined when it cannot be determined.
+   */
+  dockerDiskFree?(image?: string): Promise<number | undefined>;
+  /**
+   * A volume's content size in bytes (`du -sk` inside a throwaway container),
+   * or undefined when it cannot be measured — the progress denominator for
+   * the volume copies; preflight's disk guard sums these per instance.
+   */
+  dockerVolumeSize?(volume: string, image?: string): Promise<number | undefined>;
+  /**
+   * The docker daemon's free disk bytes (`df` inside a throwaway container —
+   * volumes live on the daemon's own filesystem, which host-side statfs
+   * cannot see), or undefined when it cannot be determined.
+   */
+  dockerDiskFree?(image?: string): Promise<number | undefined>;
   /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */
   npmGlobalRoot(): Promise<string | null>;
 }

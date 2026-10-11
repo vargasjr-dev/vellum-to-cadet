@@ -55,6 +55,11 @@ function dockerVolumes(rawInstanceId: string, migratedName: string) {
   ];
 }
 
+/** The three vellum-side volume names for one instance — preflight's disk guard measures these. */
+export function vellumVolumeNames(rawInstanceId: string): string[] {
+  return dockerVolumes(rawInstanceId, "").map((vol) => vol.from);
+}
+
 /** Where fetch-docker-volumes materializes a volume inside the instance's state-shaped scratch tree. */
 function extractedDir(workRoot: string, instanceId: string, stateDir: string): string {
   return path.join(workRoot, instanceId, stateDir);

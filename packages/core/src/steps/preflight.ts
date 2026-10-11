@@ -4,8 +4,9 @@ import { statfs as statfsPromises } from "node:fs/promises";
 import { promises as fs } from "node:fs";
 
 import { pathExists } from "./detect.js";
+import { vellumVolumeNames } from "./migrate-docker-volumes.js";
 import { formatBytes } from "../fs-utils.js";
-import type { DetectInfo, StepIssue, StepResult } from "../types.js";
+import type { DetectInfo, ProcessOps, StepIssue, StepResult } from "../types.js";
 
 /**
  * Preflight: everything that must be true before we touch a single byte.
@@ -13,7 +14,10 @@ import type { DetectInfo, StepIssue, StepResult } from "../types.js";
  */
 export async function preflight(
   detect: DetectInfo,
-  opts?: { skipDiskSpaceCheck?: boolean },
+  opts?: {
+    skipDiskSpaceCheck?: boolean;
+    dockerOps?: Pick<ProcessOps, "dockerAvailable" | "dockerVolumeSize" | "dockerDiskFree">;
+  },
 ): Promise<StepResult> {
   const issues: StepIssue[] = [];
 
@@ -35,6 +39,35 @@ export async function preflight(
       });
     } else if (free === null) {
       issues.push({ severity: "warning", message: "could not determine free disk space — continuing" });
+    }
+  }
+
+  // Docker installs keep the real data in volumes on the daemon's own
+  // filesystem, and load-docker-volumes writes a second, full copy of every
+  // volume while the vellum originals stay put (the untouched source of
+  // truth). When an assistant's data is more than ~half the daemon's disk,
+  // that copy cannot fit — the exact way the real runs died mid-load.
+  // Measure it here, before a single byte moves.
+  if (!opts?.skipDiskSpaceCheck && opts?.dockerOps && detect.docker.instances.length > 0) {
+    const dockerOps = opts.dockerOps;
+    if (await dockerOps.dockerAvailable()) {
+      const free = await dockerOps.dockerDiskFree?.();
+      if (free === undefined) {
+        issues.push({
+          severity: "warning",
+          message: "could not determine the docker daemon's free disk space — continuing",
+        });
+      } else {
+        const totalBytes = await dockerVolumeBytes(dockerOps, detect.docker.instances, detect.docker.images[0]);
+        if (totalBytes === null) {
+          issues.push({ severity: "warning", message: "could not measure the docker volume sizes — continuing" });
+        } else if (free < totalBytes * 1.2) {
+          issues.push({
+            severity: "error",
+            message: `insufficient docker disk space: need ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) for the ${formatBytes(totalBytes)} of docker volumes, have ${formatBytes(Math.floor(free))} — free space or grow the docker VM's disk (colima: colima start --edit and raise disk)`,
+          });
+        }
+      }
     }
   }
 
@@ -79,5 +112,26 @@ async function freeBytesFor(within: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Sum the vellum-side volume sizes across every docker instance — the data
+ * the load step duplicates onto the daemon's disk. Null when any volume
+ * cannot be measured (the guard then stands down with a warning).
+ */
+async function dockerVolumeBytes(
+  dockerOps: Pick<ProcessOps, "dockerVolumeSize">,
+  instances: readonly string[],
+  image?: string,
+): Promise<number | null> {
+  let total = 0;
+  for (const instanceId of instances) {
+    for (const volume of vellumVolumeNames(instanceId)) {
+      const size = await dockerOps.dockerVolumeSize?.(volume, image);
+      if (size === undefined) return null;
+      total += size;
+    }
+  }
+  return total;
 }
 

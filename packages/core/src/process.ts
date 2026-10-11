@@ -144,6 +144,37 @@ async function dockerVolumeSize(volume: string, image?: string): Promise<number 
   }
 }
 
+/**
+ * The docker daemon's free disk bytes, from `df` inside a throwaway
+ * container — docker volumes live on the daemon's own filesystem (under
+ * colima, a VM disk), which host-side statfs cannot see. Any failure just
+ * means the preflight disk guard can't run.
+ */
+async function dockerDiskFree(image?: string): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      ["run", "--rm", "--entrypoint", "df", image ?? VOLUME_HELPER_IMAGE, "-k", "-P", "/"],
+      { timeout: 15_000 },
+    );
+    return parseDfAvail(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The `Avail` column (1K blocks → bytes) of a `df -k -P` output — the row whose mount point is `/`. */
+export function parseDfAvail(stdout: string): number | undefined {
+  for (const line of stdout.trim().split("\n").reverse()) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length >= 4 && fields[fields.length - 1] === "/") {
+      const blocks = Number(fields[fields.length - 3]);
+      return Number.isFinite(blocks) && blocks >= 0 ? blocks * 1024 : undefined;
+    }
+  }
+  return undefined;
+}
+
 /** A host directory's size — the import direction's progress denominator. */
 async function dirSizeBytes(dir: string): Promise<number | undefined> {
   try {
@@ -333,6 +364,14 @@ export const defaultProcessOps: ProcessOps = {
     } catch {
       return false;
     }
+  },
+
+  async dockerVolumeSize(volume: string, image?: string) {
+    return dockerVolumeSize(volume, image);
+  },
+
+  async dockerDiskFree(image?: string) {
+    return dockerDiskFree(image);
   },
 
   async npmGlobalRoot() {

@@ -243,7 +243,10 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   }
 
   start("preflight");
-  const pre = await preflight(detect, { skipDiskSpaceCheck: options.skipDiskSpaceCheck });
+  const pre = await preflight(detect, {
+    skipDiskSpaceCheck: options.skipDiskSpaceCheck,
+    dockerOps: options.dockerOps ?? ops,
+  });
   done(pre);
   if (pre.status === "failed") {
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.preflightFailed);
