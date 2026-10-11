@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { discoverCadetRoots } from "./discover.js";
@@ -18,7 +19,13 @@ import {
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
-import { migrateDockerVolumes, verifyDockerVolumes } from "./steps/migrate-docker-volumes.js";
+import {
+  fetchDockerVolumes,
+  loadDockerVolumes,
+  migrateDockerAssistantDbs,
+  migrateDockerGatewayDbs,
+  verifyDockerVolumeData,
+} from "./steps/migrate-docker-volumes.js";
 import { readLockfileAssistants } from "./steps/detect.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
@@ -71,22 +78,22 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done({
     step: "detect",
     status: "completed",
-    // The root-level version is only known for some installs — and per-
-    // assistant versions can differ — so "version unknown" is noise: show
-    // the clause only when a version was actually determined. No parens:
-    // each assistant being migrates gets its own nested line (v0.0.10 run
-    // feedback — a parenthetical docker list read like an afterthought and
-    // hid the assistants).
+    // One root line, then one branch line per migrating assistant — the
+    // story reads top to bottom (v0.0.11 run feedback: the docker suffix
+    // crowded the root line and the nested line carried a whole sentence;
+    // the deployment kind belongs on the branch as a short "(docker)" tag,
+    // and the branch lines carry their own two-space indent — the
+    // renderers print summary continuations verbatim).
     summary: detect.vellumRootExists
       ? [
-          `vellum root at ${detect.vellumRoot} — ${detect.deploymentKind} install${detect.version ? `, version ${detect.version}` : ""}`,
+          `vellum root at ${detect.vellumRoot}`,
           ...detect.assistantHandles.map((handle, i) => {
             const last = i === detect.assistantHandles.length - 1 && detect.retiredCount === 0;
             const branch = last ? "└─" : "├─";
-            return `${branch} migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " — docker instance, data lives in docker volumes" : ""}`;
+            return `  ${branch} migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " (docker)" : ""}`;
           }),
           ...(detect.retiredCount > 0
-            ? [`└─ ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
+            ? [`  └─ ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
             : []),
         ].join("\n")
       : `no vellum root at ${detect.vellumRoot}`,
@@ -152,8 +159,44 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // cadet lockfile written, stale retired manifests, legacy credentials
   // kept) — then verify. The layout itself is never touched here.
   if (target.kind === "already-migrated") {
+    // A re-run after a failed docker migration (e.g. the v0.0.11 hang)
+    // heals the volumes too: fetch → the same value steps over the
+    // extracted trees → load, before the host-side fix steps below.
+    const reDockerFlow = detect.docker.instances.length > 0;
+    const reWorkRoot = reDockerFlow ? await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-")) : null;
+    if (reDockerFlow && reWorkRoot) {
+      start("fetch-docker-volumes");
+      done(
+        await fetchDockerVolumes({
+          dockerOps: options.dockerOps ?? ops,
+          instances: detect.docker.instances,
+          images: detect.docker.images,
+          workRoot: reWorkRoot,
+          onItem: onItem("fetch-docker-volumes"),
+        }),
+      );
+      start("migrate-assistant-db");
+      done(await migrateDockerAssistantDbs(detect.docker.instances, reWorkRoot, onItem("migrate-assistant-db")));
+      start("migrate-gateway-db");
+      done(await migrateDockerGatewayDbs(detect.docker.instances, reWorkRoot, onItem("migrate-gateway-db")));
+      start("load-docker-volumes");
+      done(
+        await loadDockerVolumes({
+          dockerOps: options.dockerOps ?? ops,
+          instances: detect.docker.instances,
+          images: detect.docker.images,
+          workRoot: reWorkRoot,
+          onItem: onItem("load-docker-volumes"),
+        }),
+      );
+    }
     start("migrate-credentials");
-    const reCredentials = await migrateCredentialsStep(detect.cadetRoot);
+    const reCredentials = await migrateCredentialsStep(
+      detect.cadetRoot,
+      reDockerFlow && reWorkRoot
+        ? detect.docker.instances.map((id) => path.join(reWorkRoot, id, "ces-sec"))
+        : undefined,
+    );
     done(reCredentials);
     // Same image-ref contract as the fresh path: when a cadet CLI is
     // present, its version derives the docker entries' cadet images.
@@ -177,7 +220,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     );
 
     start("verify");
-    done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
+    const reVerify = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
+    if (reDockerFlow && reWorkRoot) {
+      const volumeVerify = await verifyDockerVolumeData(detect.docker.instances, reWorkRoot);
+      reVerify.issues = [...(reVerify.issues ?? []), ...volumeVerify.issues];
+      reVerify.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
+    }
+    done(reVerify);
+    if (reWorkRoot) await fs.rm(reWorkRoot, { recursive: true, force: true });
 
     const reDetected =
       reCredentials.data?.["detected"] === true ||
@@ -235,60 +285,101 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.migrationFailed);
   }
 
-  // 3.5 Rewrite vellum-branded VALUES inside EVERY migrated assistant DB
-  // (channel ids, attachment links, the managed connection row). The root
-  // hosts one state tree per assistant, so the copy plan can carry several
-  // assistant dbs — each gets the rewrite (rewriting only the first left
-  // every later workspace branded; v0.0.9 run feedback). Destination paths
-  // come from the copy plan so every layout shape agrees.
+  // 3.5 Docker deployments keep the assistant's real data in docker
+  //     volumes (workspace, gateway security, CES security) — the host
+  //     root only carries the CLI's own state. Once detect says docker,
+  //     the SAME value steps below run over volume-extracted trees
+  //     instead of host directories — "the difference between volume or
+  //     directory" is confined to the fetch (extract) and load (import)
+  //     steps around them (v0.0.11 run feedback: the host-path db steps
+  //     ran first and failed before any volume work started).
+  const dockerOps = options.dockerOps ?? ops;
+  const dockerFlow = detect.docker.instances.length > 0;
+  const volumeWorkRoot = dockerFlow ? await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-")) : null;
+
+  // 3.6 Extract each instance's volumes and apply the workspace content
+  //     transforms in place — the docker analog of the copy phase.
+  if (dockerFlow) {
+    start("fetch-docker-volumes");
+    done(
+      await fetchDockerVolumes({
+        dockerOps,
+        instances: detect.docker.instances,
+        images: detect.docker.images,
+        workRoot: volumeWorkRoot!,
+        onItem: onItem("fetch-docker-volumes"),
+      }),
+    );
+  }
+
+  // 3.7 Rewrite vellum-branded VALUES inside EVERY migrated assistant DB
+  //     (channel ids, attachment links, the managed connection row). The
+  //     root hosts one state tree per assistant, so the copy plan can
+  //     carry several assistant dbs — each gets the rewrite (rewriting
+  //     only the first left every later workspace branded; v0.0.9 run
+  //     feedback). Destination paths come from the copy plan so every
+  //     layout shape agrees; the docker flow points the same step at the
+  //     extracted trees.
   const assistantDbDests = (mig.files ?? [])
     .filter((f) => stateRelativePath(f.src) === ASSISTANT_DB_STATE_REL)
     .map((f) => f.dest);
   start("migrate-assistant-db");
-  done(await migrateAssistantDb(detect, assistantDbDests));
+  done(
+    dockerFlow
+      ? await migrateDockerAssistantDbs(detect.docker.instances, volumeWorkRoot!, onItem("migrate-assistant-db"))
+      : await migrateAssistantDb(detect, assistantDbDests),
+  );
 
-  // 3.6 Same treatment for every gateway DB (its own contact/invite/request/
-  // delivery channel columns), destination paths from the plan.
+  // 3.8 Same treatment for every gateway DB (its own contact/invite/
+  //     request/delivery channel columns), destination paths from the
+  //     plan — or the extracted gateway-security trees on docker.
   const gatewayDbDests = (mig.files ?? [])
     .filter((f) => isGatewayDbStateRel(stateRelativePath(f.src)))
     .map((f) => f.dest);
   start("migrate-gateway-db");
-  done(await migrateGatewayDb(detect, gatewayDbDests));
+  done(
+    dockerFlow
+      ? await migrateDockerGatewayDbs(detect.docker.instances, volumeWorkRoot!, onItem("migrate-gateway-db"))
+      : await migrateGatewayDb(detect, gatewayDbDests),
+  );
 
-  // 3.7 Put the cadet CLI on the machine — EARLY, before the lockfile
-  //     conversion: the migrated docker entries must record the CADet image
-  //     refs for the installed cadet version (v0.0.10 run feedback: the
-  //     containerInfo pointed at the vellum images the containers ran
-  //     before). Its version is captured right after the install.
+  // 3.9 Remove the legacy vellum platform credentials from the migrated
+  //     tree — the cloud api key and webhook secret can't be kept; `cadet
+  //     login` (below, before wake) establishes fresh ones. The docker
+  //     flow scrubs the extracted CES-security trees alongside the root.
+  start("migrate-credentials");
+  const credentials = await migrateCredentialsStep(
+    detect.cadetRoot,
+    dockerFlow ? detect.docker.instances.map((id) => path.join(volumeWorkRoot!, id, "ces-sec")) : undefined,
+  );
+  done(credentials);
+
+  // 3.10 Write the migrated trees into the cadet volumes under the
+  //      migrated instance names.
+  if (dockerFlow) {
+    start("load-docker-volumes");
+    done(
+      await loadDockerVolumes({
+        dockerOps,
+        instances: detect.docker.instances,
+        images: detect.docker.images,
+        workRoot: volumeWorkRoot!,
+        onItem: onItem("load-docker-volumes"),
+      }),
+    );
+  }
+
+  // 4. Put the cadet CLI on the machine — before the lockfile conversion:
+  //    the migrated docker entries must record the CADet image refs for
+  //    the installed cadet version (v0.0.10 run feedback: the
+  //    containerInfo pointed at the vellum images the containers ran
+  //    before). Its version is captured right after the install.
   const assistantCount = (await readLockfileAssistants()).length;
   start("install-cadet");
   const install = await installCadetCli(ops, assistantCount);
   done(install);
   const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
   const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;
-
-  // 3.8 Docker deployments keep the assistant's real data in docker
-  //     volumes (workspace, gateway security, CES security) — the host
-  //     root only carries the CLI's own state. Extract each instance's
-  //     volumes, run the same value steps over them, and write them into
-  //     the cadet volumes under the migrated name (v0.0.10 run feedback:
-  //     every volume-data step failed against the host root).
-  start("migrate-docker-volumes");
-  const dockerVolumesResult = await migrateDockerVolumes({
-    ops,
-    dockerOps: options.dockerOps ?? ops,
-    instances: detect.docker.instances,
-    images: detect.docker.images,
-    onItem: onItem("migrate-docker-volumes"),
-  });
-  done(dockerVolumesResult);
-
-  // 3.9 Remove the legacy vellum platform credentials from the migrated
-  //     tree — the cloud api key and webhook secret can't be kept; `cadet
-  //     login` (below, before wake) establishes fresh ones.
-  start("migrate-credentials");
-  const credentials = await migrateCredentialsStep(detect.cadetRoot);
-  done(credentials);
 
   // 4. Convert the vellum lockfile into the cadet canonical config-dir
   //    lockfile (transformed entries, the path the cadet CLI reads), and
@@ -322,22 +413,22 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // 5. Verify against the vellum source. Findings are WARNINGS, not
   //    failures: the migration itself is complete, and residual branding in
   //    a cold corner of the data must not scare the user with exit code 7.
+  //    The docker flow folds the volume-data checks into the same step —
+  //    the extracted trees are exactly what load wrote into the cadet
+  //    volumes (v0.0.10 run feedback: the volume dbs and credential store
+  //    went unverified).
   start("verify");
-  done(await verify(detect.vellumRoot, detect.cadetRoot, targetCtx));
+  const verifyResult = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
+  if (dockerFlow) {
+    const volumeVerify = await verifyDockerVolumeData(detect.docker.instances, volumeWorkRoot!);
+    verifyResult.issues = [...(verifyResult.issues ?? []), ...volumeVerify.issues];
+    verifyResult.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
+  }
+  done(verifyResult);
 
-  // 5.5 Same verification for the docker volumes — the host-root verify
-  //     above never sees them (v0.0.10 run feedback: the volume dbs and
-  //     credential store went unverified).
-  start("verify-docker-volumes");
-  done(
-    await verifyDockerVolumes({
-      ops,
-      dockerOps: options.dockerOps ?? ops,
-      instances: detect.docker.instances,
-      images: detect.docker.images,
-      onItem: onItem("verify-docker-volumes"),
-    }),
-  );
+  // The extracted trees were verified and imported; the vellum volumes are
+  // the untouched source of truth, so the scratch copy can go.
+  if (volumeWorkRoot) await fs.rm(volumeWorkRoot, { recursive: true, force: true });
 
   start("cadet-login");
   done(

@@ -277,13 +277,13 @@ function createLiveProgress(): {
   };
 }
 
-/** A step's display lines: the step line, then nested summary lines indented. */
+/** A step's display lines: the step line, then the summary's continuation lines. */
 function stepLines(result: StepResult): string[] {
   const [first, ...rest] = result.summary.split("\n");
   const lines = [`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${first ?? ""}`];
-  for (const line of rest) {
-    lines.push(`    ${line}`);
-  }
+  // Continuation lines carry their own indent (the detect summary's
+  // per-assistant branches) — write them verbatim.
+  lines.push(...rest);
   return lines;
 }
 

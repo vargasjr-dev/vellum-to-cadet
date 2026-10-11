@@ -94,8 +94,20 @@ export async function scrubLegacyCredentials(cadetRoot: string): Promise<{
 }
 
 /** The migrate-credentials step: detect + remove legacy platform credentials. */
-export async function migrateCredentialsStep(cadetRoot: string): Promise<StepResult> {
-  const { scrub, issues } = await scrubLegacyCredentials(cadetRoot);
+export async function migrateCredentialsStep(
+  cadetRoot: string,
+  /** Extra trees to walk — the docker flow's extracted CES-security volumes. */
+  extraDirs?: ReadonlyArray<string>,
+): Promise<StepResult> {
+  const scrub: CredentialScrub = { storesScrubbed: 0, entriesRemoved: 0, detected: false };
+  const issues: StepIssue[] = [];
+  for (const dir of [cadetRoot, ...(extraDirs ?? [])]) {
+    const one = await scrubLegacyCredentials(dir);
+    scrub.storesScrubbed += one.scrub.storesScrubbed;
+    scrub.entriesRemoved += one.scrub.entriesRemoved;
+    scrub.detected ||= one.scrub.detected;
+    issues.push(...one.issues);
+  }
   if (!scrub.detected) {
     return {
       step: "migrate-credentials",

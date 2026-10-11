@@ -75,12 +75,11 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     // the clause is omitted unless a version was actually determined.
     const detectStep = report.steps.find((s) => s.step === "detect");
     expect(detectStep?.summary).not.toContain("version unknown");
-    // The install kind is environment-dependent for this desktop-shaped
-    // fixture: /.dockerenv wins over the marker check, so the same tree
-    // reports "docker" inside containers and "desktop" on a clean runner.
-    // Pin the version detection — the lockfile-driven docker path has its
-    // own dedicated test below.
-    expect(detectStep?.summary).toMatch(/(docker|desktop) install, version 0\.12\.6/);
+    // The root line carries NO install-kind suffix — the deployment kind
+    // rides the per-assistant branch lines as a "(docker)" tag instead
+    // (v0.0.11 run feedback: the suffix crowded the root line).
+    expect(detectStep?.summary.split("\n")[0]).toContain("vellum root at ");
+    expect(detectStep?.summary).not.toContain("install");
     // No backup step: the vellum root is never mutated, so the original IS
     // the backup — copying it would only double the disk bill.
     expect(report.steps.some((s) => s.step === "backup")).toBe(false);
@@ -679,11 +678,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       expect(report.detect.docker.instances).toEqual(["velly"]);
       expect(report.detect.docker.images).toEqual(["vellumai/vellum-assistant"]);
 
-      // The detect summary: no parenthetical — each migrating assistant
-      // gets its own nested line, docker ones marked as volume-backed.
+      // The detect summary: one root line, then one branch per migrating
+      // assistant — docker ones tagged (docker) (v0.0.11 run feedback).
       const detectStep = report.steps.find((s) => s.step === "detect");
-      expect(detectStep?.summary).not.toContain("(");
-      expect(detectStep?.summary).toContain(`└─ migrating assistant velly — docker instance, data lives in docker volumes`);
+      expect(detectStep?.summary.split("\n")[0]).toContain("vellum root at ");
+      expect(detectStep?.summary).toContain(`  └─ migrating assistant velly (docker)`);
+      expect(detectStep?.summary).not.toContain("docker instance");
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;

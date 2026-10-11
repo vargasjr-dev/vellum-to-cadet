@@ -1,5 +1,4 @@
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
 import {
@@ -11,19 +10,28 @@ import {
 } from "../fs-utils.js";
 import { handleToInstanceName } from "../layout.js";
 import { migrateAssistantDbAt, migrateGatewayDbAt } from "./migrate-assistant-db.js";
-import { scrubLegacyCredentials } from "./scrub-credentials.js";
 import { dbVellumRows, VALUE_MIGRATED_DBS } from "./verify.js";
 import type { ProcessOps, StepIssue, StepResult } from "../types.js";
 
 /**
  * Docker deployments keep the assistant's real data in docker volumes —
- * the host-side vellum root only carries the CLI's own state. The v0.0.10
- * run feedback: every data step (assistant db, gateway db, credentials)
- * failed against a docker install because the files were never on the
- * host, and verify never looked at the volumes either.
+ * the host-side vellum root only carries the CLI's own state. The flow is
+ * split so the SAME value steps run for local and docker installs — only
+ * the data surface differs (v0.0.11 run feedback: once detect said docker,
+ * the host-path db steps still ran first and failed, because the files
+ * were never on the host):
  *
- * This step moves that data for real. Volume names follow the same formula
- * on both sides (vellum 0.12.6 and cadet share the statefulset spec):
+ *   fetch-docker-volumes  — extract each instance's three volumes into a
+ *                           scratch tree and apply the workspace content
+ *                           transforms in place (the copy-phase analog)
+ *   migrate-assistant-db / migrate-gateway-db / migrate-credentials —
+ *                           the same steps as the local flow, pointed at
+ *                           the extracted trees
+ *   load-docker-volumes   — import the migrated trees into the cadet
+ *                           volumes under the migrated instance name
+ *
+ * Volume names follow the same formula on both sides (vellum 0.12.6 and
+ * cadet share the statefulset spec):
  *
  *   <instance>-workspace    → the workspace dir itself (config, data/, …)
  *   <instance>-gateway-sec  → the gateway security dir (db, trust rules, keys)
@@ -31,8 +39,7 @@ import type { ProcessOps, StepIssue, StepResult } from "../types.js";
  *
  * The vellum volumes are read under the RAW lockfile instance id
  * (`vellum-<name>`); the cadet volumes are written under the migrated
- * name (`<name>`). Extraction and import go through temp containers
- * (`docker create` + `docker cp`), so nothing needs to be running.
+ * name (`<name>`).
  */
 
 /** The three data volumes, vellum-side (raw instance id) and cadet-side (migrated name). */
@@ -44,33 +51,51 @@ function dockerVolumes(rawInstanceId: string, migratedName: string) {
   ];
 }
 
-/** State-relative form of a volume-relative path, for the transform matchers. */
-function stateRelFor(kind: "workspace" | "gateway-sec" | "ces-sec", rel: string): string {
-  if (kind === "workspace") return `workspace/${rel}`;
-  if (kind === "gateway-sec") return `protected/${rel}`;
-  return `protected/${rel}`;
+/** Where fetch-docker-volumes puts a volume's tree for an instance. */
+function extractedDir(
+  workRoot: string,
+  instanceId: string,
+  kind: "workspace" | "gateway-sec" | "ces-sec",
+): string {
+  return path.join(workRoot, instanceId, kind);
 }
 
-export interface DockerVolumeStepOptions {
-  ops: ProcessOps;
+/** Candidate assistant-db locations inside an extracted workspace volume. */
+const ASSISTANT_DB_CANDIDATES = ["data/db/assistant.db", "workspace/data/db/assistant.db"];
+
+/** Candidate gateway-db locations inside an extracted gateway-security volume. */
+const GATEWAY_DB_CANDIDATES = ["gateway.sqlite", "gateway-security/gateway.sqlite", "data/gateway.sqlite"];
+
+export type VolumeKind = "workspace" | "gateway-sec" | "ces-sec";
+
+export interface DockerVolumeFlowOptions {
   dockerOps: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
   /** The lockfile-tracked docker instance ids (raw, vellum-prefixed). */
   instances: ReadonlyArray<string>;
-  /** Recorded container images (locally present — the temp containers mount them). */
+  /** Recorded container images (locally present — the tar helper containers mount them). */
   images: ReadonlyArray<string>;
+  /** Scratch root the extracted trees live under. */
+  workRoot: string;
   onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void;
 }
 
+/** The docker daemon unreachable warning, word-for-word in fetch and load. */
+function unreachableIssue(): StepIssue {
+  return {
+    severity: "warning",
+    message:
+      "this is a docker install but `docker info` failed — the assistant dbs, gateway data, and credentials live in docker volumes that were NOT migrated. Start docker and re-run the migrator (it is idempotent).",
+  };
+}
+
 /**
- * Migrate every docker instance's volume data: extract → value-migrate →
- * import into the cadet volumes under the migrated instance name. A docker
- * daemon that is not reachable warns (the migration still completes — the
- * host-root data was migrated; the volumes need a follow-up run) but a
- * failure on one volume records the issue and keeps going: volumes are
- * independent.
+ * Extract every docker instance's three volumes into the scratch tree and
+ * apply the workspace content transforms in place — the docker analog of
+ * the copy phase, so the value steps that follow (dbs, credentials,
+ * verify) run over these trees exactly as they run over host directories.
  */
-export async function migrateDockerVolumes(opts: DockerVolumeStepOptions): Promise<StepResult> {
-  const step = "migrate-docker-volumes";
+export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise<StepResult> {
+  const step = "fetch-docker-volumes";
   if (opts.instances.length === 0) {
     return { step, status: "skipped", summary: "no docker-deployed assistants" };
   }
@@ -78,58 +103,36 @@ export async function migrateDockerVolumes(opts: DockerVolumeStepOptions): Promi
     return {
       step,
       status: "completed",
-      summary: "docker daemon unreachable — volume data not migrated (see ⚠)",
-      issues: [
-        {
-          severity: "warning",
-          message:
-            "this is a docker install but `docker info` failed — the assistant dbs, gateway data, and credentials live in docker volumes that were NOT migrated. Start docker and re-run the migrator (it is idempotent).",
-        },
-      ],
+      summary: "docker daemon unreachable — volume data not fetched (see ⚠)",
+      issues: [unreachableIssue()],
     };
   }
 
   const issues: StepIssue[] = [];
   const perInstance: string[] = [];
-  const workRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-"));
-
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
     opts.onItem?.({ name: instanceId, status: "started" });
-    const helperImage = opts.images[0];
     try {
-      let assistantDb = false;
-      let gatewayDb = false;
-      let credentials = false;
-
+      let rewrittenFiles = 0;
+      const extracted: string[] = [];
       for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = path.join(workRoot, `${instanceId}-${vol.kind}`);
+        const extractDir = extractedDir(opts.workRoot, instanceId, vol.kind);
         await fs.mkdir(extractDir, { recursive: true });
-        await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, helperImage);
-
+        await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0]);
+        extracted.push(vol.kind);
         if (vol.kind === "workspace") {
-          assistantDb = await rewriteExtractedTree(extractDir, "workspace", issues);
-        } else if (vol.kind === "gateway-sec") {
-          gatewayDb = await rewriteGatewayVolume(extractDir, issues);
-        } else {
-          credentials = await scrubVolumeCredentials(extractDir, issues);
+          rewrittenFiles += await applyWorkspaceContentTransforms(extractDir);
         }
-
-        await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, helperImage);
       }
-
-      const summary = [
-        assistantDb ? "assistant db ✓" : "no assistant db",
-        gatewayDb ? "gateway db ✓" : "no gateway db",
-        credentials ? "credentials scrubbed" : "no vellum credentials",
-      ].join(", ");
-      perInstance.push(`${instanceId} → ${migratedName} (${summary})`);
+      const summary = `${extracted.length} volume(s) extracted${rewrittenFiles > 0 ? `, ${rewrittenFiles} file(s) rewritten` : ""}`;
+      perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
       opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
       const message = (err as Error).message.split("\n")[0];
       issues.push({
         severity: "warning",
-        message: `${instanceId}: volume data migration failed (${message}) — start docker and re-run the migrator`,
+        message: `${instanceId}: volume extraction failed (${message}) — start docker and re-run the migrator`,
       });
       opts.onItem?.({ name: instanceId, status: "warning", summary: message });
     }
@@ -138,113 +141,131 @@ export async function migrateDockerVolumes(opts: DockerVolumeStepOptions): Promi
   return {
     step,
     status: "completed",
-    summary: `${opts.instances.length} docker instance(s): volume data migrated into the cadet volumes`,
+    summary: `extracted the volume data of ${opts.instances.length} docker instance(s) into the scratch tree`,
     issues,
     data: { instances: perInstance },
   };
 }
 
 /**
- * Apply the sanctioned content transforms + find and rewrite the assistant
- * db in an extracted workspace volume. Returns true when an assistant db
- * was found (and rewritten).
+ * Apply the sanctioned content transforms to an extracted workspace volume
+ * — the same matchers the local flow's copy phase runs, over
+ * volume-relative paths normalized to workspace/-prefixed state-relative
+ * ones. Returns the number of files rewritten.
  */
-async function rewriteExtractedTree(
-  dir: string,
-  prefix: "workspace" | "protected",
-  issues: StepIssue[],
-): Promise<boolean> {
-  let dbRel: string | null = null;
+async function applyWorkspaceContentTransforms(dir: string): Promise<number> {
   let entries: Array<{ relPath: string; absPath: string; isDirectory: boolean }>;
   try {
     entries = [...(await walkTree(dir))];
   } catch {
-    return false;
+    return 0;
   }
 
+  let rewritten = 0;
   for (const entry of entries) {
     if (entry.isDirectory) continue;
     if (isDbArtifact(entry.relPath)) continue;
-    const stateRel = `${prefix}/${entry.relPath}`;
+    const stateRel = `workspace/${entry.relPath}`;
     if (!isRewriteEligible(stateRel)) continue;
     try {
       const raw = await fs.readFile(entry.absPath, "utf8");
       const sanctioned = sanctionedContentTransform(stateRel, raw);
       const text = sanctioned ? sanctioned.text : applySubstitutions(raw).text;
-      if (text !== raw) await fs.writeFile(entry.absPath, text, "utf8");
+      if (text !== raw) {
+        await fs.writeFile(entry.absPath, text, "utf8");
+        rewritten++;
+      }
     } catch {
       // Binary or unreadable — nothing to rewrite.
     }
   }
-
-  // The assistant db: data/db/assistant.db under the workspace root.
-  const candidates = ["data/db/assistant.db", "workspace/data/db/assistant.db"];
-  for (const rel of candidates) {
-    try {
-      await fs.access(path.join(dir, rel));
-      dbRel = rel;
-      break;
-    } catch {
-      // Not here.
-    }
-  }
-  if (dbRel) {
-    const result = await migrateAssistantDbAt(dir, dbRel);
-    issues.push(...(result.issues ?? []));
-    return true;
-  }
-  return false;
+  return rewritten;
 }
 
 /**
- * Rewrite the gateway db inside an extracted gateway-security volume
- * (vellum's combined protected dir). Everything else in the volume —
- * trust rules, signing keys, backup key — is security material and stays
- * byte-for-byte. Returns true when a gateway db was found.
+ * The shared migrate-assistant-db step, docker form: value-migrate every
+ * extracted workspace volume's assistant db in place. Same step name and
+ * engine as the local flow — only the data surface differs.
  */
-async function rewriteGatewayVolume(dir: string, issues: StepIssue[]): Promise<boolean> {
-  const candidates = ["gateway.sqlite", "gateway-security/gateway.sqlite", "data/gateway.sqlite"];
-  for (const rel of candidates) {
-    try {
-      await fs.access(path.join(dir, rel));
-    } catch {
-      continue;
-    }
+export async function migrateDockerAssistantDbs(
+  instances: ReadonlyArray<string>,
+  workRoot: string,
+  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void,
+): Promise<StepResult> {
+  const step = "migrate-assistant-db";
+  if (instances.length === 0) {
+    return { step, status: "skipped", summary: "no docker-deployed assistants" };
+  }
+  const issues: StepIssue[] = [];
+  const perInstance: string[] = [];
+  let migrated = 0;
+  for (const instanceId of instances) {
+    const dir = extractedDir(workRoot, instanceId, "workspace");
+    onItem?.({ name: instanceId, status: "started" });
+    const rel = await findFirst(dir, ASSISTANT_DB_CANDIDATES);
+    const result = await migrateAssistantDbAt(dir, rel);
+    issues.push(...(result.issues ?? []));
+    if (result.status !== "skipped") migrated++;
+    perInstance.push(`${handleToInstanceName(instanceId)}: ${result.summary}`);
+    onItem?.({ name: instanceId, status: "completed", summary: result.summary });
+  }
+  return {
+    step,
+    status: migrated > 0 ? "completed" : "skipped",
+    summary:
+      migrated > 0
+        ? `assistant db(s) value-migrated across ${migrated} extracted workspace volume(s)`
+        : "no assistant db(s) in the extracted workspace volume(s)",
+    issues,
+    data: { instances: perInstance },
+  };
+}
+
+/**
+ * The shared migrate-gateway-db step, docker form: same engine, pointed at
+ * the extracted gateway-security trees.
+ */
+export async function migrateDockerGatewayDbs(
+  instances: ReadonlyArray<string>,
+  workRoot: string,
+  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void,
+): Promise<StepResult> {
+  const step = "migrate-gateway-db";
+  if (instances.length === 0) {
+    return { step, status: "skipped", summary: "no docker-deployed assistants" };
+  }
+  const issues: StepIssue[] = [];
+  const perInstance: string[] = [];
+  let migrated = 0;
+  for (const instanceId of instances) {
+    const dir = extractedDir(workRoot, instanceId, "gateway-sec");
+    onItem?.({ name: instanceId, status: "started" });
+    const rel = await findFirst(dir, GATEWAY_DB_CANDIDATES);
     const result = await migrateGatewayDbAt(dir, rel);
     issues.push(...(result.issues ?? []));
-    return true;
+    if (result.status !== "skipped") migrated++;
+    perInstance.push(`${handleToInstanceName(instanceId)}: ${result.summary}`);
+    onItem?.({ name: instanceId, status: "completed", summary: result.summary });
   }
-  return false;
-}
-
-/** Scrub the legacy vellum platform credentials from an extracted CES volume. */
-async function scrubVolumeCredentials(dir: string, issues: StepIssue[]): Promise<boolean> {
-  const { scrub, issues: scrubIssues } = await scrubLegacyCredentials(dir);
-  issues.push(...scrubIssues);
-  return scrub.detected;
-}
-
-// ---------------------------------------------------------------------------
-// verify-docker-volumes — the destination-side check. The main verify step
-// only walks the host filesystem; a docker install's real data lives in the
-// cadet volumes, so verify must look there too (v0.0.10 run feedback).
-// ---------------------------------------------------------------------------
-
-export interface VerifyDockerVolumesOptions {
-  ops: ProcessOps;
-  dockerOps: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
-  instances: ReadonlyArray<string>;
-  images: ReadonlyArray<string>;
-  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void;
+  return {
+    step,
+    status: migrated > 0 ? "completed" : "skipped",
+    summary:
+      migrated > 0
+        ? `gateway db(s) value-migrated across ${migrated} extracted gateway volume(s)`
+        : "no gateway db(s) in the extracted gateway volume(s)",
+    issues,
+    data: { instances: perInstance },
+  };
 }
 
 /**
- * Verify the migrated cadet volumes: re-extract each one and check the dbs
- * are free of vellum rows and the credential store carries no vellum-
- * namespace entries. Findings are warnings — same contract as verify.
+ * Import the migrated trees into the cadet volumes under the migrated
+ * instance names. Failures on one volume record the issue and keep going:
+ * volumes are independent.
  */
-export async function verifyDockerVolumes(opts: VerifyDockerVolumesOptions): Promise<StepResult> {
-  const step = "verify-docker-volumes";
+export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<StepResult> {
+  const step = "load-docker-volumes";
   if (opts.instances.length === 0) {
     return { step, status: "skipped", summary: "no docker-deployed assistants" };
   }
@@ -252,88 +273,136 @@ export async function verifyDockerVolumes(opts: VerifyDockerVolumesOptions): Pro
     return {
       step,
       status: "completed",
-      summary: "docker daemon unreachable — the cadet volumes could not be verified (see ⚠)",
-      issues: [
-        { severity: "warning", message: "could not verify the migrated docker volume data: `docker info` failed" },
-      ],
+      summary: "docker daemon unreachable — the migrated volume data was NOT imported (see ⚠)",
+      issues: [unreachableIssue()],
     };
   }
 
   const issues: StepIssue[] = [];
-  let dbsChecked = 0;
-  let storesChecked = 0;
-  const workRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-verify-"));
-  const helperImage = opts.images[0];
-
+  const perInstance: string[] = [];
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
-    opts.onItem?.({ name: migratedName, status: "started" });
+    opts.onItem?.({ name: instanceId, status: "started" });
     try {
+      let loaded = 0;
       for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = path.join(workRoot, `${migratedName}-${vol.kind}`);
-        await fs.mkdir(extractDir, { recursive: true });
-        await opts.dockerOps.dockerVolumeToDir(vol.to, extractDir, helperImage);
-
-        if (vol.kind === "workspace") {
-          for (const rel of ["data/db/assistant.db", "workspace/data/db/assistant.db"]) {
-            const dbPath = path.join(extractDir, rel);
-            if (!(await exists(dbPath))) continue;
-            dbsChecked++;
-            const leftover = await dbVellumRows(dbPath, VALUE_MIGRATED_DBS[0]!);
-            if (leftover === "unreadable") {
-              issues.push({ severity: "warning", message: `${vol.to}/${rel} is not a readable sqlite file` });
-            } else if (leftover.total > 0) {
-              issues.push({
-                severity: "warning",
-                message: `${vol.to}/${rel} still has ${leftover.total} vellum-branded row(s)`,
-              });
-            }
-            break;
-          }
-        } else if (vol.kind === "gateway-sec") {
-          for (const rel of ["gateway.sqlite", "gateway-security/gateway.sqlite", "data/gateway.sqlite"]) {
-            const dbPath = path.join(extractDir, rel);
-            if (!(await exists(dbPath))) continue;
-            dbsChecked++;
-            const leftover = await dbVellumRows(dbPath, VALUE_MIGRATED_DBS[1]!);
-            if (leftover === "unreadable") {
-              issues.push({ severity: "warning", message: `${vol.to}/${rel} is not a readable sqlite file` });
-            } else if (leftover.total > 0) {
-              issues.push({
-                severity: "warning",
-                message: `${vol.to}/${rel} still has ${leftover.total} vellum-branded row(s)`,
-              });
-            }
-            break;
-          }
-        } else {
-          const leftovers = await countVellumCredentials(extractDir);
-          if (leftovers > 0) {
-            issues.push({
-              severity: "warning",
-              message: `${vol.to} still holds ${leftovers} vellum-namespace credential entr${leftovers === 1 ? "y" : "ies"}`,
-            });
-          }
-          storesChecked++;
-        }
+        const extractDir = extractedDir(opts.workRoot, instanceId, vol.kind);
+        if (!(await exists(extractDir))) continue; // fetch failed for this kind — already warned
+        await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0]);
+        loaded++;
       }
-      opts.onItem?.({ name: migratedName, status: "completed", summary: "volume data clean" });
+      const summary = `${loaded} cadet volume(s) written`;
+      perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
+      opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
       const message = (err as Error).message.split("\n")[0];
       issues.push({
         severity: "warning",
-        message: `${migratedName}: could not verify the volume data (${message})`,
+        message: `${instanceId}: volume import failed (${message}) — start docker and re-run the migrator`,
       });
-      opts.onItem?.({ name: migratedName, status: "warning", summary: message });
+      opts.onItem?.({ name: instanceId, status: "warning", summary: message });
     }
   }
 
   return {
     step,
     status: "completed",
-    summary: `${dbsChecked} volume db(s) free of vellum rows, ${storesChecked} credential store(s) clean`,
+    summary: `imported the migrated data into ${opts.instances.length} docker instance(s)' cadet volumes`,
     issues,
+    data: { instances: perInstance },
   };
+}
+
+// ---------------------------------------------------------------------------
+// verify — the docker half. The extracted trees ARE what load wrote into
+// the cadet volumes (a byte copy), so checking them here is checking the
+// migrated volume data — without a second extraction pass. The runner
+// folds these findings into the shared verify step's result.
+// ---------------------------------------------------------------------------
+
+export interface DockerVolumeVerify {
+  issues: StepIssue[];
+  dbsChecked: number;
+  storesChecked: number;
+}
+
+/**
+ * Verify the extracted volume trees: dbs free of vellum rows, credential
+ * store carrying no vellum-namespace entries. Findings are warnings — same
+ * contract as verify.
+ */
+export async function verifyDockerVolumeData(
+  instances: ReadonlyArray<string>,
+  workRoot: string,
+): Promise<DockerVolumeVerify> {
+  const issues: StepIssue[] = [];
+  let dbsChecked = 0;
+  let storesChecked = 0;
+
+  for (const instanceId of instances) {
+    const migratedName = handleToInstanceName(instanceId);
+
+    const workspaceDir = extractedDir(workRoot, instanceId, "workspace");
+    const assistantRel = await findFirst(workspaceDir, ASSISTANT_DB_CANDIDATES);
+    if (assistantRel) {
+      dbsChecked++;
+      issues.push(
+        ...(await dbIssues(
+          path.join(workspaceDir, assistantRel),
+          `${migratedName}-workspace/${assistantRel}`,
+          VALUE_MIGRATED_DBS[0]!,
+        )),
+      );
+    }
+
+    const gatewayDir = extractedDir(workRoot, instanceId, "gateway-sec");
+    const gatewayRel = await findFirst(gatewayDir, GATEWAY_DB_CANDIDATES);
+    if (gatewayRel) {
+      dbsChecked++;
+      issues.push(
+        ...(await dbIssues(
+          path.join(gatewayDir, gatewayRel),
+          `${migratedName}-gateway-sec/${gatewayRel}`,
+          VALUE_MIGRATED_DBS[1]!,
+        )),
+      );
+    }
+
+    const cesDir = extractedDir(workRoot, instanceId, "ces-sec");
+    if (await exists(cesDir)) {
+      storesChecked++;
+      const leftovers = await countVellumCredentials(cesDir);
+      if (leftovers > 0) {
+        issues.push({
+          severity: "warning",
+          message: `${migratedName}-ces-sec still holds ${leftovers} vellum-namespace credential entr${leftovers === 1 ? "y" : "ies"}`,
+        });
+      }
+    }
+  }
+
+  return { issues, dbsChecked, storesChecked };
+}
+
+type ValueMigratedDb = (typeof VALUE_MIGRATED_DBS)[number];
+
+/** The leftover-row check for one volume db, worded against the volume name. */
+async function dbIssues(dbPath: string, label: string, spec: ValueMigratedDb): Promise<StepIssue[]> {
+  const leftover = await dbVellumRows(dbPath, spec);
+  if (leftover === "unreadable") {
+    return [{ severity: "warning", message: `${label} is not a readable sqlite file` }];
+  }
+  if (leftover.total > 0) {
+    return [{ severity: "warning", message: `${label} still has ${leftover.total} vellum-branded row(s)` }];
+  }
+  return [];
+}
+
+async function findFirst(dir: string, candidates: ReadonlyArray<string>): Promise<string | undefined> {
+  for (const rel of candidates) {
+    if (await exists(path.join(dir, rel))) return rel;
+  }
+  return undefined;
 }
 
 async function exists(p: string): Promise<boolean> {

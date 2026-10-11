@@ -5,7 +5,14 @@ import { DatabaseSync as Database } from "node:sqlite";
 import { describe, test } from "node:test";
 
 import { cadetImageRefs } from "../../src/cadet-images.js";
-import { migrateDockerVolumes, verifyDockerVolumes } from "../../src/steps/migrate-docker-volumes.js";
+import {
+  fetchDockerVolumes,
+  loadDockerVolumes,
+  migrateDockerAssistantDbs,
+  migrateDockerGatewayDbs,
+  verifyDockerVolumeData,
+} from "../../src/steps/migrate-docker-volumes.js";
+import { migrateCredentialsStep } from "../../src/steps/scrub-credentials.js";
 import { wakeAssistants } from "../../src/steps/wake.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
@@ -91,6 +98,22 @@ function baseOps(): ProcessOps {
   };
 }
 
+/** Seed the VELLUM-side volumes with branded data and return a scratch workRoot. */
+async function seededVolumes(sim: ReturnType<typeof makeVolumeStore>) {
+  const seed = async (volume: string, fn: (dir: string) => Promise<void>) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-seed-"));
+    await fn(dir);
+    await sim.ops.dockerDirToVolume(dir, volume);
+  };
+  await seed(`${INSTANCE}-workspace`, async (dir) => {
+    await writeBrandedAssistantDb(dir);
+    await fs.writeFile(path.join(dir, "config.json"), '{"provider":"vellum"}');
+  });
+  await seed(`${INSTANCE}-gateway-sec`, writeBrandedGatewayDb);
+  await seed(`${INSTANCE}-ces-sec`, writeBrandedCredentialStore);
+  return await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-"));
+}
+
 describe("cadet-images", () => {
   test("stable versions tag the plain repos with v<version>", () => {
     expect(cadetImageRefs("0.12.7")).toEqual({
@@ -107,37 +130,141 @@ describe("cadet-images", () => {
   });
 });
 
-describe("migrate-docker-volumes", () => {
-  test("extracts the three volumes, value-migrates them, and imports under the migrated name", async () => {
+describe("fetch-docker-volumes", () => {
+  test("extracts the three volumes into the scratch tree and applies the workspace content transforms", async () => {
     const sim = makeVolumeStore();
-    // Seed the VELLUM-side volumes (raw instance id names).
-    const seed = async (volume: string, fn: (dir: string) => Promise<void>) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-seed-"));
-      await fn(dir);
-      // Route the seed through the simulator so extraction reads it back.
-      await sim.ops.dockerDirToVolume(dir, volume);
-    };
-    await seed(`${INSTANCE}-workspace`, async (dir) => {
-      await writeBrandedAssistantDb(dir);
-      await fs.writeFile(path.join(dir, "config.json"), '{"provider":"vellum"}');
-    });
-    await seed(`${INSTANCE}-gateway-sec`, writeBrandedGatewayDb);
-    await seed(`${INSTANCE}-ces-sec`, writeBrandedCredentialStore);
+    const workRoot = await seededVolumes(sim);
+    const items: Array<{ name: string; status: string; summary?: string }> = [];
 
-    const result = await migrateDockerVolumes({
-      ops: baseOps(),
+    const result = await fetchDockerVolumes({
       dockerOps: sim.ops,
       instances: [INSTANCE],
       images: ["vellumai/vellum-assistant:0.12.6"],
+      workRoot,
+      onItem: (item) => items.push(item),
     });
 
     expect(result.status).toBe("completed");
-    expect(result.summary).toContain("1 docker instance");
-    // The db value steps' info bullets ride along; no warnings.
-    expect((result.issues ?? []).filter((i) => i.severity !== "info")).toEqual([]);
+    expect(result.summary).toContain("1 docker instance(s)");
+    // The per-instance events: started, then completed with a summary.
+    expect(items.map((i) => i.status)).toEqual(["started", "completed"]);
+    expect(items[1]?.summary).toContain("3 volume(s) extracted");
 
-    // The cadet-side volumes (migrated name) hold migrated data: dbs clean
-    // of vellum rows, provider values flipped, credentials scrubbed.
+    // The extracted trees: workspace content transformed in place...
+    const workspace = path.join(workRoot, INSTANCE, "workspace");
+    const config = await fs.readFile(path.join(workspace, "config.json"), "utf8");
+    expect(config).toContain('"cadet"');
+    // ...the dbs ride as-is here — the shared db steps migrate them.
+    const gateway = path.join(workRoot, INSTANCE, "gateway-sec");
+    expect(await fs.stat(path.join(gateway, "gateway.sqlite"))).toBeTruthy();
+    const ces = path.join(workRoot, INSTANCE, "ces-sec");
+    expect(await fs.stat(path.join(ces, "keys.enc"))).toBeTruthy();
+  });
+
+  test("an unreachable docker daemon warns and completes without fetching", async () => {
+    const result = await fetchDockerVolumes({
+      dockerOps: {
+        dockerVolumeToDir: async () => {},
+        dockerDirToVolume: async () => {},
+        dockerAvailable: async () => false,
+      },
+      instances: [INSTANCE],
+      images: [],
+      workRoot: await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-")),
+    });
+    expect(result.status).toBe("completed");
+    expect(result.summary).toContain("docker daemon unreachable");
+    expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
+  });
+
+  test("no docker instances skips", async () => {
+    const result = await fetchDockerVolumes({
+      dockerOps: {
+        dockerVolumeToDir: async () => {},
+        dockerDirToVolume: async () => {},
+        dockerAvailable: async () => true,
+      },
+      instances: [],
+      images: [],
+      workRoot: await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-")),
+    });
+    expect(result.status).toBe("skipped");
+  });
+});
+
+describe("the shared value steps over the extracted trees", () => {
+  test("migrate-assistant-db + migrate-gateway-db migrate the extracted dbs; credentials scrub the ces tree", async () => {
+    const sim = makeVolumeStore();
+    const workRoot = await seededVolumes(sim);
+    await fetchDockerVolumes({
+      dockerOps: sim.ops,
+      instances: [INSTANCE],
+      images: [],
+      workRoot,
+    });
+
+    const assistantStep = await migrateDockerAssistantDbs([INSTANCE], workRoot);
+    expect(assistantStep.step).toBe("migrate-assistant-db");
+    expect(assistantStep.status).toBe("completed");
+    expect(assistantStep.summary).toContain("1 extracted workspace volume(s)");
+    const assistantDb = new Database(
+      path.join(workRoot, INSTANCE, "workspace", "data/db/assistant.db"),
+      { readOnly: true },
+    );
+    const channels = assistantDb.prepare(`SELECT user_message_channel AS c FROM messages`).all();
+    expect(channels).toEqual([{ c: "cadet" }]);
+    assistantDb.close();
+
+    const gatewayStep = await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    expect(gatewayStep.step).toBe("migrate-gateway-db");
+    expect(gatewayStep.status).toBe("completed");
+    const gatewayDb = new Database(
+      path.join(workRoot, INSTANCE, "gateway-sec", "gateway.sqlite"),
+      { readOnly: true },
+    );
+    const types = gatewayDb.prepare(`SELECT type AS t FROM contact_channels`).all();
+    expect(types).toEqual([{ t: "cadet" }]);
+    gatewayDb.close();
+
+    // The shared credentials step scrubs the extracted ces-sec tree
+    // alongside the (here empty) host cadet root.
+    const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
+    const credentials = await migrateCredentialsStep(hostRoot, [
+      path.join(workRoot, INSTANCE, "ces-sec"),
+    ]);
+    expect(credentials.status).toBe("completed");
+    expect(credentials.summary).toContain("1 encrypted store(s)");
+    const store = JSON.parse(
+      await fs.readFile(path.join(workRoot, INSTANCE, "ces-sec", "keys.enc"), "utf8"),
+    );
+    expect(Object.keys(store.entries)).toEqual(["credential/webhook/secret"]);
+  });
+
+  test("load imports the migrated trees into the cadet volumes under the migrated name", async () => {
+    const sim = makeVolumeStore();
+    const workRoot = await seededVolumes(sim);
+    await fetchDockerVolumes({
+      dockerOps: sim.ops,
+      instances: [INSTANCE],
+      images: [],
+      workRoot,
+    });
+    await migrateDockerAssistantDbs([INSTANCE], workRoot);
+    await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
+    await migrateCredentialsStep(hostRoot, [path.join(workRoot, INSTANCE, "ces-sec")]);
+
+    const result = await loadDockerVolumes({
+      dockerOps: sim.ops,
+      instances: [INSTANCE],
+      images: [],
+      workRoot,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.summary).toContain("1 docker instance(s)");
+
+    // End state: the cadet-side volumes (migrated name) hold migrated data.
     const workspace = sim.readVolume(`${MIGRATED}-workspace`);
     expect(workspace).toBeDefined();
     const db = new Database(path.join(workspace!, "data/db/assistant.db"), { readOnly: true });
@@ -158,26 +285,59 @@ describe("migrate-docker-volumes", () => {
     expect(Object.keys(store.entries)).toEqual(["credential/webhook/secret"]);
   });
 
-  test("an unreachable docker daemon warns and completes without migrating", async () => {
-    const ops = baseOps();
-    const result = await migrateDockerVolumes({
-      ops,
-      dockerOps: {
-        dockerVolumeToDir: async () => {},
-        dockerDirToVolume: async () => {},
-        dockerAvailable: async () => false,
-      },
+  test("verifyDockerVolumeData reports the migrated data clean", async () => {
+    const sim = makeVolumeStore();
+    const workRoot = await seededVolumes(sim);
+    await fetchDockerVolumes({
+      dockerOps: sim.ops,
       instances: [INSTANCE],
       images: [],
+      workRoot,
     });
-    expect(result.status).toBe("completed");
-    expect(result.summary).toContain("docker daemon unreachable");
-    expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
+    await migrateDockerAssistantDbs([INSTANCE], workRoot);
+    await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    // The credentials step is part of the pipeline too — without it the
+    // ces-sec tree still carries its vellum-namespace entry.
+    const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
+    await migrateCredentialsStep(hostRoot, [path.join(workRoot, INSTANCE, "ces-sec")]);
+
+    const verifyData = await verifyDockerVolumeData([INSTANCE], workRoot);
+    expect(verifyData.issues).toEqual([]);
+    expect(verifyData.dbsChecked).toBe(2);
+    expect(verifyData.storesChecked).toBe(1);
   });
 
-  test("no docker instances skips", async () => {
-    const result = await migrateDockerVolumes({
-      ops: baseOps(),
+  test("verifyDockerVolumeData surfaces leftover vellum rows and credentials as warnings", async () => {
+    // Seed the extracted trees directly with branded data — as if the
+    // shared value steps had not run (or a bug put legacy rows back).
+    const workRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-"));
+    const workspace = path.join(workRoot, INSTANCE, "workspace");
+    const gateway = path.join(workRoot, INSTANCE, "gateway-sec");
+    const ces = path.join(workRoot, INSTANCE, "ces-sec");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(gateway, { recursive: true });
+    await fs.mkdir(ces, { recursive: true });
+    await writeBrandedAssistantDb(workspace);
+    await writeBrandedGatewayDb(gateway);
+    await writeBrandedCredentialStore(ces);
+
+    const verifyData = await verifyDockerVolumeData([INSTANCE], workRoot);
+    expect(verifyData.dbsChecked).toBe(2);
+    expect(verifyData.storesChecked).toBe(1);
+    const messages = verifyData.issues.map((i) => i.message);
+    expect(
+      messages.some((m) => m.includes("still has") && m.includes("vellum-branded row(s)") && m.includes(`${MIGRATED}-workspace`)),
+    ).toBe(true);
+    expect(
+      messages.some((m) => m.includes(`${MIGRATED}-gateway-sec`) && m.includes("vellum-branded row(s)")),
+    ).toBe(true);
+    expect(
+      messages.some((m) => m.includes(`${MIGRATED}-ces-sec`) && m.includes("vellum-namespace credential")),
+    ).toBe(true);
+  });
+
+  test("load without instances skips", async () => {
+    const result = await loadDockerVolumes({
       dockerOps: {
         dockerVolumeToDir: async () => {},
         dockerDirToVolume: async () => {},
@@ -185,71 +345,25 @@ describe("migrate-docker-volumes", () => {
       },
       instances: [],
       images: [],
+      workRoot: await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-")),
     });
     expect(result.status).toBe("skipped");
   });
-});
 
-describe("verify-docker-volumes", () => {
-  test("re-extracts the cadet volumes and reports the migrated data clean", async () => {
-    const sim = makeVolumeStore();
-    // Seed the cadet-side volumes with already-migrated data.
-    const seed = async (volume: string, fn: (dir: string) => Promise<void>) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-seed-"));
-      await fn(dir);
-      await sim.ops.dockerDirToVolume(dir, volume);
-    };
-    await seed(`${MIGRATED}-workspace`, async (dir) => {
-      await fs.mkdir(path.join(dir, "data/db"), { recursive: true });
-      const db = new Database(path.join(dir, "data/db/assistant.db"));
-      db.exec("CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT, user_message_channel TEXT)");
-      db.exec("INSERT INTO messages (content, user_message_channel) VALUES ('see cadet://a.png', 'cadet')");
-      db.close();
-    });
-    await seed(`${MIGRATED}-gateway-sec`, async (dir) => {
-      const db = new Database(path.join(dir, "gateway.sqlite"));
-      db.exec("CREATE TABLE contact_channels (id INTEGER PRIMARY KEY, type TEXT)");
-      db.exec("INSERT INTO contact_channels (type) VALUES ('cadet')");
-      db.close();
-    });
-    await seed(`${MIGRATED}-ces-sec`, async (dir) => {
-      await fs.writeFile(path.join(dir, "keys.enc"), JSON.stringify({ entries: { "credential/cadet/k": {} } }));
-    });
-
-    const result = await verifyDockerVolumes({
-      ops: baseOps(),
-      dockerOps: sim.ops,
+  test("load with an unreachable daemon warns that the extracted data was not imported", async () => {
+    const result = await loadDockerVolumes({
+      dockerOps: {
+        dockerVolumeToDir: async () => {},
+        dockerDirToVolume: async () => {},
+        dockerAvailable: async () => false,
+      },
       instances: [INSTANCE],
       images: [],
+      workRoot: await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-")),
     });
-
     expect(result.status).toBe("completed");
-    expect(result.summary).toContain("2 volume db(s) free of vellum rows");
-  });
-
-  test("leftover vellum rows and credentials surface as warnings", async () => {
-    const sim = makeVolumeStore();
-    const seed = async (volume: string, fn: (dir: string) => Promise<void>) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-seed-"));
-      await fn(dir);
-      await sim.ops.dockerDirToVolume(dir, volume);
-    };
-    await seed(`${MIGRATED}-workspace`, writeBrandedAssistantDb);
-    await seed(`${MIGRATED}-gateway-sec`, writeBrandedGatewayDb);
-    await seed(`${MIGRATED}-ces-sec`, writeBrandedCredentialStore);
-
-    const result = await verifyDockerVolumes({
-      ops: baseOps(),
-      dockerOps: sim.ops,
-      instances: [INSTANCE],
-      images: [],
-    });
-
-    expect(result.status).toBe("completed");
-    const messages = (result.issues ?? []).map((i) => i.message);
-    expect(messages.some((m) => m.includes("still has") && m.includes("vellum-branded row(s)") && m.includes(`${MIGRATED}-workspace`))).toBe(true);
-    expect(messages.some((m) => m.includes(`${MIGRATED}-gateway-sec`) && m.includes("vellum-branded row(s)"))).toBe(true);
-    expect(messages.some((m) => m.includes(`${MIGRATED}-ces-sec`) && m.includes("vellum-namespace credential"))).toBe(true);
+    expect(result.summary).toContain("docker daemon unreachable");
+    expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
   });
 });
 
