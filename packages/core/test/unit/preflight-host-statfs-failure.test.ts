@@ -5,7 +5,7 @@ import type { DetectInfo, ProcessOps, StepIssue } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
 
 const GB = 1024 ** 3;
-const INSTANCE = "vellum-prime-quail-3ezfs4";
+const INSTANCE = "vellum-fake-inst-000000";
 const ONE_INSTANCE = [INSTANCE];
 
 function detectInfo(instances: string[]): DetectInfo {

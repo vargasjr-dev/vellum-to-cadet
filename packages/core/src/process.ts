@@ -36,10 +36,8 @@ const VOLUME_STREAM_TIMEOUT_MS = 3_600_000;
  * or the timeout — on timeout every child is killed first so nothing
  * keeps running.
  */
-function settleStreams(children: ChildProcess[], what: string): Promise<void> {
+function settleStreams(children: Array<{ child: ChildProcess; label: string }>, what: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const stderrChunks: Buffer[] = [];
-    let stderrLength = 0;
     let pending = children.length;
     let failure: Error | null = null;
     let settled = false;
@@ -50,35 +48,68 @@ function settleStreams(children: ChildProcess[], what: string): Promise<void> {
       err ? reject(err) : resolve();
     };
     const timer = setTimeout(() => {
-      for (const child of children) child.kill("SIGKILL");
+      for (const { child } of children) child.kill("SIGKILL");
       settle(new Error(`${what}: timed out after ${Math.round(VOLUME_STREAM_TIMEOUT_MS / 1000)}s`));
     }, VOLUME_STREAM_TIMEOUT_MS);
-    for (const child of children) {
-      let closed = false;
+    // Per-side stderr (v0.0.14 run feedback): the shared buffer could not
+    // say WHICH side of the pipe died — a `docker tar` failure and a
+    // `host tar` failure read identically. The failing side is now named,
+    // and a silent failure falls back to the other side's last stderr
+    // line so the message still carries evidence.
+    const lastLine = (chunks: Buffer[]): string =>
+      Buffer.concat(chunks).toString("utf8").trim().split("\n").pop() ?? "";
+    const sides = children.map(({ child, label }) => ({ child, label, chunks: [] as Buffer[], length: 0, closed: false }));
+    for (const side of sides) {
       const markClosed = (): void => {
-        if (closed) return;
-        closed = true;
+        if (side.closed) return;
+        side.closed = true;
         if (--pending === 0) settle(failure ?? undefined);
       };
-      child.stderr?.on("data", (chunk: Buffer) => {
-        if (stderrLength < 4096) {
-          stderrChunks.push(chunk);
-          stderrLength += chunk.length;
+      side.child.stderr?.on("data", (chunk: Buffer) => {
+        if (side.length < 4096) {
+          side.chunks.push(chunk);
+          side.length += chunk.length;
         }
       });
-      child.on("error", (err) => {
-        failure ??= new Error(`${what}: ${(err as Error).message}`);
+      side.child.on("error", (err) => {
+        failure ??= new Error(`${what}: ${side.label}: ${(err as Error).message}`);
         markClosed();
       });
-      child.on("close", (code) => {
+      side.child.on("close", (code) => {
         if (code !== 0 && !failure) {
-          const stderr = Buffer.concat(stderrChunks).toString("utf8").trim().split("\n").pop() ?? "";
-          failure = new Error(`${what}: exited ${code}${stderr ? ` — ${stderr}` : ""}`);
+          let stderr = lastLine(side.chunks);
+          if (!stderr) {
+            for (const other of sides) {
+              if (other === side) continue;
+              const otherLine = lastLine(other.chunks);
+              if (otherLine) {
+                stderr = otherLine;
+                break;
+              }
+            }
+          }
+          failure = new Error(`${what}: ${side.label} exited ${code}${stderr ? ` — ${stderr}` : ""}`);
         }
         markClosed();
       });
     }
   });
+}
+
+/**
+ * The `tar -c` argument list both volume-stream directions share (the
+ * fetch side runs it against the mounted volume inside the helper
+ * container, the load side against the scratch tree on the host).
+ * `--exclude=*.sock` (v0.0.14 run feedback): the workspace volume can
+ * carry the daemon's own live IPC socket (procs/<name>/ipc.sock) —
+ * runtime state that must not migrate, and tar builds that archive
+ * sockets fail the whole stream over them (`tar: ./procs/routes/ipc.sock:
+ * socket ignored`, exit 1). Excluding sockets at the source streams clean
+ * on every tar flavor, and the migrated volume simply has none — cadet
+ * recreates its own on boot.
+ */
+export function volumeTarCreateArgs(root: string): string[] {
+  return ["-c", "--exclude=*.sock", "-C", root, "."];
 }
 
 /** Minimum interval between progress emits — the stream is throttled at the source. */
@@ -323,10 +354,7 @@ export const defaultProcessOps: ProcessOps = {
         "--entrypoint",
         "tar",
         image ?? VOLUME_HELPER_IMAGE,
-        "-c",
-        "-C",
-        "/data",
-        ".",
+        ...volumeTarCreateArgs("/data"),
       ],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
@@ -336,7 +364,13 @@ export const defaultProcessOps: ProcessOps = {
     } else {
       src.stdout!.pipe(untar.stdin!);
     }
-    await settleStreams([src, untar], `extract ${volume}`);
+    await settleStreams(
+      [
+        { child: src, label: "docker tar" },
+        { child: untar, label: "host tar" },
+      ],
+      `extract ${volume}`,
+    );
   },
 
   async dockerDirToVolume(srcDir, volume, image, onProgress) {
@@ -346,7 +380,7 @@ export const defaultProcessOps: ProcessOps = {
     // extract direction: the tree's own size is the denominator.
     await execFileAsync("docker", ["volume", "create", volume], { timeout: 15_000 });
     const totalBytes = onProgress ? await dirSizeBytes(srcDir) : undefined;
-    const tar = spawn("tar", ["-c", "-C", srcDir, "."], { stdio: ["ignore", "pipe", "pipe"] });
+    const tar = spawn("tar", volumeTarCreateArgs(srcDir), { stdio: ["ignore", "pipe", "pipe"] });
     const load = spawn(
       "docker",
       [
@@ -371,7 +405,13 @@ export const defaultProcessOps: ProcessOps = {
     } else {
       tar.stdout!.pipe(load.stdin!);
     }
-    await settleStreams([tar, load], `import into ${volume}`);
+    await settleStreams(
+      [
+        { child: tar, label: "host tar" },
+        { child: load, label: "docker tar" },
+      ],
+      `import into ${volume}`,
+    );
   },
 
   async dockerAvailable() {
