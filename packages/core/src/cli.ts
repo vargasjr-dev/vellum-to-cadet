@@ -378,7 +378,6 @@ function printAlreadyRunning(lock: RunLockInfo): void {
 /** The started line: icon + padded label + text, matching the step lines' shape. */
 function printStarted(pid: number, logPath: string): void {
   process.stdout.write(`  ${successIcon()} ${"started".padEnd(20)} Begun migration at pid ${pid}, logs: ${logPath}\n`);
-  process.stdout.write(`  ${detail("└─ the migration survives disconnects — follow along with:")} tail -f ${logPath}\n`);
 }
 
 /**
