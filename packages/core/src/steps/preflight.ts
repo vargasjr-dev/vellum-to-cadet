@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 
 import { statfs as statfsPromises } from "node:fs/promises";
 import { promises as fs } from "node:fs";
@@ -9,6 +11,25 @@ import { vellumVolumeNames } from "./migrate-docker-volumes.js";
 import { formatBytes } from "../fs-utils.js";
 import type { DetectInfo, ProcessOps, StepIssue, StepResult } from "../types.js";
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Copy + headroom factor for every disk guard below. 1.5 (v0.0.14 run
+ * feedback): extraction pays per-file metadata overhead `du` never sees
+ * (inode and b-tree blocks over millions of node_modules files) — the
+ * scratch absorbed ~20%+ beyond the measured du on the real run, and two
+ * orphaned scratch corpses on top exhausted the disk. The old 1.2 passed
+ * its guard and died mid-extract anyway.
+ */
+const COPY_HEADROOM = 1.5;
+
+/**
+ * Scratch dirs younger than this are never swept — a --dry-run holds no
+ * run lock (so a concurrent real migration's live scratch must be left
+ * alone), and freshly-created dirs must survive parallel test runs.
+ */
+const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000;
+
 /**
  * Preflight: everything that must be true before we touch a single byte.
  * Failures here are fatal (exit code 3) — no partial state has been created.
@@ -17,6 +38,7 @@ export async function preflight(
   detect: DetectInfo,
   opts?: {
     skipDiskSpaceCheck?: boolean;
+    dryRun?: boolean;
     dockerOps?: Pick<ProcessOps, "dockerAvailable" | "dockerVolumeSize" | "dockerDiskFree">;
   },
 ): Promise<StepResult> {
@@ -31,12 +53,55 @@ export async function preflight(
     };
   }
 
+  // Orphan scratch sweep (v0.0.14 run feedback): a hard-killed run never
+  // reaches its cleanup, and its vtc-volumes-* scratch tree stays on the
+  // host disk — quietly eating the next run's disk budget (two corpses
+  // held an entire Data volume's worth of free space). Swept BEFORE the
+  // disk checks below so the freed space counts. A real run holds the run
+  // lock here, so every old-enough match is a corpse; a dry run holds no
+  // lock and only reports.
+  const orphans = await orphanScratchDirs();
+  if (orphans.length > 0) {
+    const details: string[] = [];
+    const unremoved: string[] = [];
+    for (const dir of orphans) {
+      const bytes = await dirDuBytes(dir);
+      details.push(`${path.basename(dir)}${bytes === null ? "" : ` (${formatBytes(bytes)})`}`);
+      if (opts?.dryRun) continue;
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+      } catch {
+        unremoved.push(dir);
+      }
+    }
+    if (opts?.dryRun) {
+      issues.push({
+        severity: "info",
+        message: `found ${orphans.length} orphaned scratch dir(s) left by earlier failed runs (dry-run: not removed): ${details.join(", ")}`,
+      });
+    } else {
+      issues.push({
+        severity: "info",
+        message:
+          unremoved.length === 0
+            ? `removed ${orphans.length} orphaned scratch dir(s) left by earlier failed runs: ${details.join(", ")}`
+            : `removed ${orphans.length - unremoved.length} of ${orphans.length} orphaned scratch dir(s): ${details.join(", ")}`,
+      });
+      for (const dir of unremoved) {
+        issues.push({
+          severity: "warning",
+          message: `could not remove orphaned scratch dir ${dir} — remove it by hand to reclaim the space`,
+        });
+      }
+    }
+  }
+
   if (!opts?.skipDiskSpaceCheck && detect.rootSizeBytes > 0) {
     const free = await freeBytesFor(detect.vellumRoot);
-    if (free !== null && free < detect.rootSizeBytes * 1.2) {
+    if (free !== null && free < detect.rootSizeBytes * COPY_HEADROOM) {
       issues.push({
         severity: "error",
-        message: `insufficient disk space: need ~${formatBytes(Math.ceil(detect.rootSizeBytes * 1.2))} (copy + headroom), have ${formatBytes(Math.floor(free))}`,
+        message: `insufficient disk space: need ~${formatBytes(Math.ceil(detect.rootSizeBytes * COPY_HEADROOM))} (copy + headroom), have ${formatBytes(Math.floor(free))}`,
       });
     } else if (free === null) {
       issues.push({ severity: "warning", message: "could not determine free disk space — continuing" });
@@ -74,10 +139,10 @@ export async function preflight(
               "could not measure the docker volume sizes (the size probe timed out or failed) — refusing to migrate without verifying the copy fits; check the docker daemon, or pass --skip-disk-space-check to proceed anyway",
           });
         } else {
-          if (free < totalBytes * 1.2) {
+          if (free < totalBytes * COPY_HEADROOM) {
             issues.push({
               severity: "error",
-              message: `insufficient docker disk space: need ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) for the ${formatBytes(totalBytes)} of docker volumes, have ${formatBytes(Math.floor(free))} — free space or grow the docker VM's disk (colima: colima start --edit and raise disk)`,
+              message: `insufficient docker disk space: need ~${formatBytes(Math.ceil(totalBytes * COPY_HEADROOM))} (copy + headroom) for the ${formatBytes(totalBytes)} of docker volumes, have ${formatBytes(Math.floor(free))} — free space or grow the docker VM's disk (colima: colima start --edit and raise disk)`,
             });
           }
           // The HOST side needs room too: fetch extracts every volume into
@@ -94,10 +159,10 @@ export async function preflight(
               severity: "error",
               message: `could not determine the host's free disk space for the volume scratch directory under ${os.tmpdir()} — refusing to migrate without verifying the volume copy fits; check the host disk, or pass --skip-disk-space-check to proceed anyway`,
             });
-          } else if (hostFree < totalBytes * 1.2) {
+          } else if (hostFree < totalBytes * COPY_HEADROOM) {
             issues.push({
               severity: "error",
-              message: `insufficient host disk space: the migration extracts ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) of docker volumes into a scratch directory under ${os.tmpdir()}, have ${formatBytes(Math.floor(hostFree))} free there — free space on the host disk`,
+              message: `insufficient host disk space: the migration extracts ~${formatBytes(Math.ceil(totalBytes * COPY_HEADROOM))} (copy + headroom) of docker volumes into a scratch directory under ${os.tmpdir()}, have ${formatBytes(Math.floor(hostFree))} free there — free space on the host disk`,
             });
           }
         }
@@ -143,6 +208,42 @@ async function freeBytesFor(within: string): Promise<number | null> {
   try {
     const stats = await statfsPromises(within);
     return stats.bavail * stats.bsize;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stale `vtc-volumes-*` scratch trees in os.tmpdir() — the corpses of
+ * hard-killed runs (SIGKILL never reaches cleanup). Dirs younger than
+ * ORPHAN_MIN_AGE_MS are skipped: a --dry-run holds no run lock, so a
+ * concurrent real migration's live scratch must be left alone (and test
+ * runs create fresh fixtures here too). An unreadable tmpdir means
+ * nothing to sweep.
+ */
+async function orphanScratchDirs(): Promise<string[]> {
+  const entries = await fs.readdir(os.tmpdir(), { withFileTypes: true }).catch(() => null);
+  if (!entries) return [];
+  const matches: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("vtc-volumes-")) continue;
+    const dir = path.join(os.tmpdir(), entry.name);
+    const stats = await fs.stat(dir).catch(() => null);
+    if (stats && Date.now() - stats.mtimeMs >= ORPHAN_MIN_AGE_MS) matches.push(dir);
+  }
+  return matches.sort();
+}
+
+/**
+ * Size of a scratch tree via `du -sk` — the same measurement class the
+ * disk guards compare against. Null when du fails or times out (the
+ * sweep then reports the name without a size rather than blocking).
+ */
+async function dirDuBytes(dir: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync("du", ["-sk", dir], { timeout: 60_000 });
+    const blocks = Number.parseInt(stdout.trim().split(/\s+/)[0] ?? "", 10);
+    return Number.isFinite(blocks) ? blocks * 1024 : null;
   } catch {
     return null;
   }

@@ -257,6 +257,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("preflight");
   const pre = await preflight(detect, {
     skipDiskSpaceCheck: options.skipDiskSpaceCheck,
+    dryRun: options.dryRun,
     dockerOps: options.dockerOps ?? ops,
   });
   done(pre);
