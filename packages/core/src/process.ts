@@ -1,7 +1,10 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promises as fsPromises } from "node:fs";
+import { Transform } from "node:stream";
 import { promisify } from "node:util";
 
 import { CADET_PROCESS_PATTERNS, MIGRATION_CLI_MARKER, VELLUM_PROCESS_PATTERNS } from "./layout.js";
+import { walkTree } from "./fs-utils.js";
 import type { ProcessOps } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -20,9 +23,12 @@ const VOLUME_HELPER_IMAGE = "vellumai/vellum-assistant:latest";
  * accepts a request and never answers must not hang the migration (the
  * v0.0.11 run sat on a never-started extract container until the user's
  * SSH session died) — the children get killed and the step reports a
- * warning instead.
+ * warning instead. The cap is generous: v0.0.12 run feedback showed a real
+ * multi-GB volume copy can stream far longer than the old 10-minute cap,
+ * and transfers now report byte progress — slow is visible, a true hang
+ * still gets cut loose.
  */
-const VOLUME_STREAM_TIMEOUT_MS = 600_000;
+const VOLUME_STREAM_TIMEOUT_MS = 3_600_000;
 
 /**
  * Wait for a pipeline of child processes (stdout piped into the next
@@ -73,6 +79,83 @@ function settleStreams(children: ChildProcess[], what: string): Promise<void> {
       });
     }
   });
+}
+
+/** Minimum interval between progress emits — the stream is throttled at the source. */
+const PROGRESS_EVERY_MS = 300;
+
+/**
+ * A pass-through that counts tar-stream bytes and reports them onward —
+ * piped between the docker side and the host tar side of a volume
+ * transfer. Emits at most once per PROGRESS_EVERY_MS plus a guaranteed
+ * final flush, so callers can forward straight to the renderer.
+ */
+function byteProgressTap(
+  onProgress: (bytes: number, totalBytes?: number) => void,
+  totalBytes?: number,
+): Transform {
+  let transferred = 0;
+  let lastEmit = 0;
+  const emit = (force = false): void => {
+    const now = Date.now();
+    if (!force && now - lastEmit < PROGRESS_EVERY_MS) return;
+    lastEmit = now;
+    onProgress(transferred, totalBytes);
+  };
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      transferred += chunk.length;
+      emit();
+      cb(null, chunk);
+    },
+    flush(cb) {
+      emit(true);
+      cb();
+    },
+  });
+}
+
+/**
+ * A volume's content size, from `du -sk` inside a throwaway container.
+ * The progress denominator; any failure just means the progress line
+ * shows bytes-so-far without a percentage.
+ */
+async function dockerVolumeSize(volume: string, image?: string): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "-v",
+        `${volume}:/data`,
+        "--entrypoint",
+        "du",
+        image ?? VOLUME_HELPER_IMAGE,
+        "-sk",
+        "/data",
+      ],
+      { timeout: 60_000 },
+    );
+    const blocks = Number(stdout.trim().split(/\s/)[0]);
+    return Number.isFinite(blocks) && blocks >= 0 ? blocks * 1024 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A host directory's size — the import direction's progress denominator. */
+async function dirSizeBytes(dir: string): Promise<number | undefined> {
+  try {
+    let total = 0;
+    for (const entry of await walkTree(dir)) {
+      if (entry.isDirectory) continue;
+      total += (await fsPromises.stat(entry.absPath)).size;
+    }
+    return total;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -169,7 +252,7 @@ export const defaultProcessOps: ProcessOps = {
     }
   },
 
-  async dockerVolumeToDir(volume, destDir, image) {
+  async dockerVolumeToDir(volume, destDir, image, onProgress) {
     // Stream the volume out as a tar archive: `docker run --rm` starts a
     // real container that tars the mounted volume to stdout, and the host
     // untars the stream into destDir. No bind mounts of host tmpdirs (the
@@ -179,6 +262,10 @@ export const defaultProcessOps: ProcessOps = {
     // feedback: the old create+cp dance left a never-started container
     // behind and hung the run until the SSH session died; now a stuck
     // stream is killed by the settle timeout and reported as a warning).
+    // Byte progress (v0.0.12 run feedback): size the volume up front for
+    // the denominator, then count the tar stream as it flows — a big
+    // volume copy reports steady progress instead of hanging silently.
+    const totalBytes = onProgress ? await dockerVolumeSize(volume, image) : undefined;
     const src = spawn(
       "docker",
       [
@@ -197,15 +284,21 @@ export const defaultProcessOps: ProcessOps = {
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     const untar = spawn("tar", ["-x", "-C", destDir], { stdio: ["pipe", "ignore", "pipe"] });
-    src.stdout!.pipe(untar.stdin!);
+    if (onProgress) {
+      src.stdout!.pipe(byteProgressTap(onProgress, totalBytes)).pipe(untar.stdin!);
+    } else {
+      src.stdout!.pipe(untar.stdin!);
+    }
     await settleStreams([src, untar], `extract ${volume}`);
   },
 
-  async dockerDirToVolume(srcDir, volume, image) {
+  async dockerDirToVolume(srcDir, volume, image, onProgress) {
     // Idempotent by itself: `docker volume create` on an existing name is a
     // no-op. Import streams the host dir's tar into the mounted volume —
-    // same --rm contract, nothing left behind.
+    // same --rm contract, nothing left behind. Byte progress mirrors the
+    // extract direction: the tree's own size is the denominator.
     await execFileAsync("docker", ["volume", "create", volume], { timeout: 15_000 });
+    const totalBytes = onProgress ? await dirSizeBytes(srcDir) : undefined;
     const tar = spawn("tar", ["-c", "-C", srcDir, "."], { stdio: ["ignore", "pipe", "pipe"] });
     const load = spawn(
       "docker",
@@ -224,7 +317,11 @@ export const defaultProcessOps: ProcessOps = {
       ],
       { stdio: ["pipe", "ignore", "pipe"] },
     );
-    tar.stdout!.pipe(load.stdin!);
+    if (onProgress) {
+      tar.stdout!.pipe(byteProgressTap(onProgress, totalBytes)).pipe(load.stdin!);
+    } else {
+      tar.stdout!.pipe(load.stdin!);
+    }
     await settleStreams([tar, load], `import into ${volume}`);
   },
 

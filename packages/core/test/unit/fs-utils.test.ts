@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   applySubstitutions,
   formatBytes,
+  formatProgress,
   rewriteLegacyTokens,
   rewritePersonaPrompt,
   sanctionedContentTransform,
@@ -25,6 +26,22 @@ describe("formatBytes", () => {
     expect(formatBytes(10800.6 * 1e6)).toBe("10.8GB");
     expect(formatBytes(512_400)).toBe("512.4KB");
     expect(formatBytes(512)).toBe("512B");
+  });
+});
+
+describe("formatProgress", () => {
+  test("renders bytes over total with a percentage", () => {
+    expect(formatProgress(1.2e9, 4e9)).toBe("1.2GB/4.0GB (30%)");
+    expect(formatProgress(5e8, 5e8)).toBe("500.0MB/500.0MB (100%)");
+  });
+
+  test("clamps at 100% (tar headers can push the count past the du estimate)", () => {
+    expect(formatProgress(5e9, 4e9)).toBe("5.0GB/4.0GB (100%)");
+  });
+
+  test("falls back to bytes-so-far without a total (size pre-pass failed)", () => {
+    expect(formatProgress(3e8)).toBe("300.0MB");
+    expect(formatProgress(3e8, 0)).toBe("300.0MB");
   });
 });
 

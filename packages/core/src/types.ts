@@ -63,10 +63,19 @@ export interface DetectInfo {
 export interface StepItemEvent {
   /** Item name shown verbatim in the nested progress line. */
   name: string;
-  /** "started" opens a pending line; "completed"/"warning" resolve it. */
-  status: "started" | "completed" | "warning";
+  /**
+   * "started" opens a pending line; "completed"/"warning" resolve it;
+   * "progress" refreshes the open line's byte counter mid-transfer.
+   */
+  status: "started" | "completed" | "warning" | "progress";
   /** Short outcome text appended after the name when resolving. */
   summary?: string;
+  /**
+   * Byte counts for a "progress" event (docker volume transfers). The
+   * renderer formats it as `1.2GB/4.0GB (30%)`; totalBytes is undefined
+   * when the size pre-pass failed, and the line degrades to bytes-so-far.
+   */
+  progress?: { bytes: number; totalBytes?: number; label?: string };
 }
 
 export interface MigrateOptions {
@@ -143,10 +152,25 @@ export interface ProcessOps {
    * lockfile conversion writes containerInfo.
    */
   cadetVersion(): Promise<string | null>;
-  /** Copy a docker volume's contents down to a host dir (temp container + docker cp). */
-  dockerVolumeToDir(volume: string, destDir: string, image?: string): Promise<void>;
+  /**
+   * Copy a docker volume's contents down to a host dir (temp container +
+   * docker cp). onProgress, when given, receives byte counts of the tar
+   * stream as it flows — long transfers report steady progress instead of
+   * hanging silently (the v0.0.12 run feedback).
+   */
+  dockerVolumeToDir(
+    volume: string,
+    destDir: string,
+    image?: string,
+    onProgress?: (bytes: number, totalBytes?: number) => void,
+  ): Promise<void>;
   /** Copy a host dir's contents up into a docker volume (created if missing). */
-  dockerDirToVolume(srcDir: string, volume: string, image?: string): Promise<void>;
+  dockerDirToVolume(
+    srcDir: string,
+    volume: string,
+    image?: string,
+    onProgress?: (bytes: number, totalBytes?: number) => void,
+  ): Promise<void>;
   /** True when the docker CLI has a usable daemon (`docker info` succeeds). */
   dockerAvailable(): Promise<boolean>;
   /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */
@@ -193,6 +217,8 @@ export const EXIT_CODES = {
   uninstallDeclined: 10,
   /** Uninstall failed to delete one or more targets. */
   uninstallFailed: 11,
+  /** A migration is already running (the run lock is held by a live pid). */
+  alreadyRunning: 12,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
