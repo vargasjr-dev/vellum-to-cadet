@@ -109,6 +109,7 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
 
   const issues: StepIssue[] = [];
   const perInstance: string[] = [];
+  let failedInstances = 0;
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
     opts.onItem?.({ name: instanceId, status: "started" });
@@ -132,10 +133,16 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
       perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
       opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
+      // FATAL (v0.0.13 run feedback): a failed extraction used to be a
+      // warning and the run continued "migrating" a tree that was never
+      // fetched — value steps over partial data, a bogus load, and a green
+      // "Migration complete" at the end. The step now fails and the runner
+      // aborts before any downstream step runs.
       const message = (err as Error).message.split("\n")[0];
+      failedInstances++;
       issues.push({
-        severity: "warning",
-        message: `${instanceId}: volume extraction failed (${message}) — start docker and re-run the migrator`,
+        severity: "error",
+        message: `${instanceId}: volume extraction failed (${message})`,
       });
       opts.onItem?.({ name: instanceId, status: "warning", summary: message });
     }
@@ -143,8 +150,11 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
 
   return {
     step,
-    status: "completed",
-    summary: `extracted the volume data of ${opts.instances.length} docker instance(s) into the scratch tree`,
+    status: failedInstances > 0 ? "failed" : "completed",
+    summary:
+      failedInstances > 0
+        ? `volume extraction failed for ${failedInstances} of ${opts.instances.length} docker instance(s) — nothing was imported`
+        : `extracted the volume data of ${opts.instances.length} docker instance(s) into the scratch tree`,
     issues,
     data: { instances: perInstance },
   };
@@ -206,6 +216,7 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
 
   const issues: StepIssue[] = [];
   const perInstance: string[] = [];
+  let failedInstances = 0;
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
     opts.onItem?.({ name: instanceId, status: "started" });
@@ -223,10 +234,14 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
       perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
       opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
+      // FATAL (v0.0.13 run feedback): same contract as fetch — a failed
+      // import leaves the cadet volumes incomplete, and continuing would
+      // end the run "✔ Migration complete" with the data half-migrated.
       const message = (err as Error).message.split("\n")[0];
+      failedInstances++;
       issues.push({
-        severity: "warning",
-        message: `${instanceId}: volume import failed (${message}) — start docker and re-run the migrator`,
+        severity: "error",
+        message: `${instanceId}: volume import failed (${message})`,
       });
       opts.onItem?.({ name: instanceId, status: "warning", summary: message });
     }
@@ -234,8 +249,11 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
 
   return {
     step,
-    status: "completed",
-    summary: `imported the migrated data into ${opts.instances.length} docker instance(s)' cadet volumes`,
+    status: failedInstances > 0 ? "failed" : "completed",
+    summary:
+      failedInstances > 0
+        ? `volume import failed for ${failedInstances} of ${opts.instances.length} docker instance(s) — the cadet volumes are incomplete`
+        : `imported the migrated data into ${opts.instances.length} docker instance(s)' cadet volumes`,
     issues,
     data: { instances: perInstance },
   };

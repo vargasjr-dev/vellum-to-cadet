@@ -127,6 +127,8 @@ async function dockerVolumeSize(volume: string, image?: string): Promise<number 
       [
         "run",
         "--rm",
+        "--log-driver",
+        "none",
         "-v",
         `${volume}:/data`,
         "--entrypoint",
@@ -135,7 +137,13 @@ async function dockerVolumeSize(volume: string, image?: string): Promise<number 
         "-sk",
         "/data",
       ],
-      { timeout: 60_000 },
+      // Generous budget: the preflight disk guard FAILS CLOSED on an
+      // unmeasurable volume, and the v0.0.13 run feedback showed why — the
+      // old 60s cap could not finish du over a 65.9GB workspace volume
+      // with a .git-objects tree of millions of small files, the guard
+      // stood down, and the run died on disk space it had been warned
+      // about. Slow is fine; unmeasured is not.
+      { timeout: 900_000 },
     );
     const blocks = Number(stdout.trim().split(/\s/)[0]);
     return Number.isFinite(blocks) && blocks >= 0 ? blocks * 1024 : undefined;
@@ -154,7 +162,7 @@ async function dockerDiskFree(image?: string): Promise<number | undefined> {
   try {
     const { stdout } = await execFileAsync(
       "docker",
-      ["run", "--rm", "--entrypoint", "df", image ?? VOLUME_HELPER_IMAGE, "-k", "-P", "/"],
+      ["run", "--rm", "--log-driver", "none", "--entrypoint", "df", image ?? VOLUME_HELPER_IMAGE, "-k", "-P", "/"],
       { timeout: 15_000 },
     );
     return parseDfAvail(stdout);
@@ -302,6 +310,14 @@ export const defaultProcessOps: ProcessOps = {
       [
         "run",
         "--rm",
+        // The docker json-file log driver persists a container's stdout to
+        // the daemon's disk EVEN WHILE the stream is piped to us — a
+        // 65.9GB volume fetch would quietly write a second 65.9GB log file
+        // onto the VM's disk and fill it mid-fetch (the v0.0.13 run died
+        // at 35% exactly that way). `none` leaves the stream only in the
+        // pipe, where it belongs.
+        "--log-driver",
+        "none",
         "-v",
         `${volume}:/data`,
         "--entrypoint",
@@ -336,6 +352,8 @@ export const defaultProcessOps: ProcessOps = {
       [
         "run",
         "--rm",
+        "--log-driver",
+        "none",
         "-i",
         "-v",
         `${volume}:/data`,
