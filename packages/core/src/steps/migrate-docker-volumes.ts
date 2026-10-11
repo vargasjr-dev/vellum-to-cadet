@@ -66,9 +66,14 @@ export function vellumVolumeNames(rawInstanceId: string): string[] {
  * bootstrap/ipc socket dirs. Vellum's hatch never created them, so the
  * migrated install gets them pre-created at load time (v0.0.15 field
  * feedback: `docker volume ls` showed only the three data volumes). The
- * K8s-spec-only `-ces-data` is deliberately NOT here: the docker runtime
- * auto-creates it on the credential-executor's first boot, same as cadet's
- * own hatch; `-dockerd-data` was the removed docker-in-docker volume.
+ * K8s-spec-only `-ces-data` is deliberately NOT here, on both sides:
+ * vellum 0.12.6's docker spec never declared it (six claim templates, no
+ * CES_DATA_DIR — its credential-executor mounts only the workspace,
+ * bootstrap socket, and ces-security volumes), so there is no vellum-side
+ * volume to migrate and nothing is lost; cadet's spec reserves it
+ * (consistent with cloud) and the docker runtime auto-creates it on the
+ * credential-executor's first boot. `-dockerd-data` was the removed
+ * docker-in-docker volume.
  */
 export function runtimeVolumeNames(migratedName: string): string[] {
   return [`${migratedName}-socket`, `${migratedName}-assistant-ipc`, `${migratedName}-gateway-ipc`];
