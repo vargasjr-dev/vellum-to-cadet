@@ -603,7 +603,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     lines.push(`      ${command(`npx migrate-vellum-assistant-to-cadet uninstall`)}`);
   } else {
     lines.push(`  ${failIcon()} ${colors.red("Migration did not complete.")} ${detail("Nothing was deleted.")}`);
-    lines.push(`    ${detail(`Your data is safe: the vellum root at ${report.detect.vellumRoot} was not modified — it is your record.`)}`);
+    lines.push(`    ${detail(`Your data is safe: the vellum root at ${report.detect.vellumRoot} was not modified.`)}`);
     lines.push(`    ${detail(`Exit code: ${report.exitCode}`)}`);
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
   }

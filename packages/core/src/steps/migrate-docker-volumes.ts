@@ -142,7 +142,7 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
       failedInstances++;
       issues.push({
         severity: "error",
-        message: `${instanceId}: volume extraction failed (${message})`,
+        message: `${instanceId}: volume extraction failed (${message}) — the scratch tree extracts onto the host's own disk (${opts.workRoot}), not the docker VM's; check free space there`,
       });
       opts.onItem?.({ name: instanceId, status: "warning", summary: message });
     }
