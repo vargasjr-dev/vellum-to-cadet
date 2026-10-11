@@ -86,15 +86,18 @@ export async function preflight(
           // feedback: the extraction died mid-stream on the host disk the
           // old guard never looked at).
           const hostFree = await freeBytesFor(os.tmpdir());
-          if (hostFree !== null && hostFree < totalBytes * 1.2) {
+          if (hostFree === null) {
+            // Fail closed, same as the daemon-side checks above: an
+            // unmeasurable host disk must not stand the guard down (the
+            // v0.0.14 run still died on exactly this disk mid-extract).
+            issues.push({
+              severity: "error",
+              message: `could not determine the host's free disk space for the volume scratch directory under ${os.tmpdir()} — refusing to migrate without verifying the volume copy fits; check the host disk, or pass --skip-disk-space-check to proceed anyway`,
+            });
+          } else if (hostFree < totalBytes * 1.2) {
             issues.push({
               severity: "error",
               message: `insufficient host disk space: the migration extracts ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) of docker volumes into a scratch directory under ${os.tmpdir()}, have ${formatBytes(Math.floor(hostFree))} free there — free space on the host disk`,
-            });
-          } else if (hostFree === null) {
-            issues.push({
-              severity: "warning",
-              message: "could not determine the host's free disk space for the volume scratch directory — continuing",
             });
           }
         }
