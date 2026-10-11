@@ -17,12 +17,21 @@ import { handleToInstanceName } from "./layout.js";
  * (signing keys, tokens, unknown future fields) ride through unchanged.
  */
 
-/** The registration fields a vellum cloud login writes into an entry. */
-const VELLUM_PLATFORM_FIELDS = [
+/**
+ * The cloud-registration fields an entry can carry, under BOTH spellings of
+ * the same identity: the vellum-era `platform*` names and the `cloud*` names
+ * the lockfile contract was later renamed to — a build from either side of
+ * that rename can surface as a "vellum" install, and the values are vellum
+ * cloud identity either way.
+ */
+const VELLUM_CLOUD_IDENTITY_FIELDS = [
   "organizationId",
   "platformAssistantId",
   "platformBaseUrl",
   "platformOrganizationId",
+  "cloudAssistantId",
+  "cloudBaseUrl",
+  "cloudOrganizationId",
 ] as const;
 
 export interface EntryTransformOptions {
@@ -90,7 +99,7 @@ export function transformAssistantEntry(
   // registration ids recorded here must not leak either — `cadet login`
   // re-registers the assistants with cadet cloud from scratch.
   let hadLegacyPlatformCredentials = false;
-  for (const field of VELLUM_PLATFORM_FIELDS) {
+  for (const field of VELLUM_CLOUD_IDENTITY_FIELDS) {
     const value = entry[field];
     if (typeof value === "string" && value.length > 0) {
       hadLegacyPlatformCredentials = true;

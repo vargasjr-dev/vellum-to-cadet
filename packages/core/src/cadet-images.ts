@@ -1,6 +1,6 @@
 /**
  * Cadet's docker image references, derived the same way the cadet CLI
- * derives its own (mycadet cli/src/lib/platform-releases.ts
+ * derives its own (mycadet cli/src/lib/cloud-releases.ts
  * `resolveImageRefs` + `dockerhubImages`): repos under the `mycadet`
  * dockerhub org, a `-dev` repo suffix on dev builds, tag `v<version>`.
  *
