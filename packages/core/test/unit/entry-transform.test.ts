@@ -37,6 +37,7 @@ describe("entry-transform: assistant entries", () => {
         assistantId: "grand-ram",
         name: "grand-ram",
         cloud: "local",
+        cloudAssistantId: "asst_cloud_9",
         cloudBaseUrl: "https://platform.vellum.ai",
         cloudOrganizationId: "org_2",
         hatchedAt: "2026-09-01T10:00:00.000Z",
@@ -45,6 +46,7 @@ describe("entry-transform: assistant entries", () => {
     );
     expect(result.changed).toBe(true);
     expect(result.hadLegacyPlatformCredentials).toBe(true);
+    expect("cloudAssistantId" in result.entry).toBe(false);
     expect("cloudBaseUrl" in result.entry).toBe(false);
     expect("cloudOrganizationId" in result.entry).toBe(false);
     expect(result.entry.hatchedAt).toBe("2026-09-01T10:00:00.000Z");

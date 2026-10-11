@@ -29,6 +29,7 @@ const VELLUM_CLOUD_IDENTITY_FIELDS = [
   "platformAssistantId",
   "platformBaseUrl",
   "platformOrganizationId",
+  "cloudAssistantId",
   "cloudBaseUrl",
   "cloudOrganizationId",
 ] as const;
