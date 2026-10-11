@@ -29,6 +29,13 @@ npx migrate-vellum-assistant-to-cadet --dry-run   # plan only, touches nothing
 npx migrate-vellum-assistant-to-cadet --json      # machine-readable report
 ```
 
+Before anything moves, the CLI prints what it is about to do — the
+assistants it will put to sleep, the data it will migrate (including the
+docker volumes), and whether a cadet root already exists — and waits for
+Enter (`-y`/`--yes` skips the prompt for scripts). The migration runs
+detached: a dropped SSH session never takes it down, and the live log
+tails with `tail -f ~/.cadet-migration-logs/<run>.log`.
+
 On success the CLI prints a colorful summary plus **optional next steps**
 (install and launch cadet, and — only once you've confirmed your data —
 the `uninstall` subcommand to retire vellum for good).
@@ -40,8 +47,8 @@ the `uninstall` subcommand to retire vellum for good).
   separate backup copy is made.
 - `.cadet-migration-manifest.json` in the cadet root records what happened and
   makes re-runs verify-only.
-- Running vellum assistant processes are stopped automatically before the
-  migration; if one refuses to die, the run fails loudly with exit code 4.
+- Running vellum assistant processes are put to sleep automatically (via
+  `vellum sleep`) before the migration starts.
 
 ## Uninstalling vellum
 

@@ -14,11 +14,15 @@ import { appendFileSync, existsSync as fsExistsSync, openSync, readFileSync, unl
 import { promises as fsPromises } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { discoverVellumRoots, candidateRoots } from "./discover.js";
-import { formatProgress } from "./fs-utils.js";
-import { migrate, repair } from "./runner.js";
+import { formatBytes, formatProgress } from "./fs-utils.js";
+import { handleToInstanceName } from "./layout.js";
+import { defaultProcessOps } from "./process.js";
+import { gatherConfirmInfo, migrate, repair } from "./runner.js";
 import { renderUninstallHuman, runUninstall } from "./uninstall.js";
-import { toCadetRoot } from "./steps/detect.js";
+import { detect as detectStep, toCadetRoot } from "./steps/detect.js";
+import { vellumVolumeNames } from "./steps/migrate-docker-volumes.js";
 import {
   acquireRunLock,
   newRunLogPath,
@@ -28,7 +32,7 @@ import {
   runLockPath,
   type RunLockInfo,
 } from "./run-log.js";
-import { EXIT_CODES, type MigrationReport, type MigrateOptions, type StepIssue, type StepItemEvent, type StepResult } from "./types.js";
+import { EXIT_CODES, type ConfirmMigrationInfo, type MigrationReport, type MigrateOptions, type StepIssue, type StepItemEvent, type StepResult } from "./types.js";
 
 interface ParsedArgs extends MigrateOptions {
   help: boolean;
@@ -71,6 +75,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         parsed.dryRun = true;
         break;
       case "--yes":
+      case "-y":
         parsed.yes = true;
         break;
       case "--json":
@@ -154,7 +159,8 @@ Usage:
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
   --dry-run                Print the plan and touch nothing
-  --yes                    Non-interactive; assume yes
+  -y, --yes                Non-interactive; assume yes (skips the pre-migration
+                           confirmation)
   --json                   Machine-readable JSON report on stdout
   --verbose                Log every step to stderr
   --foreground             Run in this process (default: detached — survives
@@ -372,6 +378,72 @@ function printStarted(pid: number, logPath: string): void {
 }
 
 /**
+ * The pre-migration confirmation screen (v0.0.15 field feedback): the
+ * assistants about to sleep, the bytes moving, and — when the cadet root
+ * already exists — the note that lets the user clear it FIRST.
+ */
+function renderConfirmPrompt(info: ConfirmMigrationInfo): string {
+  const lines: string[] = [];
+  lines.push(`\n  ${warnText("⚠ About to migrate:")}`);
+  if (info.assistants.length > 0) {
+    for (const assistant of info.assistants) {
+      lines.push(
+        `    ${detail("·")} assistant ${assistant.name}${assistant.docker ? " (docker)" : ""} — will be put to sleep`,
+      );
+    }
+  } else {
+    lines.push(`    ${detail("·")} no lockfile-tracked assistants found`);
+  }
+  lines.push(`    ${detail("·")} vellum root: ${info.vellumRoot} (${formatBytes(info.rootSizeBytes)} on disk)`);
+  if (info.dockerVolumeCount > 0) {
+    const size = info.dockerVolumeBytes !== null ? ` (~${formatBytes(info.dockerVolumeBytes)})` : "";
+    lines.push(
+      `    ${detail("·")} docker volumes: ${info.dockerVolumeCount} to fetch${size} — extracted to a scratch dir on this Mac, then imported into new cadet volumes`,
+    );
+  }
+  if (info.retiredCount > 0) {
+    lines.push(`    ${detail("·")} ${info.retiredCount} retired assistant archive(s) migrate too`);
+  }
+  if (info.cadetRootExists) {
+    lines.push(
+      `    ${detail("·")} cadet root ${info.cadetRoot} ALREADY EXISTS — its data will be updated in place; delete it first for a clean start`,
+    );
+  } else {
+    lines.push(`    ${detail("·")} cadet root: ${info.cadetRoot}`);
+  }
+  lines.push("");
+  lines.push(`  Press ${command("Enter")} to continue, Ctrl-C to cancel (skip this prompt with --yes).`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Print the confirmation screen and wait for Enter. Ctrl-C aborts the
+ * process (the shell's exit code carries it). A CLOSED stdin — piped and
+ * cron runs — resolves as PROCEED: the interactive terminal is the case
+ * that waits; question() on an already-closed input never settles, which
+ * wedged the whole run (caught by the smoke).
+ */
+async function promptConfirmMigration(info: ConfirmMigrationInfo): Promise<boolean> {
+  process.stderr.write(renderConfirmPrompt(info));
+  if (!process.stdin.readable) return true;
+  return await new Promise<boolean>((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let settled = false;
+    const settle = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(value);
+    };
+    rl.on("close", () => settle(true));
+    rl.question("")
+      .then(() => settle(true))
+      .catch(() => settle(true));
+  });
+}
+
+/**
  * The default `migrate` flow (v0.0.12 run feedback: the SSH session died
  * mid fetch-docker-volumes and took the migration with it). The heavy work
  * runs in a DETACHED child that survives disconnects; this process
@@ -406,6 +478,25 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
   }
   parsed.vellumRoot = resolved;
   if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
+
+  // The pre-migration confirmation (v0.0.15 field feedback: "warn the
+  // user that we are about to put their assistants to sleep and migrate X
+  // amount of data"). Ask HERE — while stdin still works; the detached
+  // child cannot prompt. A declined prompt exits before the lock, the
+  // log, or the child exist: nothing was touched.
+  if (!parsed.yes) {
+    const detect = await detectStep(
+      { vellumRoot: resolved, cadetRoot: parsed.cadetRoot, cadetRootExplicit: parsed.cadetRootExplicit },
+      defaultProcessOps,
+    );
+    if (detect.vellumRootExists) {
+      const ok = await promptConfirmMigration(await gatherConfirmInfo(detect, defaultProcessOps));
+      if (!ok) {
+        console.error(errorText("migration declined — nothing was touched."));
+        return EXIT_CODES.notConfirmed;
+      }
+    }
+  }
 
   const logPath = newRunLogPath();
   const startedAt = new Date().toISOString();
@@ -594,7 +685,21 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
       return lines.join("\n");
     }
     lines.push(`  ${successIcon()} ${colors.green("Migration complete.")} Your assistant data now lives in:`);
-    lines.push(`    ${command(report.detect.cadetRoot)}`);
+    // Docker assistants keep their data in the cadet DOCKER VOLUMES — the
+    // root line names the cadet root itself, never a local instance dir
+    // (v0.0.15 field feedback: "I do not expect local assistant data if
+    // it's a docker assistant").
+    const dockerInstances = report.detect.docker.instances;
+    if (dockerInstances.length > 0) {
+      lines.push(`    ${command(cadetRootDir(report.detect.cadetRoot))}`);
+      for (const instance of dockerInstances) {
+        lines.push(
+          `    ${detail(`· docker volumes: cadet-${handleToInstanceName(instance)}-{workspace,gateway-sec,ces-sec}`)}`,
+        );
+      }
+    } else {
+      lines.push(`    ${command(report.detect.cadetRoot)}`);
+    }
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
     lines.push("");
     lines.push(`  ${header("Optional next steps")}`);
@@ -609,6 +714,13 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/** The cadet ROOT dir for a cadetRoot that may be a nested instance dir (`…/cadet/assistants/<name>`). */
+function cadetRootDir(cadetRoot: string): string {
+  return path.basename(path.dirname(cadetRoot)) === "assistants"
+    ? path.dirname(path.dirname(cadetRoot))
+    : cadetRoot;
 }
 
 /** Wall-clock duration, human-formatted: 1h 2m 3s / 4m 12s / 38s. */
@@ -903,6 +1015,13 @@ async function main(): Promise<number> {
   try {
     const report = await migrate({
       ...parsed,
+      // The runner asks right after detect (before stop-assistant) — only
+      // when this process actually has a terminal to ask with. The
+      // detached child never gets a callback (the launcher confirmed).
+      confirm:
+        !parsed.json && !parsed.yes && Boolean(process.stdin.isTTY)
+          ? (info) => promptConfirmMigration(info)
+          : undefined,
       onStepStart: live ? progress.onStepStart : undefined,
       onStepDone: live ? progress.onStepDone : undefined,
       onStepItem: live ? progress.onStepItem : undefined,

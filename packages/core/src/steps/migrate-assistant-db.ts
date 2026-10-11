@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { USER_WORKSPACE_DIR } from "../layout.js";
+import { handleToInstanceName, USER_WORKSPACE_DIR } from "../layout.js";
 import { walkTree } from "../fs-utils.js";
 import { openSqliteDatabase, type SqliteDatabase } from "../sqlite.js";
 import type { StepIssue, StepResult } from "../types.js";
@@ -166,6 +166,20 @@ interface DbTarget {
 }
 
 /**
+ * Display form of a db path under a working root: the docker scratch tree
+ * keys dbs by the RAW lockfile handle (`vellum-<name>/workspace/…`), and
+ * the raw brand prefix is noise the user never chose — labels read under
+ * the migrated instance name, matching every other step line (v0.0.15
+ * field feedback). Non-instance leading segments pass through unchanged.
+ */
+export function displayDbRel(rel: string): string {
+  const segments = rel.split("/");
+  const [first] = segments;
+  if (first === undefined) return rel;
+  return [handleToInstanceName(first), ...segments.slice(1)].join("/");
+}
+
+/**
  * The shared migrate-assistant-db step: value-migrate EVERY assistant db
  * the given working roots hold. The roots are plain directories carrying
  * state trees — the copied cadet root (local) and/or the docker flow's
@@ -279,12 +293,17 @@ async function migrateDbsAt(
   let completed = 0;
   for (const [i, r] of results.entries()) {
     const destRel = targets[i]!.destRel;
+    // Display form: the docker scratch tree keys dbs by the RAW lockfile
+    // handle (`vellum-prime-quail-3ezfs4/workspace/…`) — the raw brand
+    // prefix is noise the user never chose (v0.0.15 field feedback), so
+    // labels read under the migrated instance name.
+    const displayRel = displayDbRel(destRel);
     if (r.status === "completed") completed++;
     for (const issue of r.issues ?? []) {
       issues.push(
         issue.severity === "info"
-          ? { ...issue, message: `${destRel} — ${issue.message}` }
-          : { ...issue, message: `${destRel}: ${issue.message}` },
+          ? { ...issue, message: `${displayRel} — ${issue.message}` }
+          : { ...issue, message: `${displayRel}: ${issue.message}` },
       );
     }
     const rows = Object.values(
@@ -339,10 +358,22 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     // rewrites below run, so WAL-resident vellum rows are rewritten too.
     db = openSqliteDatabase(dbPath);
   } catch (err) {
+    // SELF-DIAGNOSING (v0.0.15 field feedback: "unable to open database
+    // file" named neither the absolute path nor why — on a re-run the
+    // working roots include the cadet root itself, where a legacy-shaped
+    // copy of the db can be a broken leftover the user has never seen).
+    const absPath = path.join(cadetRoot, destRel);
+    const diagnosis = await diagnoseUnreadableDb(absPath);
     return {
       step,
       status: "skipped",
-      summary: `${label} is not a readable sqlite file — left verbatim (${(err as Error).message})`,
+      summary: `${label} could not be opened — left verbatim (${(err as Error).message})`,
+      issues: [
+        {
+          severity: "warning",
+          message: `${absPath}: ${(err as Error).message} — ${diagnosis}`,
+        },
+      ],
     };
   }
 
@@ -382,6 +413,29 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       if (!tableExists(table)) continue;
       if (!columnExists(table, column)) continue;
       try {
+        // Unique-index-aware dedupe BEFORE the rewrite: rewriting 'vellum'
+        // → 'cadet' can only collide on an index that includes the column,
+        // and the real-world case is a twin row — the same address recorded
+        // once under each brand spelling (contact_channels UNIQUE(type,
+        // address) with rows (vellum, X) and (cadet, X) from the guardian
+        // principal re-seed across the rebrand). Without this, the UPDATE
+        // aborts with "UNIQUE constraint failed", 0 rows rewritten, and the
+        // whole column stays branded (v0.0.15 field run: 19 rows). The
+        // cadet-spelled twin wins — it is the row the renamed runtime
+        // seeded and reads; the vellum row is the dead spelling.
+        let mergedRows = 0;
+        for (const keyCols of uniqueIndexesOn(db, table, column)) {
+          const merged = dedupeCollidingRows(runCounted, table, column, keyCols);
+          if (merged > 0) {
+            mergedRows += merged;
+          }
+        }
+        if (mergedRows > 0) {
+          issues.push({
+            severity: "info",
+            message: `${table}.${column}: merged ${mergedRows} duplicate row(s) — a 'cadet' twin already held the unique key; the vellum-spelled row was dropped`,
+          });
+        }
         channelRows += runCounted(
           `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
         );
@@ -486,4 +540,88 @@ async function fileExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * UNIQUE indexes containing the given column — the only constraints a
+ * 'vellum' → 'cadet' rewrite on that column can violate (the UPDATE
+ * changes nothing else, so a collision must involve the column).
+ * Expression indexes (null column names in pragma_index_info) and partial
+ * indexes are skipped: their semantics don't reduce to plain column
+ * equality. The PK autoindex drops out naturally unless the rewritten
+ * column IS the key.
+ */
+function uniqueIndexesOn(
+  db: SqliteDatabase,
+  table: string,
+  column: string,
+): string[][] {
+  const out: string[][] = [];
+  const list = db
+    .prepare(`SELECT name, "unique" AS uniq, partial FROM pragma_index_list(?)`)
+    .all(table) as Array<{ name: string; uniq: number; partial: number }>;
+  for (const idx of list) {
+    if (!idx.uniq || idx.partial) continue;
+    const cols = (
+      db.prepare(`SELECT name FROM pragma_index_info(?)`).all(idx.name) as Array<{
+        name: string | null;
+      }>
+    ).map((c) => c.name);
+    if (cols.some((c) => typeof c !== "string")) continue;
+    if (!cols.includes(column)) continue;
+    out.push(cols as string[]);
+  }
+  return out;
+}
+
+/**
+ * Delete the vellum-spelled rows that would collide with an existing
+ * cadet-spelled twin on one unique index. `twin.col IS table.col` keeps
+ * NULLs equal (SQLite's null-safe comparison). Returns the rows removed.
+ */
+function dedupeCollidingRows(
+  runCounted: (sql: string) => number,
+  table: string,
+  column: string,
+  keyCols: string[],
+): number {
+  const twinMatch = keyCols
+    .filter((k) => k !== column)
+    .map((k) => `twin.${k} IS ${table}.${k}`)
+    .join(" AND ");
+  return runCounted(
+    `DELETE FROM ${table} WHERE ${table}.${column} = 'vellum' AND EXISTS (` +
+      `SELECT 1 FROM ${table} AS twin WHERE twin.${column} = 'cadet'` +
+      (twinMatch ? ` AND ${twinMatch}` : "") +
+      `)`,
+  );
+}
+
+/**
+ * Why a db file can't be opened — the classes that produced the v0.0.15
+ * field warning: a directory wearing a db's name, a symlink whose target
+ * is gone (copied verbatim by an earlier run's layout copy), odd
+ * permissions. Read-only probing; never throws.
+ */
+export async function diagnoseUnreadableDb(absPath: string): Promise<string> {
+  const parts: string[] = [];
+  try {
+    const lstat = await fs.lstat(absPath);
+    if (lstat.isSymbolicLink()) {
+      const target = await fs.readlink(absPath).catch(() => "?");
+      let targetNote = target;
+      try {
+        await fs.stat(absPath);
+      } catch {
+        targetNote = `${target} (target missing)`;
+      }
+      parts.push(`symlink → ${targetNote}`);
+    } else if (lstat.isDirectory()) {
+      parts.push("it is a directory, not a sqlite file");
+    }
+    parts.push(`${lstat.size} bytes, mode ${(lstat.mode & 0o777).toString(8).padStart(3, "0")}`);
+  } catch {
+    parts.push("no longer present on disk");
+  }
+  return parts.join(", ");
 }

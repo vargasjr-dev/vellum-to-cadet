@@ -284,17 +284,36 @@ export const defaultProcessOps: ProcessOps = {
   },
 
   async cadetLogin() {
-    // Interactive by design: the browser PKCE flow. stdio inherit so the
-    // user sees the browser handoff and any prompts — resolves when the
-    // flow finishes; a nonzero exit rejects.
+    // Interactive by design: the browser PKCE flow. stdout + stdin stay
+    // inherited so the user sees the browser handoff and any prompts;
+    // stderr is captured and echoed on failure — "cadet login exited 1"
+    // alone tells the user nothing (v0.0.15 field feedback asked for the
+    // actual reason).
     await new Promise<void>((resolve, reject) => {
-      const child = spawn("cadet", ["login"], { stdio: "inherit" });
+      const child = spawn("cadet", ["login"], { stdio: ["inherit", "inherit", "pipe"] });
+      const stderrChunks: Buffer[] = [];
+      child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
       child.on("error", reject);
-      child.on("close", (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`cadet login exited ${code ?? "without a code"}`)),
-      );
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const stderr = Buffer.concat(stderrChunks)
+          .toString("utf8")
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .slice(-3)
+          .join(" — ");
+        reject(
+          new Error(
+            stderr.length > 0
+              ? `cadet login exited ${code ?? "without a code"}: ${stderr}`
+              : `cadet login exited ${code ?? "without a code"}`,
+          ),
+        );
+      });
     });
   },
 
@@ -412,6 +431,11 @@ export const defaultProcessOps: ProcessOps = {
       ],
       `import into ${volume}`,
     );
+  },
+
+  async dockerVolumeCreate(name: string) {
+    // `docker volume create` on an existing name is a no-op that exits 0.
+    await execFileAsync("docker", ["volume", "create", name], { timeout: 15_000 });
   },
 
   async dockerAvailable() {

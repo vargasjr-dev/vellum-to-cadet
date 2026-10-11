@@ -76,13 +76,66 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
   if (source === null) {
     parts.push("no vellum lockfile found");
   } else if (await pathExists(dest)) {
-    issues.push({
-      severity: "warning",
-      message:
-        `the cadet lockfile at ${dest} already exists — the assistants recorded in ${source.path} ` +
-        "were NOT merged into it; review it and merge manually if assistants are missing",
-    });
-    parts.push(`cadet lockfile already exists — ${source.path} not converted`);
+    // MERGE-AND-REPLACE (v0.0.15 field feedback: "should absolutely merge
+    // in and replace"). The cadet lockfile is live state — its root
+    // fields (device identity, tokens) and its own assistants are KEPT;
+    // every converted vellum entry UPSERTS by assistantId, replacing any
+    // same-id entry wholesale. Re-runs heal the lockfile too: the
+    // migrated assistants land even when a previous run skipped here.
+    const converted = convertVellumLockfile(source.data, opts);
+    if (converted.assistantCount === 0) {
+      parts.push(`${source.path} records no assistants — nothing to merge`);
+    } else {
+      try {
+        const destRaw = JSON.parse(await fs.readFile(dest, "utf8")) as Record<string, unknown>;
+        const destAssistants = Array.isArray(destRaw.assistants)
+          ? destRaw.assistants.filter(
+              (e): e is Record<string, unknown> =>
+                typeof e === "object" && e !== null && !Array.isArray(e),
+            )
+          : [];
+        const convertedIds = new Set(
+          converted.assistants
+            .map((e) => e.assistantId)
+            .filter((id): id is string => typeof id === "string" && id.length > 0),
+        );
+        const merged = [
+          ...destAssistants.filter(
+            (e) => !(typeof e.assistantId === "string" && convertedIds.has(e.assistantId)),
+          ),
+          ...converted.assistants,
+        ];
+        const lockfile: Record<string, unknown> = { ...destRaw, assistants: merged };
+        // Active assistant: the cadet lockfile's choice stands; only a
+        // lockfile without one inherits the vellum pick (brand prefix
+        // stripped, same rule the fresh conversion applies).
+        const convertedActive = converted.lockfile.activeAssistant;
+        if (typeof lockfile.activeAssistant !== "string" && typeof convertedActive === "string") {
+          lockfile.activeAssistant = convertedActive;
+        }
+        await fs.mkdir(destDir, { recursive: true });
+        await fs.writeFile(dest, JSON.stringify(lockfile, null, 2) + "\n", "utf8");
+        parts.push(
+          `merged ${converted.assistantCount} assistant(s) from ${source.path} into the cadet lockfile at ${dest}`,
+        );
+      } catch (err) {
+        issues.push({
+          severity: "warning",
+          message: `the cadet lockfile at ${dest} could not be merged (${(err as Error).message}) — merge the assistants from ${source.path} manually`,
+        });
+        parts.push("cadet lockfile exists — merge failed");
+      }
+    }
+    if (converted.legacyPlatformCredentials) {
+      data["legacyPlatformCredentials"] = true;
+    }
+    if (converted.dockerImagesUnresolved) {
+      issues.push({
+        severity: "warning",
+        message:
+          "docker assistant(s) kept their vellum image refs — the cadet CLI version was unavailable to resolve cadet's. Wake will fail until `cadet hatch` or `cadet upgrade` refreshes them.",
+      });
+    }
   } else {
     const converted = convertVellumLockfile(source.data, opts);
     if (converted.assistantCount === 0) {
@@ -151,6 +204,8 @@ function convertVellumLockfile(
   opts: MigrateLockfileOptions,
 ): {
   lockfile: Record<string, unknown>;
+  /** The converted entries, top-level for the existing-lockfile merge. */
+  assistants: Record<string, unknown>[];
   assistantCount: number;
   legacyPlatformCredentials: boolean;
   dockerImagesUnresolved: boolean;
@@ -195,7 +250,13 @@ function convertVellumLockfile(
     lockfile.activeAssistant = raw.activeAssistant.replace(/^vellum-/, "");
   }
 
-  return { lockfile, assistantCount: assistants.length, legacyPlatformCredentials, dockerImagesUnresolved };
+  return {
+    lockfile,
+    assistants,
+    assistantCount: assistants.length,
+    legacyPlatformCredentials,
+    dockerImagesUnresolved,
+  };
 }
 
 /**
