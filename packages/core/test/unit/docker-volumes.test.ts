@@ -143,7 +143,8 @@ describe("fetch-docker-volumes", () => {
     expect(result.summary).toContain("1 docker instance(s)");
     // The per-instance events: started, then completed with a summary.
     expect(items.map((i) => i.status)).toEqual(["started", "completed"]);
-    expect(items[1]?.summary).toContain("3 volume(s) extracted");
+    // (v0.0.16 field feedback: the summary carries the bytes + duration.)
+    expect(items[1]?.summary).toMatch(/3 volume\(s\), .* extracted in /);
 
     // The extracted trees are STATE-SHAPED — one state root per assistant,
     // the layout the value steps' discovery expects. Workspace content
@@ -235,12 +236,24 @@ describe("fetch-docker-volumes", () => {
       onItem: (item) => items.push(item),
     });
 
-    expect(reports.length).toBe(3); // one per volume: workspace, gateway-sec, ces-sec
+    expect(reports.length).toBe(3); // one per volume — the three now stream CONCURRENTLY
     items.length = 0; // drop the started/completed pair — pin progress alone
+    // Each stream taps its own bytes; the item event carries the
+    // AGGREGATE across the volumes, totalBytes once every denominator is
+    // measured (v0.0.16: parallel transfers, one summed progress line).
     reports[0]?.(300, 400);
-    expect(items).toEqual([
-      { name: INSTANCE, status: "progress", progress: { bytes: 300, totalBytes: 400, label: "workspace" } },
-    ]);
+    expect(items.at(-1)).toEqual({
+      name: INSTANCE,
+      status: "progress",
+      progress: { bytes: 300, label: "volumes" },
+    });
+    reports[1]?.(50, 100);
+    reports[2]?.(7, 10);
+    expect(items.at(-1)).toEqual({
+      name: INSTANCE,
+      status: "progress",
+      progress: { bytes: 357, totalBytes: 510, label: "volumes" },
+    });
   });
 });
 
@@ -376,17 +389,23 @@ describe("the shared value steps over the extracted trees", () => {
     expect(verifyData.dbsChecked).toBe(2);
     expect(verifyData.storesChecked).toBe(1);
     const messages = verifyData.issues.map((i) => i.message);
+    // Labels read under the MIGRATED name — the raw vellum- prefix is
+    // stripped (v0.0.16 field feedback).
     expect(
       messages.some(
         (m) =>
           m.includes("still has") &&
           m.includes("vellum-branded row(s)") &&
-          m.includes(`${INSTANCE}/workspace/data/db/assistant.db`),
+          m.includes(`${MIGRATED}/workspace/data/db/assistant.db`),
       ),
     ).toBe(true);
     expect(
       messages.some(
-        (m) => m.includes(`${INSTANCE}/gateway-security/gateway.sqlite`) && m.includes("vellum-branded row(s)"),
+        (m) =>
+          m.includes(`${MIGRATED}/gateway-security/gateway.sqlite`) &&
+          m.includes("vellum-branded row(s)") &&
+          // The breakdown names the offending tables/columns (v0.0.16).
+          m.includes("contact_channels.type = 'vellum'"),
       ),
     ).toBe(true);
     expect(

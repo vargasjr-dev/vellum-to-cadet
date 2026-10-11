@@ -20,7 +20,12 @@ import {
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
-import { fetchDockerVolumes, loadDockerVolumes, verifyDockerVolumeData } from "./steps/migrate-docker-volumes.js";
+import {
+  fetchDockerVolumes,
+  loadDockerVolumes,
+  vellumVolumeNames,
+  verifyDockerVolumeData,
+} from "./steps/migrate-docker-volumes.js";
 import { readLockfileAssistants } from "./steps/detect.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
@@ -36,9 +41,11 @@ import {
 } from "./fs-utils.js";
 import {
   EXIT_CODES,
+  type ConfirmMigrationInfo,
   type DetectInfo,
   type MigrationReport,
   type MigrateOptions,
+  type ProcessOps,
   type StepIssue,
   type StepItemEvent,
   type StepResult,
@@ -46,6 +53,48 @@ import {
 
 function utcStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + "Z";
+}
+
+/**
+ * Assemble the pre-migration confirmation payload from a detect result —
+ * shared by the runner's confirm hook and the launcher's pre-detach prompt
+ * (the detached child has no stdin, so the LAUNCHER is the one that asks).
+ * The docker volume bytes ride the same du the preflight disk guard uses;
+ * a failed du (daemon unreachable) yields null and the prompt names the
+ * volumes without a size.
+ */
+export async function gatherConfirmInfo(
+  detect: DetectInfo,
+  ops: Pick<ProcessOps, "dockerVolumeSize">,
+): Promise<ConfirmMigrationInfo> {
+  const dockerInstances = detect.docker.instances;
+  let dockerVolumeBytes: number | null = null;
+  if (dockerInstances.length > 0) {
+    const sizes: number[] = [];
+    for (const instance of dockerInstances) {
+      for (const volume of vellumVolumeNames(instance)) {
+        const size = await ops.dockerVolumeSize?.(volume);
+        if (typeof size === "number") sizes.push(size);
+      }
+    }
+    if (sizes.length > 0) dockerVolumeBytes = sizes.reduce((a, b) => a + b, 0);
+  }
+  return {
+    vellumRoot: detect.vellumRoot,
+    cadetRoot: detect.cadetRoot,
+    cadetRootExists: detect.cadetRootExists,
+    assistants: detect.assistantHandles.map((handle) => ({
+      name: handleToInstanceName(handle),
+      docker: dockerInstances.includes(handle),
+    })),
+    retiredCount: detect.retiredCount,
+    rootSizeBytes: detect.rootSizeBytes,
+    dockerVolumeBytes,
+    dockerVolumeCount: dockerInstances.reduce(
+      (sum, instance) => sum + vellumVolumeNames(instance).length,
+      0,
+    ),
+  };
 }
 
 /**
@@ -86,6 +135,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
             (handle) =>
               `    · migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " (docker)" : ""}`,
           ),
+          // v0.0.15 field feedback: an existing cadet root is a decision
+          // the user gets to make BEFORE confirming — its data will be
+          // updated in place, and they may want to clear it first.
+          ...(detect.cadetRootExists
+            ? [
+                `    · cadet root ${detect.cadetRoot} already exists — its data will be updated in place (delete it first for a clean start)`,
+              ]
+            : []),
           ...(detect.retiredCount > 0
             ? [`    · ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
             : []),
@@ -146,6 +203,21 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     detect.cadetRootPopulated = false;
   } else if (target.kind === "already-migrated") {
     detect.cadetRoot = target.cadetRoot;
+  }
+
+  // Pre-migration confirmation (v0.0.15 field feedback: "warn the user
+  // that we are about to put their assistants to sleep and migrate X
+  // amount of data. They should confirm with enter, skippable with -y").
+  // Runs BEFORE anything mutates — the fresh flow's stop-assistant, the
+  // heal flow's fetch — and AFTER target resolution, so the prompt names
+  // the final cadet root and flags an existing one the user may want to
+  // clear first. The cli wires the callback only for interactive runs;
+  // --yes/--json/non-TTY runs never see it.
+  if (options.confirm && !options.dryRun) {
+    const confirmed = await options.confirm(await gatherConfirmInfo(detect, ops));
+    if (!confirmed) {
+      return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.notConfirmed);
+    }
   }
 
   // Already-migrated path: the idempotent fix steps first — a re-run after a
@@ -223,8 +295,16 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       }
     }
     // Same image-ref contract as the fresh path: when a cadet CLI is
-    // present, its version derives the docker entries' cadet images.
-    const reBinAvailable = await ops.cadetBinAvailable();
+    // present, its version derives the docker entries' cadet images. A
+    // missing binary gets installed HERE (before the lockfile merge reads
+    // the version) — a re-run after a failed install heals the CLI too.
+    let reBinAvailable = await ops.cadetBinAvailable();
+    if (!reBinAvailable) {
+      start("install-cadet");
+      const reInstall = await installCadetCli(ops, 1);
+      done(reInstall);
+      reBinAvailable = reInstall.data?.["binAvailable"] === true;
+    }
     const reVersion = reBinAvailable ? await ops.cadetVersion() : null;
     start("migrate-lockfile");
     const reLockfile = await migrateLockfile({
@@ -260,11 +340,19 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       start("cadet-login");
       done(
         await cadetLoginStep(ops, {
-          binAvailable: await ops.cadetBinAvailable(),
+          binAvailable: reBinAvailable,
           detected: true,
+          interactive: !options.internalRun,
         }),
       );
     }
+    // Wake (v0.0.15 field feedback: "I did not see a cadet wake at the
+    // end") — the re-run is a full heal, and with the lockfile merged
+    // above the migrated assistants are tracked, so wake them exactly
+    // like the fresh flow would.
+    const reAssistantCount = (await readLockfileAssistants()).length;
+    start("wake-assistants");
+    done(await wakeAssistants(ops, reAssistantCount, reBinAvailable));
     return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
   }
 
@@ -476,6 +564,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       detected:
         credentials.data?.["detected"] === true ||
         lockfile.data?.["legacyPlatformCredentials"] === true,
+      interactive: !options.internalRun,
     }),
   );
   start("wake-assistants");

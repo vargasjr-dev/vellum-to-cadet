@@ -125,7 +125,7 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, bi
  */
 export async function cadetLoginStep(
   ops: ProcessOps,
-  opts: { binAvailable: boolean; detected: boolean },
+  opts: { binAvailable: boolean; detected: boolean; interactive?: boolean },
 ): Promise<StepResult> {
   if (!opts.detected) {
     return {
@@ -139,6 +139,18 @@ export async function cadetLoginStep(
       step: "cadet-login",
       status: "skipped",
       summary: "skipped — no `cadet` binary on PATH (see install-cadet ⚠)",
+    };
+  }
+  if (opts.interactive === false) {
+    // The detached child has no terminal — the browser PKCE flow cannot
+    // run here, and attempting it just fails (v0.0.15 field run: "cadet
+    // login failed: cadet login exited 1" with no reason). Skip with the
+    // instruction instead.
+    return {
+      step: "cadet-login",
+      status: "skipped",
+      summary:
+        "the migration runs detached, so `cadet login` (an interactive browser flow) did not run — run `cadet login` in your terminal before using cloud features",
     };
   }
   try {

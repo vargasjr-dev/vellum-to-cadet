@@ -17,13 +17,13 @@ import { expect } from "../helpers/expect.js";
 
 describe("formatBytes", () => {
   test("converts to GB when applicable", () => {
-    expect(formatBytes(10_800_600_000)).toBe("10.8GB");
-    expect(formatBytes(1e9)).toBe("1.0GB");
+    expect(formatBytes(10_800_600_000)).toBe("10.80GB");
+    expect(formatBytes(1e9)).toBe("1.00GB");
   });
 
   test("keeps MB/KB/B below the GB threshold", () => {
     expect(formatBytes(999_999_999)).toBe("1000.0MB");
-    expect(formatBytes(10800.6 * 1e6)).toBe("10.8GB");
+    expect(formatBytes(10800.6 * 1e6)).toBe("10.80GB");
     expect(formatBytes(512_400)).toBe("512.4KB");
     expect(formatBytes(512)).toBe("512B");
   });
@@ -31,12 +31,12 @@ describe("formatBytes", () => {
 
 describe("formatProgress", () => {
   test("renders bytes over total with a percentage", () => {
-    expect(formatProgress(1.2e9, 4e9)).toBe("1.2GB/4.0GB (30%)");
+    expect(formatProgress(1.2e9, 4e9)).toBe("1.20GB/4.00GB (30%)");
     expect(formatProgress(5e8, 5e8)).toBe("500.0MB/500.0MB (100%)");
   });
 
   test("clamps at 100% (tar headers can push the count past the du estimate)", () => {
-    expect(formatProgress(5e9, 4e9)).toBe("5.0GB/4.0GB (100%)");
+    expect(formatProgress(5e9, 4e9)).toBe("5.00GB/4.00GB (100%)");
   });
 
   test("falls back to bytes-so-far without a total (size pre-pass failed)", () => {

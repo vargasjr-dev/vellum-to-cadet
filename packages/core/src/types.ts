@@ -59,6 +59,29 @@ export interface DetectInfo {
   externalReferences: string[];
 }
 
+/**
+ * What the pre-migration confirmation tells the user, gathered from detect
+ * (v0.0.15 field feedback: "warn the user that we are about to put their
+ * assistants to sleep and migrate X amount of data"). dockerVolumeBytes is
+ * null when the volumes could not be measured (daemon unreachable) — the
+ * prompt then names the volumes without a size.
+ */
+export interface ConfirmMigrationInfo {
+  vellumRoot: string;
+  cadetRoot: string;
+  /** The cadet root already exists (re-run or occupied target) — its data will be updated in place. */
+  cadetRootExists: boolean;
+  /** Assistants about to be put to sleep, under their MIGRATED names. */
+  assistants: Array<{ name: string; docker: boolean }>;
+  retiredCount: number;
+  /** Bytes in the vellum host root. */
+  rootSizeBytes: number;
+  /** Bytes across the docker volumes being fetched, or null when unmeasured. */
+  dockerVolumeBytes: number | null;
+  /** Number of docker volumes to fetch (0 when not a docker install). */
+  dockerVolumeCount: number;
+}
+
 /** Live progress: a named item inside the running step (e.g. each retired archive). */
 export interface StepItemEvent {
   /** Item name shown verbatim in the nested progress line. */
@@ -91,6 +114,17 @@ export interface MigrateOptions {
   yes?: boolean;
   /** Verbose logging to stderr. */
   verbose?: boolean;
+  /** True when this process IS the detached child (--internal-run): the launcher already confirmed. */
+  internalRun?: boolean;
+  /**
+   * Pre-flight confirmation (v0.0.15 field feedback: the run puts assistants
+   * to sleep and moves tens of GB before the user ever had a say). Called
+   * once after detect + target resolution, before the FIRST mutating step —
+   * so the prompt can name the final cadet root and flag an existing one
+   * the user may want to clear first. Returning false aborts with
+   * EXIT_CODES.notConfirmed and touches nothing.
+   */
+  confirm?: (info: ConfirmMigrationInfo) => Promise<boolean>;
   /** Test seam: override process discovery and the stop command. */
   processOps?: ProcessOps;
   /** Test seam: skip filesystem checks that need privileged statfs. */
@@ -175,6 +209,12 @@ export interface ProcessOps {
     image?: string,
     onProgress?: (bytes: number, totalBytes?: number) => void,
   ): Promise<void>;
+  /**
+   * Create an empty named docker volume if missing (`docker volume create`
+   * on an existing name is a no-op). Used by load-docker-volumes to
+   * pre-create the runtime volumes the migrated instance should have.
+   */
+  dockerVolumeCreate?(name: string): Promise<void>;
   /** True when the docker CLI has a usable daemon (`docker info` succeeds). */
   dockerAvailable(): Promise<boolean>;
   /**
@@ -243,6 +283,8 @@ export const EXIT_CODES = {
   ambiguousRoot: 9,
   /** Uninstall was not confirmed (declined or unconfirmable). */
   uninstallDeclined: 10,
+  /** The pre-migration confirmation was declined (same number as uninstall's decline — same semantic). */
+  notConfirmed: 10,
   /** Uninstall failed to delete one or more targets. */
   uninstallFailed: 11,
   /** A migration is already running (the run lock is held by a live pid). */

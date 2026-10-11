@@ -292,18 +292,20 @@ async function collectSymlinks(root: string): Promise<Array<{ absPath: string; r
 /**
  * Human-readable byte size. Decimal units (1 GB = 1000 MB) to match the
  * `du`-style numbers users see elsewhere; 10.8 GB reads better than
- * 10800.6 MB.
+ * 10800.6 MB. GB carries TWO decimals (v0.0.15 field feedback: at
+ * multi-GB transfer totals, one decimal is a 100MB granularity the user
+ * can't watch move); MB/KB keep one.
  */
 export function formatBytes(bytes: number): string {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)}GB`;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)}GB`;
   if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)}MB`;
   if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)}KB`;
   return `${bytes}B`;
 }
 
 /**
- * Byte progress for a long transfer: `1.2GB/4.0GB (30%)` when the total is
- * known, bytes-so-far when it is not (the size pre-pass failed).
+ * Byte progress for a long transfer: `1.20GB/4.00GB (30%)` when the total
+ * is known, bytes-so-far when it is not (the size pre-pass failed).
  */
 export function formatProgress(bytes: number, totalBytes?: number): string {
   if (totalBytes !== undefined && totalBytes > 0) {

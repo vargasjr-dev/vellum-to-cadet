@@ -3,13 +3,14 @@ import * as path from "node:path";
 
 import {
   applySubstitutions,
+  formatBytes,
   isDbArtifact,
   isRewriteEligible,
   sanctionedContentTransform,
   walkTree,
 } from "../fs-utils.js";
 import { handleToInstanceName } from "../layout.js";
-import { findStateDbs } from "./migrate-assistant-db.js";
+import { displayDbRel, findStateDbs } from "./migrate-assistant-db.js";
 import { dbVellumRows, VALUE_MIGRATED_DBS } from "./verify.js";
 import type { ProcessOps, StepIssue, StepItemEvent, StepResult } from "../types.js";
 
@@ -60,6 +61,28 @@ export function vellumVolumeNames(rawInstanceId: string): string[] {
   return dockerVolumes(rawInstanceId, "").map((vol) => vol.from);
 }
 
+/**
+ * The runtime (non-data) volumes cadet's docker hatch creates EMPTY — the
+ * bootstrap/ipc socket dirs. Vellum's hatch never created them, so the
+ * migrated install gets them pre-created at load time (v0.0.15 field
+ * feedback: `docker volume ls` showed only the three data volumes). The
+ * K8s-spec-only `-ces-data` is deliberately NOT here: the docker runtime
+ * auto-creates it on the credential-executor's first boot, same as cadet's
+ * own hatch; `-dockerd-data` was the removed docker-in-docker volume.
+ */
+export function runtimeVolumeNames(migratedName: string): string[] {
+  return [`${migratedName}-socket`, `${migratedName}-assistant-ipc`, `${migratedName}-gateway-ipc`];
+}
+
+/** Compact duration for step summaries: 38s / 3m 12s / 1h 2m 3s. */
+function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m ${s % 60}s`;
+}
+
 /** Where fetch-docker-volumes materializes a volume inside the instance's state-shaped scratch tree. */
 function extractedDir(workRoot: string, instanceId: string, stateDir: string): string {
   return path.join(workRoot, instanceId, stateDir);
@@ -68,7 +91,7 @@ function extractedDir(workRoot: string, instanceId: string, stateDir: string): s
 export type VolumeKind = "workspace" | "gateway-sec" | "ces-sec";
 
 export interface DockerVolumeFlowOptions {
-  dockerOps: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
+  dockerOps: Pick<ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable" | "dockerVolumeCreate">;
   /** The lockfile-tracked docker instance ids (raw, vellum-prefixed). */
   instances: ReadonlyArray<string>;
   /** Recorded container images (locally present — the tar helper containers mount them). */
@@ -113,23 +136,43 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
     opts.onItem?.({ name: instanceId, status: "started" });
+    const startedAt = Date.now();
     try {
       let rewrittenFiles = 0;
-      const extracted: string[] = [];
-      for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
-        await fs.mkdir(extractDir, { recursive: true });
-        await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0], (bytes, totalBytes) => {
-          // Byte progress rides the item events — the renderer refreshes
-          // the instance's nested line (`workspace 1.2GB/4.0GB (30%)`).
-          opts.onItem?.({ name: instanceId, status: "progress", progress: { bytes, totalBytes, label: vol.kind } });
-        });
-        extracted.push(vol.kind);
-        if (vol.kind === "workspace") {
-          rewrittenFiles += await applyWorkspaceContentTransforms(extractDir);
+      const vols = dockerVolumes(instanceId, migratedName);
+      // The three volumes stream CONCURRENTLY (measured on the real
+      // machine: one tar stream saturates ~0.2GB/s and the wall clock is
+      // per-stream; parallel streams overlap the VM's CPU with socket
+      // transfers). Each stream taps its own bytes; the item events carry
+      // ONE aggregated counter — per-kind labels would fight over the
+      // single nested line (v0.0.15 field feedback: two-decimal GB
+      // progress for the multi-GB wait).
+      const bytesByKind = new Map<string, number>();
+      const totalsByKind = new Map<string, number>();
+      const onVolumeProgress = (kind: string) => (bytes: number, totalBytes?: number) => {
+        bytesByKind.set(kind, bytes);
+        if (typeof totalBytes === "number") totalsByKind.set(kind, totalBytes);
+        const sum = [...bytesByKind.values()].reduce((a, b) => a + b, 0);
+        const progress: StepItemEvent["progress"] = { bytes: sum, label: "volumes" };
+        if (totalsByKind.size === vols.length) {
+          progress.totalBytes = [...totalsByKind.values()].reduce((a, b) => a + b, 0);
         }
-      }
-      const summary = `${extracted.length} volume(s) extracted${rewrittenFiles > 0 ? `, ${rewrittenFiles} file(s) rewritten` : ""}`;
+        opts.onItem?.({ name: instanceId, status: "progress", progress });
+      };
+      await Promise.all(
+        vols.map(async (vol) => {
+          const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
+          await fs.mkdir(extractDir, { recursive: true });
+          await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0], onVolumeProgress(vol.kind));
+          if (vol.kind === "workspace") {
+            rewrittenFiles += await applyWorkspaceContentTransforms(extractDir);
+          }
+        }),
+      );
+      const transferredBytes = [...bytesByKind.values()].reduce((a, b) => a + b, 0);
+      const summary =
+        `${vols.length} volume(s), ${formatBytes(transferredBytes)} extracted in ${fmtDuration(Date.now() - startedAt)}` +
+        `${rewrittenFiles > 0 ? `, ${rewrittenFiles} file(s) rewritten` : ""}`;
       perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
       opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
@@ -220,17 +263,46 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
   for (const instanceId of opts.instances) {
     const migratedName = handleToInstanceName(instanceId);
     opts.onItem?.({ name: instanceId, status: "started" });
+    const startedAt = Date.now();
     try {
-      let loaded = 0;
-      for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
-        if (!(await exists(extractDir))) continue; // fetch failed for this kind — already warned
-        await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0], (bytes, totalBytes) => {
-          opts.onItem?.({ name: instanceId, status: "progress", progress: { bytes, totalBytes, label: vol.kind } });
-        });
-        loaded++;
+      // Pre-create the runtime volumes cadet's hatch expects (see
+      // runtimeVolumeNames) — best-effort, cadet recreates them on wake.
+      for (const vol of runtimeVolumeNames(migratedName)) {
+        try {
+          await opts.dockerOps.dockerVolumeCreate?.(vol);
+        } catch (err) {
+          issues.push({
+            severity: "warning",
+            message: `could not create the runtime volume ${vol}: ${(err as Error).message} — cadet recreates it on first wake`,
+          });
+        }
       }
-      const summary = `${loaded} cadet volume(s) written`;
+      let loaded = 0;
+      const vols = dockerVolumes(instanceId, migratedName);
+      const bytesByKind = new Map<string, number>();
+      const totalsByKind = new Map<string, number>();
+      const onVolumeProgress = (kind: string) => (bytes: number, totalBytes?: number) => {
+        bytesByKind.set(kind, bytes);
+        if (typeof totalBytes === "number") totalsByKind.set(kind, totalBytes);
+        const sum = [...bytesByKind.values()].reduce((a, b) => a + b, 0);
+        const progress: StepItemEvent["progress"] = { bytes: sum, label: "volumes" };
+        if (totalsByKind.size === vols.length) {
+          progress.totalBytes = [...totalsByKind.values()].reduce((a, b) => a + b, 0);
+        }
+        opts.onItem?.({ name: instanceId, status: "progress", progress });
+      };
+      await Promise.all(
+        vols.map(async (vol) => {
+          const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
+          if (!(await exists(extractDir))) return; // fetch failed for this kind — already warned
+          await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0], onVolumeProgress(vol.kind));
+          loaded++;
+        }),
+      );
+      const transferredBytes = [...bytesByKind.values()].reduce((a, b) => a + b, 0);
+      const summary =
+        `${loaded} cadet volume(s), ${formatBytes(transferredBytes)} written in ${fmtDuration(Date.now() - startedAt)}` +
+        ` (+${runtimeVolumeNames(migratedName).length} runtime volume(s) ensured)`;
       perInstance.push(`${instanceId} → ${migratedName}: ${summary}`);
       opts.onItem?.({ name: instanceId, status: "completed", summary });
     } catch (err) {
@@ -287,11 +359,11 @@ export async function verifyDockerVolumeData(workRoot: string): Promise<DockerVo
   const { assistantDbs, gatewayDbs } = await findStateDbs(workRoot);
   for (const rel of assistantDbs) {
     dbsChecked++;
-    issues.push(...(await dbIssues(path.join(workRoot, rel), rel, VALUE_MIGRATED_DBS[0]!)));
+    issues.push(...(await dbIssues(path.join(workRoot, rel), displayDbRel(rel), VALUE_MIGRATED_DBS[0]!)));
   }
   for (const rel of gatewayDbs) {
     dbsChecked++;
-    issues.push(...(await dbIssues(path.join(workRoot, rel), rel, VALUE_MIGRATED_DBS[1]!)));
+    issues.push(...(await dbIssues(path.join(workRoot, rel), displayDbRel(rel), VALUE_MIGRATED_DBS[1]!)));
   }
 
   let entries: Array<{ absPath: string; relPath: string; isDirectory: boolean }>;
@@ -325,7 +397,15 @@ async function dbIssues(dbPath: string, label: string, spec: ValueMigratedDb): P
     return [{ severity: "warning", message: `${label} is not a readable sqlite file` }];
   }
   if (leftover.total > 0) {
-    return [{ severity: "warning", message: `${label} still has ${leftover.total} vellum-branded row(s)` }];
+    // The breakdown names the offending tables/columns (v0.0.15 field
+    // feedback: "still has 19 vellum-branded row(s)" said nothing about
+    // WHERE those rows lived).
+    return [
+      {
+        severity: "warning",
+        message: `${label} still has ${leftover.total} vellum-branded row(s) — ${leftover.details.join("; ")}`,
+      },
+    ];
   }
   return [];
 }

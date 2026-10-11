@@ -59,8 +59,8 @@ describe("preflight docker disk guard", () => {
     expect(result.status).toBe("failed");
     const error = (result.issues ?? []).find((issue: StepIssue) => issue.severity === "error");
     expect(error?.message).toMatch(/insufficient docker disk space/);
-    expect(error?.message).toMatch(/need ~67\.6GB/); // 42GB of volumes × 1.5 headroom
-    expect(error?.message).toMatch(/have 32\.2GB/);
+    expect(error?.message).toMatch(/need ~67\.65GB/); // 42GB of volumes × 1.5 headroom
+    expect(error?.message).toMatch(/have 32\.21GB/);
     expect(error?.message).toMatch(/colima/);
   });
 
