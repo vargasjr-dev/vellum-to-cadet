@@ -785,6 +785,74 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       else process.env.HOME = prevHome;
     }
   });
+
+  test("a docker re-run sleeps the assistants BEFORE re-fetching the volumes (v0.0.15 field run)", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    const prevXdgData = process.env.XDG_DATA_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    try {
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            {
+              assistantId: "vellum-prime-quail-3ezfs4",
+              cloud: "docker",
+              containerInfo: { assistantImage: "vellumai/vellum-assistant" },
+            },
+          ],
+        }),
+      );
+      const dockerOps = {
+        ...noopOps,
+        dockerAvailable: async () => true,
+        dockerDiskFree: async () => 500 * 1024 ** 3,
+        dockerVolumeSize: async () => 1024 ** 3,
+        dockerVolumeToDir: async () => {},
+        dockerDirToVolume: async () => {},
+      };
+      const first = await migrate({ vellumRoot: root, processOps: noopOps, dockerOps });
+      expect(first.ok).toBe(true);
+
+      // The re-run heals the volumes — and it cannot assume run 1 left
+      // the assistant asleep (it may have been woken between runs; a
+      // re-run IS the "the migrator got better since my last test"
+      // path). A live writer during fetch/load is an inconsistent
+      // snapshot, so the re-run must sleep FIRST, exactly like the
+      // fresh flow.
+      let sleeps = 0;
+      const second = await migrate({
+        vellumRoot: root,
+        processOps: {
+          ...noopOps,
+          vellumSleep: async () => {
+            sleeps++;
+          },
+        },
+        dockerOps,
+      });
+      expect(second.ok).toBe(true);
+      expect(second.mode).toBe("verify-only");
+      expect(sleeps).toBe(1);
+      console.error("DEBUG", JSON.stringify({
+        mode: second.mode,
+        steps: second.steps.map((s) => ({ step: s.step, status: s.status })),
+        cadetRoot: (second as unknown as { detect?: { cadetRoot?: string } }).detect?.cadetRoot,
+      }, null, 1));
+      const stepNames = second.steps.map((s) => s.step);
+      expect(stepNames.indexOf("stop-assistant")).toBeGreaterThan(-1);
+      expect(stepNames.indexOf("fetch-docker-volumes")).toBeGreaterThan(stepNames.indexOf("stop-assistant"));
+      const stop = second.steps.find((s) => s.step === "stop-assistant");
+      expect(stop?.status).toBe("completed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgData;
+    }
+  });
 });
 
 // ── helpers ──
@@ -1824,10 +1892,14 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
     process.env.XDG_CONFIG_HOME = path.join(home, ".config");
     let logins = 0;
+    let vellumSleeps = 0;
     const ops: ProcessOps = {
       ...noopOps,
       async cadetLogin() {
         logins++;
+      },
+      async vellumSleep() {
+        vellumSleeps++;
       },
     };
     try {
@@ -1886,6 +1958,15 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       ).toBe(true);
       const credStep = second.steps.find((s) => s.step === "migrate-credentials");
       expect(credStep?.status).toBe("skipped"); // already scrubbed on run 1
+
+      // A local re-run never touches vellum-owned data (the cadet root is
+      // the only working root here), so it must NOT sleep the assistant —
+      // yanking an assistant the user woke between runs would be hostile.
+      // The pre-second-run sleep is the fresh flow's own (step 1); the
+      // re-run adds none. The docker re-run is the counterexample that
+      // DOES sleep — asserted in the docker describe block above.
+      expect(vellumSleeps).toBe(1);
+      expect(second.steps.some((s) => s.step === "stop-assistant")).toBe(false);
 
       // …and the retired manifests were already cleaned on run 1.
       const retiredStep = second.steps.find((s) => s.step === "migrate-retired");

@@ -160,6 +160,20 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     const reDockerFlow = detect.docker.instances.length > 0;
     const reWorkRoot = reDockerFlow ? await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-")) : null;
     if (reDockerFlow && reWorkRoot) {
+      // The fresh flow sleeps the assistants BEFORE it fetches (a live
+      // writer mid-tar is an inconsistent snapshot, and load writes the
+      // volumes back). The re-run heals the SAME volumes, so it needs the
+      // SAME quiet writer — and it cannot assume run 1 left them asleep:
+      // the assistant may have been woken between runs (a re-run IS the
+      // "the migrator got better since my last test" path). `vellum
+      // sleep` on an already-asleep assistant is a no-op. Gated on the
+      // docker flow because that is the only place a re-run touches
+      // vellum-owned data — a local re-run reads and writes the cadet
+      // root only, and must never yank a running assistant. (v0.0.15
+      // field run: the re-test fetched volumes while the assistant was
+      // still generating data.)
+      start("stop-assistant");
+      done(await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000));
       start("fetch-docker-volumes");
       const reFetched = done(
         await fetchDockerVolumes({
