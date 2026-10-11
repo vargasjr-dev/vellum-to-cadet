@@ -167,8 +167,11 @@ describe("cli", () => {
       },
     });
     expect(r.code).toBe(0);
-    // The started line: pid + the run-log path under the redirected HOME.
-    expect(r.stdout).toMatch(/✔ started\s+Begun migration at pid \d+, logs: .+\.cadet-migration-logs\/migrate-.+\.log/);
+    // The started line: the header, then the pid + run-log path as nested
+    // bullets under the redirected HOME.
+    expect(r.stdout).toMatch(
+      /✔ started\s+Begun Vellum to Cadet migration\n {4}· pid \d+\n {4}· logs: .+\.cadet-migration-logs\/migrate-.+\.log/,
+    );
     // The child's output was relayed through to this process's stdout.
     expect(r.stdout).toContain("Migration complete");
     // The log file holds the record (the tail-able artifact).
@@ -195,7 +198,7 @@ describe("cli", () => {
     });
     expect(r.code).toBe(0);
     // The started line still prints (its own pid, its own log path).
-    expect(r.stdout).toMatch(/✔ started\s+Begun migration at pid \d+, logs: /);
+    expect(r.stdout).toMatch(/✔ started\s+Begun Vellum to Cadet migration\n {4}· pid \d+\n {4}· logs: /);
     expect(r.stdout).toContain("Migration complete");
     // And the run-log holds everything the terminal saw.
     const logFiles = (await fs.readdir(logsDir)).filter((f) => f.startsWith("migrate-") && f.endsWith(".log"));
@@ -203,7 +206,7 @@ describe("cli", () => {
     expect(await fs.readFile(path.join(logsDir, logFiles[0]!), "utf8")).toContain("Migration complete");
   });
 
-  test("--internal-run renders append-only log lines and releases the lock", { timeout: 30000 }, async () => {
+  test("--internal-run renders the relayed terminal stream and releases the lock", { timeout: 30000 }, async () => {
     const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
     const { root, home } = await buildFullVellum0126();
     const logsDir = path.join(home, ".cadet-migration-logs");
@@ -227,16 +230,26 @@ describe("cli", () => {
       },
     );
     expect(r.code).toBe(0);
-    // Log-mode pending lines stream to stderr as plain text…
-    expect(r.stderr).toContain("· detect …");
-    // …with NO cursor math — the run-log must read as clean lines.
-    expect(r.stderr).not.toContain("\u001b[1A");
-    expect(r.stderr).not.toContain("\u001b[2K");
-    // …and the final block lands on stdout.
+    // The run-log child renders its full terminal stream (forced live +
+    // color): the pending line, then the completed line replacing it.
+    const plainStderr = stripAnsi(r.stderr);
+    expect(plainStderr).toContain("· detect …");
+    expect(plainStderr).toContain("✔ detect");
+    // The cursor math and color are IN the stream — the parent's relay
+    // passes them to a real terminal, where the view rewrites in place
+    // (piped relays strip them; this is the raw child stream).
+    expect(r.stderr).toContain("\u001b[1A\u001b[2K");
+    expect(r.stderr).toContain("\u001b[32m");
+    // The final block lands on stdout.
     expect(r.stdout).toContain("Migration complete");
     expect(fsExistsSync(path.join(logsDir, "migrate.lock"))).toBe(false);
   });
 });
+
+/** Test view of the relay's piped contract: escape sequences and CRs gone. */
+function stripAnsi(s: string): string {
+  return s.replace(/\u001b\[[0-9;]*[A-Za-z]|\r/g, "");
+}
 
 import { existsSync as fsExistsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";

@@ -678,11 +678,13 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       expect(report.detect.docker.instances).toEqual(["velly"]);
       expect(report.detect.docker.images).toEqual(["vellumai/vellum-assistant"]);
 
-      // The detect summary: one root line, then one branch per migrating
-      // assistant — docker ones tagged (docker) (v0.0.11 run feedback).
+      // The detect summary: one root line, then one item-style bullet per
+      // migrating assistant — docker ones tagged (docker) (v0.0.11 run
+      // feedback; v0.0.13 swapped the tree glyphs for the renderer's
+      // bullet notation).
       const detectStep = report.steps.find((s) => s.step === "detect");
       expect(detectStep?.summary.split("\n")[0]).toContain("vellum root at ");
-      expect(detectStep?.summary).toContain(`  └─ migrating assistant velly (docker)`);
+      expect(detectStep?.summary).toContain(`    · migrating assistant velly (docker)`);
       expect(detectStep?.summary).not.toContain("docker instance");
     } finally {
       if (prevHome === undefined) delete process.env.HOME;

@@ -4,12 +4,24 @@
  */
 
 const isTTY = process.stdout.isTTY;
-const enabled = isTTY && !process.env["NO_COLOR"];
+/** `let` so the detached run-log child can force color on (see forceColor). */
+let enabled = isTTY && !process.env["NO_COLOR"];
 /** Errors go to stderr; color them only when THAT stream is a terminal. */
-const errEnabled = process.stderr.isTTY && !process.env["NO_COLOR"];
+let errEnabled = process.stderr.isTTY && !process.env["NO_COLOR"];
 
 function wrap(code: string, text: string): string {
   return enabled ? `\u001b[${code}m${text}\u001b[0m` : text;
+}
+
+/**
+ * Force color on for this process. The detached run-log child writes to a
+ * FILE, so the TTY probes see nothing — but its bytes are relayed to a
+ * real terminal by the parent, where the color renders. NO_COLOR still wins.
+ */
+export function forceColor(): void {
+  if (process.env["NO_COLOR"]) return;
+  enabled = true;
+  errEnabled = true;
 }
 
 export const colors = {
