@@ -7,7 +7,7 @@
  */
 import { createInterface } from "node:readline/promises";
 
-import { colors, command, detail, errorText, failIcon, header, skipIcon, successIcon, warnText } from "./colors.js";
+import { colors, command, detail, errorText, failIcon, forceColor, header, skipIcon, successIcon, warnText } from "./colors.js";
 import { errPath } from "./steps/migrate-layout.js";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync as fsExistsSync, openSync, readFileSync, unlinkSync } from "node:fs";
@@ -242,26 +242,27 @@ function stepIcon(status: StepResult["status"]): string {
  * finishes. Steps can stream nested items (e.g. each retired archive) that
  * open their own pending line under the step and resolve in place.
  *
- * mode "auto" (default): only when stderr is a TTY — piped runs and --json
- * keep their output contracts untouched.
- * mode "log": always print, APPEND-ONLY — the detached child writes to the
- * run-log file, where cursor math is useless; every line lands under
- * `tail -f`, with progress lines throttled so the log stays readable.
+ * Live when stderr is a TTY, and FORCED live for the detached run-log
+ * child (v0.0.13 run feedback: append-only log lines made the relayed
+ * view print every step twice and every progress tick as a new line).
+ * The child's stderr IS the run-log file, but the parent relays those
+ * bytes to a real terminal — so the child renders the same cursor-math
+ * stream a TTY would get, the relay replays it in place, and a later
+ * `tail -f` of the log does the same. Piped runs and --json keep their
+ * output contracts untouched (live stays off).
  */
-function createLiveProgress(mode: "auto" | "log" = "auto"): {
+function createLiveProgress(force = false): {
   onStepStart: (step: string) => void;
   onStepDone: (result: StepResult) => void;
   onStepItem: (step: string, item: StepItemEvent) => void;
   /** Clear a dangling pending line before the final summary prints. */
   finish: () => void;
 } {
-  const live = mode === "log" ? true : Boolean(process.stderr.isTTY);
-  const appendOnly = mode === "log";
+  const live = force || Boolean(process.stderr.isTTY);
   let pending = false;
   let openItems = 0; // nested item lines still pending
   let itemLines = 0; // nested item lines written for the current step
   let lastProgressSummary = "";
-  let lastProgressAt = 0;
   const eraseLines = (n: number): void => {
     for (let i = 0; i < n; i++) process.stderr.write("\u001b[1A\u001b[2K");
   };
@@ -270,10 +271,8 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
     itemLines = 0;
   };
   const clearPending = (): void => {
-    if (live && pending && !appendOnly) {
-      // Erase the pending step line and every nested line below it. In
-      // append-only (log) mode there is nothing to erase — the pending
-      // line already lives in the log as history.
+    if (live && pending) {
+      // Erase the pending step line and every nested line below it.
       eraseLines(1 + itemLines);
     }
     pending = false;
@@ -291,19 +290,11 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
       if (item.status === "progress" && item.progress) {
         const summary = progressSummary(item.progress);
         if (summary === lastProgressSummary) return;
-        if (appendOnly) {
-          // A log file: one line per meaningful change, throttled, keeps
-          // `tail -f` readable instead of a line per 300ms tick.
-          if (Date.now() - lastProgressAt < 2000) return;
-          lastProgressAt = Date.now();
-          lastProgressSummary = summary;
-          process.stderr.write(`    ${detail("·")} ${item.name} … ${summary}\n`);
-        } else {
-          // TTY: the open item's line is the last one written — rewrite it
-          // in place with the fresh counts.
-          process.stderr.write("\u001b[1A\u001b[2K");
-          process.stderr.write(`    ${detail("·")} ${item.name} … ${summary}\n`);
-        }
+        lastProgressSummary = summary;
+        // The open item's line is the last one written — rewrite it
+        // in place with the fresh counts.
+        process.stderr.write("\u001b[1A\u001b[2K");
+        process.stderr.write(`    ${detail("·")} ${item.name} … ${summary}\n`);
         return;
       }
       if (item.status === "started") {
@@ -313,15 +304,14 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
         return;
       }
       if (openItems === 0) return;
-      // Resolve the open item's line: rewritten in place on a TTY, written
-      // fresh below the pending line in append-only (log) mode.
-      if (!appendOnly) process.stderr.write("\u001b[1A\u001b[2K");
+      // Resolve the open item's line: rewritten in place.
+      process.stderr.write("\u001b[1A\u001b[2K");
       const icon = item.status === "completed" ? colors.green("✓") : colors.yellow("⚠");
       process.stderr.write(`    ${icon} ${item.name}${item.summary ? ` ${item.summary}` : ""}\n`);
       openItems--;
     },
     onStepDone: (result) => {
-      if (live && pending && !appendOnly) {
+      if (live && pending) {
         // Rewrite the pending step line above the already-resolved nested
         // lines (they stay on screen), then hop back down past them. A
         // multi-line summary (the nested detect output) pushes those lines
@@ -333,8 +323,7 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
         process.stderr.write(`\u001b[${nested + extra}B\r`);
       } else {
         if (!live) return;
-        // Append-only (log mode): the pending line stays as history — the
-        // completed line is just written below it. No cursor math.
+        // No pending line to rewrite — write the completed line fresh.
         process.stderr.write(stepLines(result).join("\n") + "\n");
       }
       pending = false;
@@ -375,9 +364,11 @@ function printAlreadyRunning(lock: RunLockInfo): void {
   console.error(`    ${detail("follow along:")} tail -f ${lock.logPath}`);
 }
 
-/** The started line: icon + padded label + text, matching the step lines' shape. */
+/** The started line: the header, then the pid + run-log as nested bullets. */
 function printStarted(pid: number, logPath: string): void {
-  process.stdout.write(`  ${successIcon()} ${"started".padEnd(20)} Begun migration at pid ${pid}, logs: ${logPath}\n`);
+  process.stdout.write(`  ${successIcon()} ${"started".padEnd(20)} Begun Vellum to Cadet migration\n`);
+  process.stdout.write(`    ${detail("·")} pid ${pid}\n`);
+  process.stdout.write(`    ${detail("·")} logs: ${logPath}\n`);
 }
 
 /**
@@ -473,6 +464,15 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
  * drain after the child closes.
  */
 async function relayChild(logPath: string, child: ChildProcess): Promise<number> {
+  // The relayed bytes are the child's terminal stream (cursor math + color,
+  // see createLiveProgress). A real terminal renders them as if the
+  // migration ran in-process; when THIS process's stdout is not a terminal
+  // (piped runs), strip the escape sequences so the piped contract stays
+  // plain text.
+  const plain = !process.stdout.isTTY;
+  const ansi = /\u001b\[[0-9;]*[A-Za-z]|\r/g;
+  const decoder = new TextDecoder("utf8"); // stream mode holds split multibyte chars
+  let carry = ""; // a trailing partial escape sequence, finished by the next chunk
   let exitCode: number | null = null;
   const exited = new Promise<number>((resolve) => {
     child.on("error", () => resolve(EXIT_CODES.migrationFailed));
@@ -481,12 +481,21 @@ async function relayChild(logPath: string, child: ChildProcess): Promise<number>
   let offset = 0;
   for (;;) {
     await drainLog();
-    if (exitCode !== null) return exitCode;
+    if (exitCode !== null) {
+      flushCarry();
+      return exitCode;
+    }
     const winner = await Promise.race([
       exited.then((code) => ({ done: true as const, code })),
       new Promise<{ done: false }>((r) => setTimeout(() => r({ done: false }), 200)),
     ]);
     if (winner.done) exitCode = winner.code;
+  }
+
+  function flushCarry(): void {
+    if (!carry) return;
+    process.stdout.write(plain ? carry.replace(ansi, "") : carry);
+    carry = "";
   }
 
   async function drainLog(): Promise<void> {
@@ -498,7 +507,17 @@ async function relayChild(logPath: string, child: ChildProcess): Promise<number>
       const buffer = Buffer.alloc(size - offset);
       await handle.read(buffer, 0, buffer.length, offset);
       offset += buffer.length;
-      process.stdout.write(buffer);
+      const chunk = carry + decoder.decode(buffer, { stream: true });
+      carry = "";
+      // Hold back a trailing partial escape sequence (the ESC may have
+      // landed in this chunk, its terminator in the next).
+      let out = chunk;
+      const lastEsc = chunk.lastIndexOf("\u001b");
+      if (lastEsc !== -1 && !/[A-Za-z]/.test(chunk.slice(lastEsc + 1))) {
+        out = chunk.slice(0, lastEsc);
+        carry = chunk.slice(lastEsc);
+      }
+      process.stdout.write(plain ? out.replace(ansi, "") : out);
     } catch {
       // The log file may not exist yet (child still spinning up).
     } finally {
@@ -873,11 +892,14 @@ async function main(): Promise<number> {
     printStarted(process.pid, parsed.runLog);
   }
 
-  // The detached child renders in LOG mode: its stderr IS the run-log
-  // file, so lines append (no cursor math) and progress stays tail-able.
+  // The detached child renders its full TTY-grade stream (cursor math +
+  // forced color) into the run-log: the parent relays those bytes to the
+  // real terminal, so the live view rewrites in place like an in-process
+  // run, and `tail -f` replays the same stream after a disconnect.
   const logMode = parsed.internalRun === true;
+  if (logMode) forceColor();
   const live = !parsed.json && !parsed.verbose && (logMode || Boolean(process.stderr.isTTY));
-  const progress = createLiveProgress(logMode ? "log" : "auto");
+  const progress = createLiveProgress(logMode);
   try {
     const report = await migrate({
       ...parsed,

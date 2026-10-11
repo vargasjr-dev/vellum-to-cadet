@@ -72,22 +72,22 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done({
     step: "detect",
     status: "completed",
-    // One root line, then one branch line per migrating assistant — the
+    // One root line, then one bullet line per migrating assistant — the
     // story reads top to bottom (v0.0.11 run feedback: the docker suffix
     // crowded the root line and the nested line carried a whole sentence;
-    // the deployment kind belongs on the branch as a short "(docker)" tag,
-    // and the branch lines carry their own two-space indent — the
-    // renderers print summary continuations verbatim).
+    // the deployment kind belongs on the line as a short "(docker)" tag).
+    // v0.0.13 run feedback: plain bullets at the item indent, not tree
+    // glyphs — the nested lines then read exactly like the live item
+    // lines the renderer prints under a running step.
     summary: detect.vellumRootExists
       ? [
           `vellum root at ${detect.vellumRoot}`,
-          ...detect.assistantHandles.map((handle, i) => {
-            const last = i === detect.assistantHandles.length - 1 && detect.retiredCount === 0;
-            const branch = last ? "└─" : "├─";
-            return `  ${branch} migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " (docker)" : ""}`;
-          }),
+          ...detect.assistantHandles.map(
+            (handle) =>
+              `    · migrating assistant ${handleToInstanceName(handle)}${detect.docker.instances.includes(handle) ? " (docker)" : ""}`,
+          ),
           ...(detect.retiredCount > 0
-            ? [`  └─ ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
+            ? [`    · ${detect.retiredCount} retired assistant${detect.retiredCount === 1 ? "" : "s"} migrating too`]
             : []),
         ].join("\n")
       : `no vellum root at ${detect.vellumRoot}`,
