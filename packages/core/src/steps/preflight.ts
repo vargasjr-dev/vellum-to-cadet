@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { statfs as statfsPromises } from "node:fs/promises";
@@ -48,24 +49,54 @@ export async function preflight(
   // truth). When an assistant's data is more than ~half the daemon's disk,
   // that copy cannot fit — the exact way the real runs died mid-load.
   // Measure it here, before a single byte moves.
+  //
+  // FAILS CLOSED (v0.0.13 run feedback): the old guard stood down with a
+  // warning whenever a measurement failed — and the 60s du cap reliably
+  // failed on a big volume — so a doomed run started, streamed for 15
+  // minutes, and died on disk space the guard had been asked about.
+  // Unmeasurable now means error; --skip-disk-space-check is the way out.
   if (!opts?.skipDiskSpaceCheck && opts?.dockerOps && detect.docker.instances.length > 0) {
     const dockerOps = opts.dockerOps;
     if (await dockerOps.dockerAvailable()) {
       const free = await dockerOps.dockerDiskFree?.();
       if (free === undefined) {
         issues.push({
-          severity: "warning",
-          message: "could not determine the docker daemon's free disk space — continuing",
+          severity: "error",
+          message:
+            "could not determine the docker daemon's free disk space — refusing to migrate without verifying the volume copy fits; check the docker daemon, or pass --skip-disk-space-check to proceed anyway",
         });
       } else {
         const totalBytes = await dockerVolumeBytes(dockerOps, detect.docker.instances, detect.docker.images[0]);
         if (totalBytes === null) {
-          issues.push({ severity: "warning", message: "could not measure the docker volume sizes — continuing" });
-        } else if (free < totalBytes * 1.2) {
           issues.push({
             severity: "error",
-            message: `insufficient docker disk space: need ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) for the ${formatBytes(totalBytes)} of docker volumes, have ${formatBytes(Math.floor(free))} — free space or grow the docker VM's disk (colima: colima start --edit and raise disk)`,
+            message:
+              "could not measure the docker volume sizes (the size probe timed out or failed) — refusing to migrate without verifying the copy fits; check the docker daemon, or pass --skip-disk-space-check to proceed anyway",
           });
+        } else {
+          if (free < totalBytes * 1.2) {
+            issues.push({
+              severity: "error",
+              message: `insufficient docker disk space: need ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) for the ${formatBytes(totalBytes)} of docker volumes, have ${formatBytes(Math.floor(free))} — free space or grow the docker VM's disk (colima: colima start --edit and raise disk)`,
+            });
+          }
+          // The HOST side needs room too: fetch extracts every volume into
+          // a scratch tree under os.tmpdir() and load re-reads it — the
+          // daemon's free disk says nothing about THAT disk (v0.0.13 run
+          // feedback: the extraction died mid-stream on the host disk the
+          // old guard never looked at).
+          const hostFree = await freeBytesFor(os.tmpdir());
+          if (hostFree !== null && hostFree < totalBytes * 1.2) {
+            issues.push({
+              severity: "error",
+              message: `insufficient host disk space: the migration extracts ~${formatBytes(Math.ceil(totalBytes * 1.2))} (copy + headroom) of docker volumes into a scratch directory under ${os.tmpdir()}, have ${formatBytes(Math.floor(hostFree))} free there — free space on the host disk`,
+            });
+          } else if (hostFree === null) {
+            issues.push({
+              severity: "warning",
+              message: "could not determine the host's free disk space for the volume scratch directory — continuing",
+            });
+          }
         }
       }
     }

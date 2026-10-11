@@ -10,6 +10,7 @@ import { after, describe, test } from "node:test";
 import { migrate, repair } from "../../src/runner.js";
 import { migrateAssistantDbAt } from "../../src/steps/migrate-assistant-db.js";
 import { stopAssistant } from "../../src/steps/stop-assistant.js";
+import { EXIT_CODES } from "../../src/types.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
 import {
@@ -727,6 +728,61 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       else process.env.HOME = prevHome;
       if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = prevXdgData;
+    }
+  });
+
+  test("a docker volume transfer failure aborts the run as failed — no green completion, scratch discarded", async () => {
+    const { root, home } = await buildFullVellum0126();
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            {
+              assistantId: "vellum-prime-quail-3ezfs4",
+              cloud: "docker",
+              containerInfo: { assistantImage: "vellumai/vellum-assistant" },
+            },
+          ],
+        }),
+      );
+      // The preflight guard passes (the daemon reports room, the volumes
+      // measure small), then the transfer itself dies — the v0.0.13 run's
+      // disk-full mid-extract, replayed.
+      const scratchBefore = (await fs.readdir(os.tmpdir())).filter((d) => d.startsWith("vtc-volumes-"));
+      const report = await migrate({
+        vellumRoot: root,
+        processOps: noopOps,
+        dockerOps: {
+          ...noopOps,
+          dockerAvailable: async () => true,
+          dockerDiskFree: async () => 500 * 1024 ** 3,
+          dockerVolumeSize: async () => 1024 ** 3, // 3 volumes × 1GB — fits everywhere
+          dockerVolumeToDir: async () => {
+            throw new Error("extract vellum-prime-quail-3ezfs4-workspace: exited 125 — no space left on device");
+          },
+          dockerDirToVolume: async () => {},
+        },
+      });
+
+      expect(report.ok).toBe(false);
+      expect(report.exitCode).toBe(EXIT_CODES.migrationFailed);
+      // The run ended AT the fetch — no value steps over the partial tree,
+      // no load, no verify.
+      const stepNames = report.steps.map((s) => s.step);
+      expect(stepNames).toContain("fetch-docker-volumes");
+      expect(stepNames).not.toContain("migrate-assistant-db");
+      expect(stepNames).not.toContain("load-docker-volumes");
+      const fetchStep = report.steps.find((s) => s.step === "fetch-docker-volumes");
+      expect(fetchStep?.status).toBe("failed");
+      // The scratch tree was discarded.
+      const scratchAfter = (await fs.readdir(os.tmpdir())).filter((d) => d.startsWith("vtc-volumes-"));
+      expect(scratchAfter.length).toBe(scratchBefore.length);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
     }
   });
 });

@@ -174,6 +174,28 @@ describe("fetch-docker-volumes", () => {
     expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
   });
 
+  test("a failed extraction fails the step with an error issue", async () => {
+    // v0.0.13 run feedback: the transfer failure used to be a warning and
+    // the run continued over a tree that was never fetched.
+    const result = await fetchDockerVolumes({
+      dockerOps: {
+        dockerVolumeToDir: async () => {
+          throw new Error("extract vellum-prime-quail-3ezfs4-workspace: exited 125 — no space left on device");
+        },
+        dockerDirToVolume: async () => {},
+        dockerAvailable: async () => true,
+      },
+      instances: [INSTANCE],
+      images: [],
+      workRoot: await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-")),
+    });
+    expect(result.status).toBe("failed");
+    expect(result.summary).toContain("volume extraction failed for 1 of 1 docker instance(s)");
+    const error = (result.issues ?? []).find((i) => i.severity === "error");
+    expect(error?.message).toContain("volume extraction failed");
+    expect(error?.message).toContain("exited 125");
+  });
+
   test("no docker instances skips", async () => {
     const result = await fetchDockerVolumes({
       dockerOps: {
@@ -400,6 +422,29 @@ describe("the shared value steps over the extracted trees", () => {
     expect(result.status).toBe("completed");
     expect(result.summary).toContain("docker daemon unreachable");
     expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
+  });
+
+  test("a failed import fails the step with an error issue", async () => {
+    // v0.0.13 run feedback: a failed import used to be a warning and the
+    // run ended "✔ Migration complete" with the cadet volumes incomplete.
+    const workRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-"));
+    await fs.mkdir(path.join(workRoot, INSTANCE, "workspace"), { recursive: true });
+    const result = await loadDockerVolumes({
+      dockerOps: {
+        dockerVolumeToDir: async () => {},
+        dockerDirToVolume: async () => {
+          throw new Error("Command failed: docker volume create prime-quail-3ezfs4-workspace");
+        },
+        dockerAvailable: async () => true,
+      },
+      instances: [INSTANCE],
+      images: [],
+      workRoot,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.summary).toContain("volume import failed for 1 of 1 docker instance(s)");
+    const error = (result.issues ?? []).find((i) => i.severity === "error");
+    expect(error?.message).toContain("volume import failed");
   });
 });
 

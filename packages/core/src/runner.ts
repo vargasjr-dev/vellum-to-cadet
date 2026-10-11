@@ -161,7 +161,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     const reWorkRoot = reDockerFlow ? await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-")) : null;
     if (reDockerFlow && reWorkRoot) {
       start("fetch-docker-volumes");
-      done(
+      const reFetched = done(
         await fetchDockerVolumes({
           dockerOps: options.dockerOps ?? ops,
           instances: detect.docker.instances,
@@ -170,6 +170,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
           onItem: onItem("fetch-docker-volumes"),
         }),
       );
+      // Same abort contract as the fresh flow: a failed transfer must not
+      // flow into the value steps and load (v0.0.13 run feedback).
+      if (reFetched.status === "failed") {
+        await fs.rm(reWorkRoot, { recursive: true, force: true });
+        return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.migrationFailed);
+      }
     }
     // The value steps heal on a re-run too: idempotent by construction, and
     // an install an older migrator version left incomplete gets its dbs
@@ -186,7 +192,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     done(reCredentials);
     if (reDockerFlow && reWorkRoot) {
       start("load-docker-volumes");
-      done(
+      const reLoaded = done(
         await loadDockerVolumes({
           dockerOps: options.dockerOps ?? ops,
           instances: detect.docker.instances,
@@ -195,6 +201,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
           onItem: onItem("load-docker-volumes"),
         }),
       );
+      // Same abort contract as the fresh flow: a failed import must not
+      // end in a green "Migration complete" (v0.0.13 run feedback).
+      if (reLoaded.status === "failed") {
+        await fs.rm(reWorkRoot, { recursive: true, force: true });
+        return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.migrationFailed);
+      }
     }
     // Same image-ref contract as the fresh path: when a cadet CLI is
     // present, its version derives the docker entries' cadet images.
@@ -304,7 +316,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //     transforms in place — the docker analog of the copy phase.
   if (dockerFlow) {
     start("fetch-docker-volumes");
-    done(
+    const fetched = done(
       await fetchDockerVolumes({
         dockerOps,
         instances: detect.docker.instances,
@@ -313,6 +325,18 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
         onItem: onItem("fetch-docker-volumes"),
       }),
     );
+    // A failed transfer poisons everything downstream — the value steps
+    // would run over a partial scratch tree and load would import it
+    // (v0.0.13 run feedback: an extraction that died on disk space kept
+    // "migrating" for 10 more minutes and ended "✔ Migration complete"
+    // with the data half-there). Abort now, discard the scratch, report
+    // the failure. The docker volumes are left alone either way: they are
+    // either the untouched source of truth or a partial import a re-run
+    // re-imports idempotently — deleting them could destroy good data.
+    if (fetched.status === "failed") {
+      if (volumeWorkRoot) await fs.rm(volumeWorkRoot, { recursive: true, force: true });
+      return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.migrationFailed);
+    }
   }
 
   // 3.7 The value steps — the SAME calls for local and docker, zero
@@ -350,7 +374,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //      migrated instance names.
   if (dockerFlow) {
     start("load-docker-volumes");
-    done(
+    const loaded = done(
       await loadDockerVolumes({
         dockerOps,
         instances: detect.docker.instances,
@@ -359,6 +383,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
         onItem: onItem("load-docker-volumes"),
       }),
     );
+    // Same abort contract as fetch (v0.0.13 run feedback): a failed import
+    // must not end in a green "Migration complete" — discard the scratch
+    // tree and report the failure; the incomplete cadet volumes get
+    // re-imported idempotently on a re-run.
+    if (loaded.status === "failed") {
+      if (volumeWorkRoot) await fs.rm(volumeWorkRoot, { recursive: true, force: true });
+      return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.migrationFailed);
+    }
   }
 
   // 4. Put the cadet CLI on the machine — before the lockfile conversion:

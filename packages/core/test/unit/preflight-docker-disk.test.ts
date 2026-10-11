@@ -64,37 +64,65 @@ describe("preflight docker disk guard", () => {
     expect(error?.message).toMatch(/colima/);
   });
 
-  test("passes when the free space covers the copy plus headroom", async () => {
+  test("passes when the free space covers the copy plus headroom on both disks", async () => {
+    // Small totals: the host-side scratch check stats the REAL tmpdir, so
+    // the fixture must fit whatever disk the test process actually has.
     const { ops } = makeDockerOps({
-      free: 60 * GB,
-      sizes: { [`${INSTANCE}-workspace`]: 40 * GB, [`${INSTANCE}-gateway-sec`]: GB, [`${INSTANCE}-ces-sec`]: GB },
+      free: 10 * GB,
+      sizes: { [`${INSTANCE}-workspace`]: GB, [`${INSTANCE}-gateway-sec`]: GB, [`${INSTANCE}-ces-sec`]: GB },
     });
     const result = await preflight(detectInfo(ONE_INSTANCE), { dockerOps: ops });
     expect(result.status).toBe("completed");
     expect(result.issues).toEqual([]);
   });
 
-  test("warns and continues when the daemon's free space cannot be determined", async () => {
+  test("fails closed when the daemon's free space cannot be determined", async () => {
+    // v0.0.13 run feedback: the old stand-down warning is how a doomed run
+    // started — an unmeasurable guard must stop the run, not wave it
+    // through (--skip-disk-space-check is the explicit way out).
     const { ops } = makeDockerOps({ sizes: { [`${INSTANCE}-workspace`]: GB } });
     const result = await preflight(detectInfo(ONE_INSTANCE), { dockerOps: ops });
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("failed");
     const issues = result.issues ?? [];
     expect(issues.length).toBe(1);
-    expect(issues[0]!.severity).toBe("warning");
+    expect(issues[0]!.severity).toBe("error");
     expect(issues[0]!.message).toMatch(/could not determine the docker daemon's free disk space/);
   });
 
-  test("warns and continues when a volume size cannot be measured", async () => {
+  test("fails closed when a volume size cannot be measured", async () => {
+    // The v0.0.13 run's exact hole: the 60s du cap could not measure a
+    // 65.9GB volume, the guard warned and continued, and the run died on
+    // disk space 15 minutes later.
     const { ops } = makeDockerOps({
       free: 60 * GB,
       sizes: { [`${INSTANCE}-workspace`]: 40 * GB, [`${INSTANCE}-gateway-sec`]: undefined },
     });
     const result = await preflight(detectInfo(ONE_INSTANCE), { dockerOps: ops });
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("failed");
     const issues = result.issues ?? [];
     expect(issues.length).toBe(1);
-    expect(issues[0]!.severity).toBe("warning");
+    expect(issues[0]!.severity).toBe("error");
     expect(issues[0]!.message).toMatch(/could not measure the docker volume sizes/);
+  });
+
+  test("fails closed when the host disk cannot hold the extracted volume scratch", async () => {
+    // The fetch extracts every volume into a scratch tree on the HOST's
+    // disk before load writes the cadet volumes — a disk the old guard
+    // never looked at. A MAX size forces the host check to fire
+    // regardless of how much space the test machine's tmpdir has free.
+    const { ops } = makeDockerOps({
+      free: 100 * GB,
+      sizes: {
+        [`${INSTANCE}-workspace`]: Number.MAX_SAFE_INTEGER,
+        [`${INSTANCE}-gateway-sec`]: Number.MAX_SAFE_INTEGER,
+        [`${INSTANCE}-ces-sec`]: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const result = await preflight(detectInfo(ONE_INSTANCE), { dockerOps: ops });
+    expect(result.status).toBe("failed");
+    const issues = result.issues ?? [];
+    expect(issues.some((i) => i.severity === "error" && /insufficient host disk space/.test(i.message))).toBe(true);
+    expect(issues.some((i) => /scratch directory under/.test(i.message))).toBe(true);
   });
 
   test("skips the docker guard when no docker instances are detected", async () => {
