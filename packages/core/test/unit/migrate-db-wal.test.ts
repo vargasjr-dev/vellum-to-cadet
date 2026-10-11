@@ -7,7 +7,6 @@ import { DatabaseSync as Database } from "node:sqlite";
 
 import { expect } from "../helpers/expect.js";
 import { migrateAssistantDb } from "../../src/steps/migrate-assistant-db.js";
-import type { DetectInfo } from "../../src/types.js";
 
 /**
  * The write-ahead question: when the source db has committed transactions
@@ -18,17 +17,6 @@ import type { DetectInfo } from "../../src/types.js";
  * are folded in and rewritten like any other row. These tests prove that
  * ordering end-to-end, including that the source files stay untouched.
  */
-
-function detectFor(cadetRoot: string): DetectInfo {
-  return {
-    vellumRoot: path.join(cadetRoot, "..", "vellum"),
-    cadetRoot,
-    version: "0.12.6",
-    deploymentKind: "unknown",
-    layout: "legacy",
-    docker: undefined,
-  } as unknown as DetectInfo;
-}
 
 /** Copy main db + sidecars the way the layout migration does (verbatim). */
 async function copyDbFiles(srcDir: string, destDir: string, name: string): Promise<void> {
@@ -86,7 +74,7 @@ describe("migrate-assistant-db: write-ahead replay", () => {
 
     // The source connection stays OPEN (no checkpoint on close yet).
     const destRel = "workspace/data/db/assistant.db";
-    const result = await migrateAssistantDb(detectFor(tmp), [destRel]);
+    const result = await migrateAssistantDb([tmp]);
     source.close();
 
     expect(result.status).toBe("completed");
@@ -136,7 +124,7 @@ describe("migrate-assistant-db: write-ahead replay", () => {
     // Garbage sidecar (not a valid WAL) — e.g. truncated or foreign bytes.
     await fs.writeFile(`${dbPath}-wal`, "not-a-real-wal-file");
 
-    const result = await migrateAssistantDb(detectFor(tmp), ["workspace/data/db/assistant.db"]);
+    const result = await migrateAssistantDb([tmp]);
     expect(result.status).toBe("completed");
 
     const after = new Database(dbPath, { readOnly: true })

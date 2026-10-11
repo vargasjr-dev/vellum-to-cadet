@@ -9,24 +9,28 @@ import {
   walkTree,
 } from "../fs-utils.js";
 import { handleToInstanceName } from "../layout.js";
-import { migrateAssistantDbAt, migrateGatewayDbAt } from "./migrate-assistant-db.js";
+import { findStateDbs } from "./migrate-assistant-db.js";
 import { dbVellumRows, VALUE_MIGRATED_DBS } from "./verify.js";
 import type { ProcessOps, StepIssue, StepResult } from "../types.js";
 
 /**
  * Docker deployments keep the assistant's real data in docker volumes —
  * the host-side vellum root only carries the CLI's own state. The flow is
- * split so the SAME value steps run for local and docker installs — only
- * the data surface differs (v0.0.11 run feedback: once detect said docker,
- * the host-path db steps still ran first and failed, because the files
- * were never on the host):
+ * two BRACKETS around the same value steps the local flow runs (v0.0.11
+ * run feedback: once detect said docker, the host-path db steps still ran
+ * first and failed, because the files were never on the host):
  *
  *   fetch-docker-volumes  — extract each instance's three volumes into a
- *                           scratch tree and apply the workspace content
- *                           transforms in place (the copy-phase analog)
- *   migrate-assistant-db / migrate-gateway-db / migrate-credentials —
- *                           the same steps as the local flow, pointed at
- *                           the extracted trees
+ *                           STATE-SHAPED scratch tree: one state root per
+ *                           assistant, <scratch>/<instance>/workspace,
+ *                           …/gateway-security, …/ces-security — the same
+ *                           layout the copied cadet root carries, so the
+ *                           value steps' discovery (findStateDbs) runs
+ *                           unchanged against either surface
+ *   value steps           — the shared migrate-assistant-db /
+ *                           migrate-gateway-db / migrate-credentials steps,
+ *                           pointed at the scratch root; zero
+ *                           docker-awareness in any of them
  *   load-docker-volumes   — import the migrated trees into the cadet
  *                           volumes under the migrated instance name
  *
@@ -45,26 +49,16 @@ import type { ProcessOps, StepIssue, StepResult } from "../types.js";
 /** The three data volumes, vellum-side (raw instance id) and cadet-side (migrated name). */
 function dockerVolumes(rawInstanceId: string, migratedName: string) {
   return [
-    { kind: "workspace" as const, from: `${rawInstanceId}-workspace`, to: `${migratedName}-workspace` },
-    { kind: "gateway-sec" as const, from: `${rawInstanceId}-gateway-sec`, to: `${migratedName}-gateway-sec` },
-    { kind: "ces-sec" as const, from: `${rawInstanceId}-ces-sec`, to: `${migratedName}-ces-sec` },
+    { kind: "workspace" as const, stateDir: "workspace", from: `${rawInstanceId}-workspace`, to: `${migratedName}-workspace` },
+    { kind: "gateway-sec" as const, stateDir: "gateway-security", from: `${rawInstanceId}-gateway-sec`, to: `${migratedName}-gateway-sec` },
+    { kind: "ces-sec" as const, stateDir: "ces-security", from: `${rawInstanceId}-ces-sec`, to: `${migratedName}-ces-sec` },
   ];
 }
 
-/** Where fetch-docker-volumes puts a volume's tree for an instance. */
-function extractedDir(
-  workRoot: string,
-  instanceId: string,
-  kind: "workspace" | "gateway-sec" | "ces-sec",
-): string {
-  return path.join(workRoot, instanceId, kind);
+/** Where fetch-docker-volumes materializes a volume inside the instance's state-shaped scratch tree. */
+function extractedDir(workRoot: string, instanceId: string, stateDir: string): string {
+  return path.join(workRoot, instanceId, stateDir);
 }
-
-/** Candidate assistant-db locations inside an extracted workspace volume. */
-const ASSISTANT_DB_CANDIDATES = ["data/db/assistant.db", "workspace/data/db/assistant.db"];
-
-/** Candidate gateway-db locations inside an extracted gateway-security volume. */
-const GATEWAY_DB_CANDIDATES = ["gateway.sqlite", "gateway-security/gateway.sqlite", "data/gateway.sqlite"];
 
 export type VolumeKind = "workspace" | "gateway-sec" | "ces-sec";
 
@@ -117,7 +111,7 @@ export async function fetchDockerVolumes(opts: DockerVolumeFlowOptions): Promise
       let rewrittenFiles = 0;
       const extracted: string[] = [];
       for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = extractedDir(opts.workRoot, instanceId, vol.kind);
+        const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
         await fs.mkdir(extractDir, { recursive: true });
         await opts.dockerOps.dockerVolumeToDir(vol.from, extractDir, opts.images[0]);
         extracted.push(vol.kind);
@@ -183,83 +177,6 @@ async function applyWorkspaceContentTransforms(dir: string): Promise<number> {
 }
 
 /**
- * The shared migrate-assistant-db step, docker form: value-migrate every
- * extracted workspace volume's assistant db in place. Same step name and
- * engine as the local flow — only the data surface differs.
- */
-export async function migrateDockerAssistantDbs(
-  instances: ReadonlyArray<string>,
-  workRoot: string,
-  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void,
-): Promise<StepResult> {
-  const step = "migrate-assistant-db";
-  if (instances.length === 0) {
-    return { step, status: "skipped", summary: "no docker-deployed assistants" };
-  }
-  const issues: StepIssue[] = [];
-  const perInstance: string[] = [];
-  let migrated = 0;
-  for (const instanceId of instances) {
-    const dir = extractedDir(workRoot, instanceId, "workspace");
-    onItem?.({ name: instanceId, status: "started" });
-    const rel = await findFirst(dir, ASSISTANT_DB_CANDIDATES);
-    const result = await migrateAssistantDbAt(dir, rel);
-    issues.push(...(result.issues ?? []));
-    if (result.status !== "skipped") migrated++;
-    perInstance.push(`${handleToInstanceName(instanceId)}: ${result.summary}`);
-    onItem?.({ name: instanceId, status: "completed", summary: result.summary });
-  }
-  return {
-    step,
-    status: migrated > 0 ? "completed" : "skipped",
-    summary:
-      migrated > 0
-        ? `assistant db(s) value-migrated across ${migrated} extracted workspace volume(s)`
-        : "no assistant db(s) in the extracted workspace volume(s)",
-    issues,
-    data: { instances: perInstance },
-  };
-}
-
-/**
- * The shared migrate-gateway-db step, docker form: same engine, pointed at
- * the extracted gateway-security trees.
- */
-export async function migrateDockerGatewayDbs(
-  instances: ReadonlyArray<string>,
-  workRoot: string,
-  onItem?: (item: { name: string; status: "started" | "completed" | "warning"; summary?: string }) => void,
-): Promise<StepResult> {
-  const step = "migrate-gateway-db";
-  if (instances.length === 0) {
-    return { step, status: "skipped", summary: "no docker-deployed assistants" };
-  }
-  const issues: StepIssue[] = [];
-  const perInstance: string[] = [];
-  let migrated = 0;
-  for (const instanceId of instances) {
-    const dir = extractedDir(workRoot, instanceId, "gateway-sec");
-    onItem?.({ name: instanceId, status: "started" });
-    const rel = await findFirst(dir, GATEWAY_DB_CANDIDATES);
-    const result = await migrateGatewayDbAt(dir, rel);
-    issues.push(...(result.issues ?? []));
-    if (result.status !== "skipped") migrated++;
-    perInstance.push(`${handleToInstanceName(instanceId)}: ${result.summary}`);
-    onItem?.({ name: instanceId, status: "completed", summary: result.summary });
-  }
-  return {
-    step,
-    status: migrated > 0 ? "completed" : "skipped",
-    summary:
-      migrated > 0
-        ? `gateway db(s) value-migrated across ${migrated} extracted gateway volume(s)`
-        : "no gateway db(s) in the extracted gateway volume(s)",
-    issues,
-    data: { instances: perInstance },
-  };
-}
-
-/**
  * Import the migrated trees into the cadet volumes under the migrated
  * instance names. Failures on one volume record the issue and keep going:
  * volumes are independent.
@@ -286,7 +203,7 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
     try {
       let loaded = 0;
       for (const vol of dockerVolumes(instanceId, migratedName)) {
-        const extractDir = extractedDir(opts.workRoot, instanceId, vol.kind);
+        const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
         if (!(await exists(extractDir))) continue; // fetch failed for this kind — already warned
         await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0]);
         loaded++;
@@ -328,56 +245,42 @@ export interface DockerVolumeVerify {
 
 /**
  * Verify the extracted volume trees: dbs free of vellum rows, credential
- * store carrying no vellum-namespace entries. Findings are warnings — same
- * contract as verify.
+ * stores carrying no vellum-namespace entries. THE SAME SCAN the value
+ * steps ran (findStateDbs over the state-shaped scratch root) — findings
+ * are warnings, labeled by the checked path inside the tree. Same contract
+ * as verify.
  */
-export async function verifyDockerVolumeData(
-  instances: ReadonlyArray<string>,
-  workRoot: string,
-): Promise<DockerVolumeVerify> {
+export async function verifyDockerVolumeData(workRoot: string): Promise<DockerVolumeVerify> {
   const issues: StepIssue[] = [];
   let dbsChecked = 0;
   let storesChecked = 0;
 
-  for (const instanceId of instances) {
-    const migratedName = handleToInstanceName(instanceId);
+  const { assistantDbs, gatewayDbs } = await findStateDbs(workRoot);
+  for (const rel of assistantDbs) {
+    dbsChecked++;
+    issues.push(...(await dbIssues(path.join(workRoot, rel), rel, VALUE_MIGRATED_DBS[0]!)));
+  }
+  for (const rel of gatewayDbs) {
+    dbsChecked++;
+    issues.push(...(await dbIssues(path.join(workRoot, rel), rel, VALUE_MIGRATED_DBS[1]!)));
+  }
 
-    const workspaceDir = extractedDir(workRoot, instanceId, "workspace");
-    const assistantRel = await findFirst(workspaceDir, ASSISTANT_DB_CANDIDATES);
-    if (assistantRel) {
-      dbsChecked++;
-      issues.push(
-        ...(await dbIssues(
-          path.join(workspaceDir, assistantRel),
-          `${migratedName}-workspace/${assistantRel}`,
-          VALUE_MIGRATED_DBS[0]!,
-        )),
-      );
-    }
-
-    const gatewayDir = extractedDir(workRoot, instanceId, "gateway-sec");
-    const gatewayRel = await findFirst(gatewayDir, GATEWAY_DB_CANDIDATES);
-    if (gatewayRel) {
-      dbsChecked++;
-      issues.push(
-        ...(await dbIssues(
-          path.join(gatewayDir, gatewayRel),
-          `${migratedName}-gateway-sec/${gatewayRel}`,
-          VALUE_MIGRATED_DBS[1]!,
-        )),
-      );
-    }
-
-    const cesDir = extractedDir(workRoot, instanceId, "ces-sec");
-    if (await exists(cesDir)) {
-      storesChecked++;
-      const leftovers = await countVellumCredentials(cesDir);
-      if (leftovers > 0) {
-        issues.push({
-          severity: "warning",
-          message: `${migratedName}-ces-sec still holds ${leftovers} vellum-namespace credential entr${leftovers === 1 ? "y" : "ies"}`,
-        });
-      }
+  let entries: Array<{ absPath: string; relPath: string; isDirectory: boolean }>;
+  try {
+    entries = await walkTree(workRoot);
+  } catch {
+    entries = []; // Nothing was fetched (e.g. an unreachable docker daemon).
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    if (path.basename(entry.relPath) !== "keys.enc") continue;
+    storesChecked++;
+    const leftovers = await vellumCredentialEntriesIn(entry.absPath);
+    if (leftovers > 0) {
+      issues.push({
+        severity: "warning",
+        message: `${entry.relPath} still holds ${leftovers} vellum-namespace credential entr${leftovers === 1 ? "y" : "ies"}`,
+      });
     }
   }
 
@@ -398,13 +301,6 @@ async function dbIssues(dbPath: string, label: string, spec: ValueMigratedDb): P
   return [];
 }
 
-async function findFirst(dir: string, candidates: ReadonlyArray<string>): Promise<string | undefined> {
-  for (const rel of candidates) {
-    if (await exists(path.join(dir, rel))) return rel;
-  }
-  return undefined;
-}
-
 async function exists(p: string): Promise<boolean> {
   try {
     await fs.access(p);
@@ -414,27 +310,15 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-/** Count vellum-namespace entries across every keys.enc under a tree. */
-async function countVellumCredentials(dir: string): Promise<number> {
-  let count = 0;
-  let entries: Array<{ absPath: string; relPath: string; isDirectory: boolean }>;
+/** Count vellum-namespace entries in one encrypted credential store. */
+async function vellumCredentialEntriesIn(keysPath: string): Promise<number> {
   try {
-    entries = [...(await walkTree(dir))];
+    const parsed = JSON.parse(await fs.readFile(keysPath, "utf8")) as {
+      entries?: Record<string, unknown>;
+    };
+    if (!parsed?.entries) return 0;
+    return Object.keys(parsed.entries).filter((k) => k.startsWith("credential/vellum/")).length;
   } catch {
-    return 0;
+    return 0; // Unreadable — the scrub step already warned about it.
   }
-  for (const entry of entries) {
-    if (entry.isDirectory) continue;
-    if (path.basename(entry.relPath) !== "keys.enc") continue;
-    try {
-      const parsed = JSON.parse(await fs.readFile(entry.absPath, "utf8")) as {
-        entries?: Record<string, unknown>;
-      };
-      if (!parsed?.entries) continue;
-      count += Object.keys(parsed.entries).filter((k) => k.startsWith("credential/vellum/")).length;
-    } catch {
-      // Unreadable — the scrub step already warned about it.
-    }
-  }
-  return count;
 }
