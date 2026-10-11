@@ -65,18 +65,26 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
 
   let cadetRoot = options.cadetRoot ?? toCadetRoot(vellumRoot);
 
-  const [vellumRootExists, cadetRootExists] = await Promise.all([
-    pathExists(vellumRoot),
-    pathExists(cadetRoot),
-  ]);
+  const vellumRootExists = await pathExists(vellumRoot);
 
-  let cadetRootPopulated = false;
-  let previousManifest = false;
-  if (cadetRootExists) {
-    const entries = await fs.readdir(cadetRoot);
-    cadetRootPopulated = entries.length > 0;
-    previousManifest = entries.includes(".cadet-migration-manifest.json");
-  }
+  // The root flags must describe the cadet root the RUNNER acts on. The
+  // handle rename below reassigns cadetRoot after the initial guess —
+  // flags read before it describe a path nothing ever created, and a
+  // re-run over a renamed (docker) instance then classified fresh FOREVER:
+  // run 2 re-migrated the layout over a populated instance instead of
+  // going verify-only (v0.0.15 field run). Read them against the FINAL
+  // root, after the rename.
+  const readRootFlags = async (dir: string) => {
+    const flags = { exists: false, populated: false, previousManifest: false };
+    if (await pathExists(dir)) {
+      flags.exists = true;
+      const entries = await fs.readdir(dir);
+      flags.populated = entries.length > 0;
+      flags.previousManifest = entries.includes(".cadet-migration-manifest.json");
+    }
+    return flags;
+  };
+  let rootFlags = await readRootFlags(cadetRoot);
 
   const runningProcesses = vellumRootExists
     ? await ops.find(discoveryPatterns())
@@ -117,6 +125,7 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
       path.dirname(cadetRoot),
       handleToInstanceName(assistantHandles[0] ?? ""),
     );
+    rootFlags = await readRootFlags(cadetRoot);
   }
 
   const rootSizeBytes = vellumRootExists ? await treeSize(vellumRoot) : 0;
@@ -125,9 +134,9 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     vellumRoot,
     cadetRoot,
     vellumRootExists,
-    cadetRootExists,
-    cadetRootPopulated,
-    previousManifest,
+    cadetRootExists: rootFlags.exists,
+    cadetRootPopulated: rootFlags.populated,
+    previousManifest: rootFlags.previousManifest,
     version: (await ops.vellumVersion()) ?? (await detectVersion(vellumRoot)),
     assistantHandles,
     retiredCount: await countRetiredArchives(vellumRoot),
