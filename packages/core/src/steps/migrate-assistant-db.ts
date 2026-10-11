@@ -2,8 +2,9 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import { USER_WORKSPACE_DIR } from "../layout.js";
+import { walkTree } from "../fs-utils.js";
 import { openSqliteDatabase, type SqliteDatabase } from "../sqlite.js";
-import type { DetectInfo, StepIssue, StepResult } from "../types.js";
+import type { StepIssue, StepResult } from "../types.js";
 
 /**
  * Rewrite vellum-branded VALUES inside the migrated SQLite DBs. The old
@@ -104,16 +105,82 @@ export function isGatewayDbStateRel(stateRel: string): boolean {
   return GATEWAY_DB_STATE_RELS.includes(stateRel);
 }
 
-export async function migrateAssistantDb(
-  detect: DetectInfo,
-  /**
-   * Destination-relative paths of EVERY assistant db in the copy plan — the
-   * root can host multiple assistant workspaces, each with its own db, and
-   * every one of them needs the value rewrite.
-   */
-  destRels: ReadonlyArray<string>,
-): Promise<StepResult> {
-  return migrateDbsAt(detect.cadetRoot, destRels, {
+/**
+ * Where the gateway db lands in every MIGRATED tree: PATH_MOVES relocates
+ * both source forms here, so the copied cadet root and the docker flow's
+ * state-shaped scratch tree both carry this shape.
+ */
+export const GATEWAY_DB_DEST_REL = "gateway-security/gateway.sqlite";
+
+/** Gateway-db tails a working root can hold (the second covers volume content that kept a data/ level). */
+const GATEWAY_DB_DEST_TAILS: ReadonlyArray<string> = [
+  GATEWAY_DB_DEST_REL,
+  "gateway-security/data/gateway.sqlite",
+];
+
+function isAssistantDbRel(relPath: string): boolean {
+  return relPath === ASSISTANT_DB_STATE_REL || relPath.endsWith(`/${ASSISTANT_DB_STATE_REL}`);
+}
+
+function isGatewayDbDestRel(relPath: string): boolean {
+  return GATEWAY_DB_DEST_TAILS.some((tail) => relPath === tail || relPath.endsWith(`/${tail}`));
+}
+
+/**
+ * Scan a working root for the value-migrated dbs, destination-relative.
+ * The direct-or-suffix match covers every tree shape that holds a state
+ * root: the legacy cadet root (`workspace/…` at the top), the modern one
+ * (`assistants/<name>/…` nesting), and the docker flow's state-shaped
+ * scratch root (one state tree per assistant, `<instance>/…`). Retired
+ * cold storage and dot-directories are skipped — the same exclusions the
+ * credentials scrub applies. A walk failure (nothing was materialized at
+ * this root — an unreachable docker daemon, say) scans as empty.
+ */
+export async function findStateDbs(
+  root: string,
+): Promise<{ assistantDbs: string[]; gatewayDbs: string[] }> {
+  const found: { assistantDbs: string[]; gatewayDbs: string[] } = { assistantDbs: [], gatewayDbs: [] };
+  let entries;
+  try {
+    entries = await walkTree(root);
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    const rel = entry.relPath.split("\\").join("/");
+    if (rel.split("/").some((seg) => seg === "retired" || seg.startsWith("."))) continue;
+    if (isAssistantDbRel(rel)) found.assistantDbs.push(rel);
+    else if (isGatewayDbDestRel(rel)) found.gatewayDbs.push(rel);
+  }
+  return found;
+}
+
+/**
+ * One db to value-migrate: the working root it lives under and its path
+ * relative to that root.
+ */
+interface DbTarget {
+  root: string;
+  destRel: string;
+}
+
+/**
+ * The shared migrate-assistant-db step: value-migrate EVERY assistant db
+ * the given working roots hold. The roots are plain directories carrying
+ * state trees — the copied cadet root (local) and/or the docker flow's
+ * state-shaped scratch tree — and discovery is one shared scan for both,
+ * so this step knows nothing about volumes or docker (a mixed install
+ * passes both roots and gets both sets of dbs migrated).
+ */
+export async function migrateAssistantDb(roots: ReadonlyArray<string>): Promise<StepResult> {
+  const targets: DbTarget[] = [];
+  for (const root of roots) {
+    for (const destRel of (await findStateDbs(root)).assistantDbs) {
+      targets.push({ root, destRel });
+    }
+  }
+  return migrateDbsAt(targets, {
     step: "migrate-assistant-db",
     label: "assistant db",
     columns: CHANNEL_COLUMNS,
@@ -134,7 +201,7 @@ export async function migrateAssistantDbAt(
       summary: "no assistant db in the migrated workspace",
     };
   }
-  return migrateDbsAt(cadetRoot, [destRel], {
+  return migrateDbsAt([{ root: cadetRoot, destRel }], {
     step: "migrate-assistant-db",
     label: "assistant db",
     columns: CHANNEL_COLUMNS,
@@ -143,15 +210,18 @@ export async function migrateAssistantDbAt(
   });
 }
 
-export async function migrateGatewayDb(
-  detect: DetectInfo,
-  /**
-   * Destination-relative paths of EVERY gateway db in the copy plan — one per
-   * assistant workspace, same multi-workspace rule as the assistant db.
-   */
-  destRels: ReadonlyArray<string>,
-): Promise<StepResult> {
-  return migrateDbsAt(detect.cadetRoot, destRels, {
+/**
+ * The shared migrate-gateway-db step: same roots-based shape as the
+ * assistant-db step, with the gateway's own channel column list.
+ */
+export async function migrateGatewayDb(roots: ReadonlyArray<string>): Promise<StepResult> {
+  const targets: DbTarget[] = [];
+  for (const root of roots) {
+    for (const destRel of (await findStateDbs(root)).gatewayDbs) {
+      targets.push({ root, destRel });
+    }
+  }
+  return migrateDbsAt(targets, {
     step: "migrate-gateway-db",
     label: "gateway db",
     columns: GATEWAY_CHANNEL_COLUMNS,
@@ -170,7 +240,7 @@ export async function migrateGatewayDbAt(
       summary: "no gateway db in the migrated workspace",
     };
   }
-  return migrateDbsAt(cadetRoot, [destRel], {
+  return migrateDbsAt([{ root: cadetRoot, destRel }], {
     step: "migrate-gateway-db",
     label: "gateway db",
     columns: GATEWAY_CHANNEL_COLUMNS,
@@ -178,19 +248,18 @@ export async function migrateGatewayDbAt(
 }
 
 /**
- * Run the value rewrite against every db the copy plan produced and fold the
- * per-db results into one step result. The vellum root hosts one state tree
- * PER assistant (`assistants/<name>/.vellum/…` all normalize to the same
- * state-relative form), so a real machine carries several copies of each db —
- * rewriting only the first left every later workspace's contact_channels
- * branded (v0.0.9 run feedback).
+ * Run the value rewrite against every target and fold the per-db results
+ * into one step result. A real machine carries one state tree PER assistant
+ * (`assistants/<name>/…` all normalize to the same state-relative form), and
+ * the docker flow adds one state tree per instance — rewriting only the
+ * first left every later workspace's contact_channels branded (v0.0.9 run
+ * feedback).
  */
 async function migrateDbsAt(
-  cadetRoot: string,
-  destRels: ReadonlyArray<string>,
+  targets: ReadonlyArray<DbTarget>,
   options: Omit<DbValuesOptions, "cadetRoot" | "destRel">,
 ): Promise<StepResult> {
-  if (destRels.length === 0) {
+  if (targets.length === 0) {
     return {
       step: options.step,
       status: "skipped",
@@ -198,8 +267,8 @@ async function migrateDbsAt(
     };
   }
   const results: StepResult[] = [];
-  for (const destRel of destRels) {
-    results.push(await migrateDbValues({ ...options, cadetRoot, destRel }));
+  for (const target of targets) {
+    results.push(await migrateDbValues({ ...options, cadetRoot: target.root, destRel: target.destRel }));
   }
   if (results.length === 1) return results[0]!;
 
@@ -209,7 +278,7 @@ async function migrateDbsAt(
   let totalRows = 0;
   let completed = 0;
   for (const [i, r] of results.entries()) {
-    const destRel = destRels[i]!;
+    const destRel = targets[i]!.destRel;
     if (r.status === "completed") completed++;
     for (const issue of r.issues ?? []) {
       issues.push(
@@ -232,11 +301,11 @@ async function migrateDbsAt(
     status: allSkipped ? "skipped" : "completed",
     summary: allSkipped
       ? results[0]!.summary
-      : `${options.label}s — ${totalRows} row(s) across ${destRels.length} db(s)${warningNote}`,
+      : `${options.label}s — ${totalRows} row(s) across ${targets.length} db(s)${warningNote}`,
     issues,
     data: {
-      dbs: destRels.map((destRel, i) => ({
-        dbPath: destRel,
+      dbs: targets.map((target, i) => ({
+        dbPath: target.destRel,
         substeps: results[i]!.data?.["substeps"] ?? {},
       })),
     },

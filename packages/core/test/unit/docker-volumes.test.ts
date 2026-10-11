@@ -5,13 +5,8 @@ import { DatabaseSync as Database } from "node:sqlite";
 import { describe, test } from "node:test";
 
 import { cadetImageRefs } from "../../src/cadet-images.js";
-import {
-  fetchDockerVolumes,
-  loadDockerVolumes,
-  migrateDockerAssistantDbs,
-  migrateDockerGatewayDbs,
-  verifyDockerVolumeData,
-} from "../../src/steps/migrate-docker-volumes.js";
+import { fetchDockerVolumes, loadDockerVolumes, verifyDockerVolumeData } from "../../src/steps/migrate-docker-volumes.js";
+import { findStateDbs, migrateAssistantDb, migrateGatewayDb } from "../../src/steps/migrate-assistant-db.js";
 import { migrateCredentialsStep } from "../../src/steps/scrub-credentials.js";
 import { wakeAssistants } from "../../src/steps/wake.js";
 import type { ProcessOps } from "../../src/types.js";
@@ -150,14 +145,16 @@ describe("fetch-docker-volumes", () => {
     expect(items.map((i) => i.status)).toEqual(["started", "completed"]);
     expect(items[1]?.summary).toContain("3 volume(s) extracted");
 
-    // The extracted trees: workspace content transformed in place...
+    // The extracted trees are STATE-SHAPED — one state root per assistant,
+    // the layout the value steps' discovery expects. Workspace content
+    // transformed in place...
     const workspace = path.join(workRoot, INSTANCE, "workspace");
     const config = await fs.readFile(path.join(workspace, "config.json"), "utf8");
     expect(config).toContain('"cadet"');
     // ...the dbs ride as-is here — the shared db steps migrate them.
-    const gateway = path.join(workRoot, INSTANCE, "gateway-sec");
+    const gateway = path.join(workRoot, INSTANCE, "gateway-security");
     expect(await fs.stat(path.join(gateway, "gateway.sqlite"))).toBeTruthy();
-    const ces = path.join(workRoot, INSTANCE, "ces-sec");
+    const ces = path.join(workRoot, INSTANCE, "ces-security");
     expect(await fs.stat(path.join(ces, "keys.enc"))).toBeTruthy();
   });
 
@@ -203,10 +200,10 @@ describe("the shared value steps over the extracted trees", () => {
       workRoot,
     });
 
-    const assistantStep = await migrateDockerAssistantDbs([INSTANCE], workRoot);
+    const assistantStep = await migrateAssistantDb([workRoot]);
     expect(assistantStep.step).toBe("migrate-assistant-db");
     expect(assistantStep.status).toBe("completed");
-    expect(assistantStep.summary).toContain("1 extracted workspace volume(s)");
+    expect(assistantStep.summary).toContain("assistant db — 2 row(s)");
     const assistantDb = new Database(
       path.join(workRoot, INSTANCE, "workspace", "data/db/assistant.db"),
       { readOnly: true },
@@ -215,27 +212,26 @@ describe("the shared value steps over the extracted trees", () => {
     expect(channels).toEqual([{ c: "cadet" }]);
     assistantDb.close();
 
-    const gatewayStep = await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    const gatewayStep = await migrateGatewayDb([workRoot]);
     expect(gatewayStep.step).toBe("migrate-gateway-db");
     expect(gatewayStep.status).toBe("completed");
     const gatewayDb = new Database(
-      path.join(workRoot, INSTANCE, "gateway-sec", "gateway.sqlite"),
+      path.join(workRoot, INSTANCE, "gateway-security", "gateway.sqlite"),
       { readOnly: true },
     );
     const types = gatewayDb.prepare(`SELECT type AS t FROM contact_channels`).all();
     expect(types).toEqual([{ t: "cadet" }]);
     gatewayDb.close();
 
-    // The shared credentials step scrubs the extracted ces-sec tree
-    // alongside the (here empty) host cadet root.
+    // The shared credentials step scrubs every working root — the whole
+    // state-shaped scratch tree (it walks for keys.enc) plus the (here
+    // empty) host cadet root.
     const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
-    const credentials = await migrateCredentialsStep(hostRoot, [
-      path.join(workRoot, INSTANCE, "ces-sec"),
-    ]);
+    const credentials = await migrateCredentialsStep([workRoot, hostRoot]);
     expect(credentials.status).toBe("completed");
     expect(credentials.summary).toContain("1 encrypted store(s)");
     const store = JSON.parse(
-      await fs.readFile(path.join(workRoot, INSTANCE, "ces-sec", "keys.enc"), "utf8"),
+      await fs.readFile(path.join(workRoot, INSTANCE, "ces-security", "keys.enc"), "utf8"),
     );
     expect(Object.keys(store.entries)).toEqual(["credential/webhook/secret"]);
   });
@@ -249,10 +245,10 @@ describe("the shared value steps over the extracted trees", () => {
       images: [],
       workRoot,
     });
-    await migrateDockerAssistantDbs([INSTANCE], workRoot);
-    await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    await migrateAssistantDb([workRoot]);
+    await migrateGatewayDb([workRoot]);
     const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
-    await migrateCredentialsStep(hostRoot, [path.join(workRoot, INSTANCE, "ces-sec")]);
+    await migrateCredentialsStep([workRoot, hostRoot]);
 
     const result = await loadDockerVolumes({
       dockerOps: sim.ops,
@@ -294,14 +290,14 @@ describe("the shared value steps over the extracted trees", () => {
       images: [],
       workRoot,
     });
-    await migrateDockerAssistantDbs([INSTANCE], workRoot);
-    await migrateDockerGatewayDbs([INSTANCE], workRoot);
+    await migrateAssistantDb([workRoot]);
+    await migrateGatewayDb([workRoot]);
     // The credentials step is part of the pipeline too — without it the
-    // ces-sec tree still carries its vellum-namespace entry.
+    // ces-security tree still carries its vellum-namespace entry.
     const hostRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-host-"));
-    await migrateCredentialsStep(hostRoot, [path.join(workRoot, INSTANCE, "ces-sec")]);
+    await migrateCredentialsStep([workRoot, hostRoot]);
 
-    const verifyData = await verifyDockerVolumeData([INSTANCE], workRoot);
+    const verifyData = await verifyDockerVolumeData(workRoot);
     expect(verifyData.issues).toEqual([]);
     expect(verifyData.dbsChecked).toBe(2);
     expect(verifyData.storesChecked).toBe(1);
@@ -312,8 +308,8 @@ describe("the shared value steps over the extracted trees", () => {
     // shared value steps had not run (or a bug put legacy rows back).
     const workRoot = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-work-"));
     const workspace = path.join(workRoot, INSTANCE, "workspace");
-    const gateway = path.join(workRoot, INSTANCE, "gateway-sec");
-    const ces = path.join(workRoot, INSTANCE, "ces-sec");
+    const gateway = path.join(workRoot, INSTANCE, "gateway-security");
+    const ces = path.join(workRoot, INSTANCE, "ces-security");
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(gateway, { recursive: true });
     await fs.mkdir(ces, { recursive: true });
@@ -321,18 +317,25 @@ describe("the shared value steps over the extracted trees", () => {
     await writeBrandedGatewayDb(gateway);
     await writeBrandedCredentialStore(ces);
 
-    const verifyData = await verifyDockerVolumeData([INSTANCE], workRoot);
+    const verifyData = await verifyDockerVolumeData(workRoot);
     expect(verifyData.dbsChecked).toBe(2);
     expect(verifyData.storesChecked).toBe(1);
     const messages = verifyData.issues.map((i) => i.message);
     expect(
-      messages.some((m) => m.includes("still has") && m.includes("vellum-branded row(s)") && m.includes(`${MIGRATED}-workspace`)),
+      messages.some(
+        (m) =>
+          m.includes("still has") &&
+          m.includes("vellum-branded row(s)") &&
+          m.includes(`${INSTANCE}/workspace/data/db/assistant.db`),
+      ),
     ).toBe(true);
     expect(
-      messages.some((m) => m.includes(`${MIGRATED}-gateway-sec`) && m.includes("vellum-branded row(s)")),
+      messages.some(
+        (m) => m.includes(`${INSTANCE}/gateway-security/gateway.sqlite`) && m.includes("vellum-branded row(s)"),
+      ),
     ).toBe(true);
     expect(
-      messages.some((m) => m.includes(`${MIGRATED}-ces-sec`) && m.includes("vellum-namespace credential")),
+      messages.some((m) => m.includes("ces-security/keys.enc") && m.includes("vellum-namespace credential")),
     ).toBe(true);
   });
 
@@ -364,6 +367,49 @@ describe("the shared value steps over the extracted trees", () => {
     expect(result.status).toBe("completed");
     expect(result.summary).toContain("docker daemon unreachable");
     expect(result.issues?.some((i) => i.message.includes("were NOT migrated"))).toBe(true);
+  });
+});
+
+describe("findStateDbs — the one discovery both surfaces share", () => {
+  test("finds dbs at the state-tree paths of every tree shape", async () => {
+    // The value steps' discovery must agree across: the legacy cadet root
+    // (state root at the top), the modern one (assistants/<name>/ nesting),
+    // the docker scratch root (one state tree per assistant), and volume
+    // content that kept a nested level.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-scan-"));
+    const put = async (rel: string): Promise<void> => {
+      await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+      await fs.writeFile(path.join(root, rel), "x");
+    };
+    await put("workspace/data/db/assistant.db"); // legacy cadet root
+    await put("assistants/velly/workspace/data/db/assistant.db"); // modern root
+    await put("vellum-prime-quail-3ezfs4/workspace/data/db/assistant.db"); // docker scratch
+    await put("vellum-prime-quail-3ezfs4/gateway-security/gateway.sqlite");
+    await put("vellum-prime-quail-3ezfs4/gateway-security/data/gateway.sqlite"); // nested volume level
+    await put("assistants/velly/gateway-security/gateway.sqlite");
+    await put("retired/velly/workspace/data/db/assistant.db"); // cold storage — skipped
+    await put(".cadet-migration-backups/x/workspace/data/db/assistant.db"); // bookkeeping — skipped
+    await put("workspace/data/db/assistant.db-wal"); // sidecar — folded by open, not a db
+
+    const { assistantDbs, gatewayDbs } = await findStateDbs(root);
+    expect(assistantDbs.sort()).toEqual([
+      "assistants/velly/workspace/data/db/assistant.db",
+      "vellum-prime-quail-3ezfs4/workspace/data/db/assistant.db",
+      "workspace/data/db/assistant.db",
+    ]);
+    expect(gatewayDbs.sort()).toEqual([
+      "assistants/velly/gateway-security/gateway.sqlite",
+      "vellum-prime-quail-3ezfs4/gateway-security/data/gateway.sqlite",
+      "vellum-prime-quail-3ezfs4/gateway-security/gateway.sqlite",
+    ]);
+  });
+
+  test("a missing root scans as empty (unreachable daemon, nothing materialized)", async () => {
+    const { assistantDbs, gatewayDbs } = await findStateDbs(
+      path.join(os.tmpdir(), "vtc-scan-missing-" + Date.now()),
+    );
+    expect(assistantDbs).toEqual([]);
+    expect(gatewayDbs).toEqual([]);
   });
 });
 

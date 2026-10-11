@@ -10,6 +10,7 @@ import { backup, backupDirFor } from "./steps/backup.js";
 import { buildCopyPlan, migrateLayout } from "./steps/migrate-layout.js";
 import {
   ASSISTANT_DB_STATE_REL,
+  GATEWAY_DB_DEST_REL,
   isGatewayDbStateRel,
   migrateAssistantDb,
   migrateAssistantDbAt,
@@ -19,13 +20,7 @@ import {
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
-import {
-  fetchDockerVolumes,
-  loadDockerVolumes,
-  migrateDockerAssistantDbs,
-  migrateDockerGatewayDbs,
-  verifyDockerVolumeData,
-} from "./steps/migrate-docker-volumes.js";
+import { fetchDockerVolumes, loadDockerVolumes, verifyDockerVolumeData } from "./steps/migrate-docker-volumes.js";
 import { readLockfileAssistants } from "./steps/detect.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
@@ -37,7 +32,6 @@ import {
   isDbArtifact,
   isRewriteEligible,
   sanctionedContentTransform,
-  stateRelativePath,
   walkTree,
 } from "./fs-utils.js";
 import {
@@ -160,8 +154,9 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // kept) — then verify. The layout itself is never touched here.
   if (target.kind === "already-migrated") {
     // A re-run after a failed docker migration (e.g. the v0.0.11 hang)
-    // heals the volumes too: fetch → the same value steps over the
-    // extracted trees → load, before the host-side fix steps below.
+    // heals the volumes too: fetch → the SAME value steps → load, the
+    // identical shape as the fresh flow — the healed import is
+    // value-migrated AND scrubbed before it lands back in the volumes.
     const reDockerFlow = detect.docker.instances.length > 0;
     const reWorkRoot = reDockerFlow ? await fs.mkdtemp(path.join(os.tmpdir(), "vtc-volumes-")) : null;
     if (reDockerFlow && reWorkRoot) {
@@ -175,10 +170,21 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
           onItem: onItem("fetch-docker-volumes"),
         }),
       );
-      start("migrate-assistant-db");
-      done(await migrateDockerAssistantDbs(detect.docker.instances, reWorkRoot, onItem("migrate-assistant-db")));
-      start("migrate-gateway-db");
-      done(await migrateDockerGatewayDbs(detect.docker.instances, reWorkRoot, onItem("migrate-gateway-db")));
+    }
+    // The value steps heal on a re-run too: idempotent by construction, and
+    // an install an older migrator version left incomplete gets its dbs
+    // value-migrated and its credentials scrubbed here. The working roots:
+    // the extracted volume scratch tree (docker) and the already-migrated
+    // cadet root (a mixed install's local assistants live there).
+    const reValueRoots = [reWorkRoot, detect.cadetRoot].filter((r): r is string => r !== null);
+    start("migrate-assistant-db");
+    done(await migrateAssistantDb(reValueRoots));
+    start("migrate-gateway-db");
+    done(await migrateGatewayDb(reValueRoots));
+    start("migrate-credentials");
+    const reCredentials = await migrateCredentialsStep(reValueRoots);
+    done(reCredentials);
+    if (reDockerFlow && reWorkRoot) {
       start("load-docker-volumes");
       done(
         await loadDockerVolumes({
@@ -190,14 +196,6 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
         }),
       );
     }
-    start("migrate-credentials");
-    const reCredentials = await migrateCredentialsStep(
-      detect.cadetRoot,
-      reDockerFlow && reWorkRoot
-        ? detect.docker.instances.map((id) => path.join(reWorkRoot, id, "ces-sec"))
-        : undefined,
-    );
-    done(reCredentials);
     // Same image-ref contract as the fresh path: when a cadet CLI is
     // present, its version derives the docker entries' cadet images.
     const reBinAvailable = await ops.cadetBinAvailable();
@@ -222,7 +220,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     start("verify");
     const reVerify = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
     if (reDockerFlow && reWorkRoot) {
-      const volumeVerify = await verifyDockerVolumeData(detect.docker.instances, reWorkRoot);
+      const volumeVerify = await verifyDockerVolumeData(reWorkRoot);
       reVerify.issues = [...(reVerify.issues ?? []), ...volumeVerify.issues];
       reVerify.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
     }
@@ -288,10 +286,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // 3.5 Docker deployments keep the assistant's real data in docker
   //     volumes (workspace, gateway security, CES security) — the host
   //     root only carries the CLI's own state. Once detect says docker,
-  //     the SAME value steps below run over volume-extracted trees
-  //     instead of host directories — "the difference between volume or
-  //     directory" is confined to the fetch (extract) and load (import)
-  //     steps around them (v0.0.11 run feedback: the host-path db steps
+  //     the value steps below run against the volume data as well: fetch
+  //     extracts each instance's volumes into a STATE-SHAPED scratch
+  //     tree (one state root per assistant — the same layout the copied
+  //     host root carries), and load writes the migrated trees back.
+  //     "The difference between volume or directory" is confined to
+  //     those two brackets (v0.0.11 run feedback: the host-path db steps
   //     ran first and failed before any volume work started).
   const dockerOps = options.dockerOps ?? ops;
   const dockerFlow = detect.docker.instances.length > 0;
@@ -312,46 +312,35 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     );
   }
 
-  // 3.7 Rewrite vellum-branded VALUES inside EVERY migrated assistant DB
-  //     (channel ids, attachment links, the managed connection row). The
-  //     root hosts one state tree per assistant, so the copy plan can
-  //     carry several assistant dbs — each gets the rewrite (rewriting
-  //     only the first left every later workspace branded; v0.0.9 run
-  //     feedback). Destination paths come from the copy plan so every
-  //     layout shape agrees; the docker flow points the same step at the
-  //     extracted trees.
-  const assistantDbDests = (mig.files ?? [])
-    .filter((f) => stateRelativePath(f.src) === ASSISTANT_DB_STATE_REL)
-    .map((f) => f.dest);
+  // 3.7 The value steps — the SAME calls for local and docker, zero
+  //     surface branching left in the runner. Each step scans the working
+  //     roots for its own targets (dbs by their state-tree paths via
+  //     findStateDbs, credential stores for keys.enc). The docker scratch
+  //     tree is materialized STATE-SHAPED — one state root per assistant,
+  //     the same layout the copied host root carries — which is what lets
+  //     one discovery serve both surfaces; the roots themselves are the
+  //     only per-surface input (the scratch root rides along on docker,
+  //     and a mixed install's local assistants live on the host copy).
+  const valueRoots = [volumeWorkRoot, detect.cadetRoot].filter((r): r is string => r !== null);
+
+  //     Rewrite vellum-branded VALUES inside EVERY assistant db (channel
+  //     ids, attachment links, the managed connection row). The root hosts
+  //     one state tree per assistant, so the scan can find several copies
+  //     of each db — every one gets the rewrite (rewriting only the first
+  //     left every later workspace branded; v0.0.9 run feedback).
   start("migrate-assistant-db");
-  done(
-    dockerFlow
-      ? await migrateDockerAssistantDbs(detect.docker.instances, volumeWorkRoot!, onItem("migrate-assistant-db"))
-      : await migrateAssistantDb(detect, assistantDbDests),
-  );
+  done(await migrateAssistantDb(valueRoots));
 
   // 3.8 Same treatment for every gateway DB (its own contact/invite/
-  //     request/delivery channel columns), destination paths from the
-  //     plan — or the extracted gateway-security trees on docker.
-  const gatewayDbDests = (mig.files ?? [])
-    .filter((f) => isGatewayDbStateRel(stateRelativePath(f.src)))
-    .map((f) => f.dest);
+  //     request/delivery channel columns).
   start("migrate-gateway-db");
-  done(
-    dockerFlow
-      ? await migrateDockerGatewayDbs(detect.docker.instances, volumeWorkRoot!, onItem("migrate-gateway-db"))
-      : await migrateGatewayDb(detect, gatewayDbDests),
-  );
+  done(await migrateGatewayDb(valueRoots));
 
-  // 3.9 Remove the legacy vellum platform credentials from the migrated
-  //     tree — the cloud api key and webhook secret can't be kept; `cadet
-  //     login` (below, before wake) establishes fresh ones. The docker
-  //     flow scrubs the extracted CES-security trees alongside the root.
+  // 3.9 Remove the legacy vellum platform credentials from every working
+  //     root — the cloud api key and webhook secret can't be kept; `cadet
+  //     login` (below, before wake) establishes fresh ones.
   start("migrate-credentials");
-  const credentials = await migrateCredentialsStep(
-    detect.cadetRoot,
-    dockerFlow ? detect.docker.instances.map((id) => path.join(volumeWorkRoot!, id, "ces-sec")) : undefined,
-  );
+  const credentials = await migrateCredentialsStep(valueRoots);
   done(credentials);
 
   // 3.10 Write the migrated trees into the cadet volumes under the
@@ -420,7 +409,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("verify");
   const verifyResult = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
   if (dockerFlow) {
-    const volumeVerify = await verifyDockerVolumeData(detect.docker.instances, volumeWorkRoot!);
+    const volumeVerify = await verifyDockerVolumeData(volumeWorkRoot!);
     verifyResult.issues = [...(verifyResult.issues ?? []), ...volumeVerify.issues];
     verifyResult.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
   }
@@ -482,9 +471,6 @@ function cadetStateRel(relPath: string): string {
   const m = norm.match(/^assistants\/[^/]+\//);
   return m ? norm.slice(m[0].length) : norm;
 }
-
-/** Gateway db at the cadet destination (PATH_MOVES renamed it on migrate). */
-const GATEWAY_DB_DEST_REL = "gateway-security/gateway.sqlite";
 
 interface CadetScan {
   /** Destination-relative paths, ready for the db steps. One per assistant workspace. */
