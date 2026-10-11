@@ -187,6 +187,39 @@ describe("fetch-docker-volumes", () => {
     });
     expect(result.status).toBe("skipped");
   });
+
+  test("docker ops byte progress rides the item events as `progress`", async () => {
+    const sim = makeVolumeStore();
+    const workRoot = await seededVolumes(sim);
+    const items: Array<{ name: string; status: string; progress?: { bytes: number; totalBytes?: number; label?: string } }> = [];
+
+    // Wrap the simulator: capture the onProgress callbacks the step hands
+    // the ops (one per volume, in order), fire the first as a transfer
+    // would, assert the event shape.
+    const reports: Array<(bytes: number, totalBytes?: number) => void> = [];
+    const ops = {
+      ...sim.ops,
+      dockerVolumeToDir: async (volume: string, destDir: string, image?: string, onProgress?: (bytes: number, totalBytes?: number) => void) => {
+        if (onProgress) reports.push(onProgress);
+        await sim.ops.dockerVolumeToDir(volume, destDir);
+      },
+    } satisfies Pick<import("../../src/types.js").ProcessOps, "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable">;
+
+    await fetchDockerVolumes({
+      dockerOps: ops,
+      instances: [INSTANCE],
+      images: [],
+      workRoot,
+      onItem: (item) => items.push(item),
+    });
+
+    expect(reports.length).toBe(3); // one per volume: workspace, gateway-sec, ces-sec
+    items.length = 0; // drop the started/completed pair — pin progress alone
+    reports[0]?.(300, 400);
+    expect(items).toEqual([
+      { name: INSTANCE, status: "progress", progress: { bytes: 300, totalBytes: 400, label: "workspace" } },
+    ]);
+  });
 });
 
 describe("the shared value steps over the extracted trees", () => {

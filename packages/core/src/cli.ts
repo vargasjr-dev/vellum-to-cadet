@@ -270,8 +270,10 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
     itemLines = 0;
   };
   const clearPending = (): void => {
-    if (live && pending) {
-      // Erase the pending step line and every nested line below it.
+    if (live && pending && !appendOnly) {
+      // Erase the pending step line and every nested line below it. In
+      // append-only (log) mode there is nothing to erase — the pending
+      // line already lives in the log as history.
       eraseLines(1 + itemLines);
     }
     pending = false;
@@ -311,14 +313,15 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
         return;
       }
       if (openItems === 0) return;
-      // The open item's line is the last one written — resolve it in place.
-      process.stderr.write("\u001b[1A\u001b[2K");
+      // Resolve the open item's line: rewritten in place on a TTY, written
+      // fresh below the pending line in append-only (log) mode.
+      if (!appendOnly) process.stderr.write("\u001b[1A\u001b[2K");
       const icon = item.status === "completed" ? colors.green("✓") : colors.yellow("⚠");
       process.stderr.write(`    ${icon} ${item.name}${item.summary ? ` ${item.summary}` : ""}\n`);
       openItems--;
     },
     onStepDone: (result) => {
-      if (live && pending) {
+      if (live && pending && !appendOnly) {
         // Rewrite the pending step line above the already-resolved nested
         // lines (they stay on screen), then hop back down past them. A
         // multi-line summary (the nested detect output) pushes those lines
@@ -330,6 +333,8 @@ function createLiveProgress(mode: "auto" | "log" = "auto"): {
         process.stderr.write(`\u001b[${nested + extra}B\r`);
       } else {
         if (!live) return;
+        // Append-only (log mode): the pending line stays as history — the
+        // completed line is just written below it. No cursor math.
         process.stderr.write(stepLines(result).join("\n") + "\n");
       }
       pending = false;

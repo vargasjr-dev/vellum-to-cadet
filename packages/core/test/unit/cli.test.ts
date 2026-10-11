@@ -48,6 +48,7 @@ describe("cli", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("migrate-vellum-assistant-to-cadet");
     expect(r.stdout).toContain("--dry-run");
+    expect(r.stdout).toContain("--foreground");
   });
 
   test("unknown flag exits non-zero with the flag in stderr", () => {
@@ -121,7 +122,121 @@ describe("cli", () => {
     expect(r.stdout).not.toContain(`rm -rf ${full.root}`);
     expect(r.stdout).not.toContain(`rm -rf ${minimal.root}`);
   });
+
+  test("a live run lock exits 12 with an already-running message", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-lock-"));
+    await fs.mkdir(path.join(home, ".cadet-migration-logs"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".cadet-migration-logs", "migrate.lock"),
+      JSON.stringify({ pid: process.pid, startedAt: "t0", logPath: "migrate-live.log" }),
+    );
+    const r = runCli([], { env: { HOME: home } });
+    expect(r.code).toBe(12);
+    expect(r.stderr).toContain("a migration is already running");
+    expect(r.stderr).toContain(`pid ${process.pid}`);
+    expect(r.stderr).toContain("tail -f migrate-live.log");
+  });
+
+  test("a stale run lock (dead pid) is broken and the run proceeds", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-stale-"));
+    await fs.mkdir(path.join(home, ".cadet-migration-logs"), { recursive: true });
+    // 2^30 is far above every pid_max — the pid cannot be alive.
+    await fs.writeFile(
+      path.join(home, ".cadet-migration-logs", "migrate.lock"),
+      JSON.stringify({ pid: 1 << 30, startedAt: "t0", logPath: "migrate-dead.log" }),
+    );
+    const r = runCli([], { env: { HOME: home } });
+    // Proceeded past the lock — no vellum root in this home, so exit 2 (not 12).
+    expect(r.code).toBe(2);
+    expect(r.stderr).not.toContain("already running");
+  });
+
+  test("the default run detaches: started line with the pid, log relayed to stdout, log file kept", { timeout: 30000 }, async () => {
+    const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
+    const { root } = await buildFullVellum0126();
+    const env = await deterministicDiscoveryEnv(root);
+    // The run-log dir lives under the CLI's $HOME — the helper's fake home,
+    // not the fixture's.
+    const logsDir = path.join(env["HOME"]!, ".cadet-migration-logs");
+    const r = runCli(["--cadet-root", path.join(env["HOME"]!, ".cadet"), "--yes"], {
+      env: {
+        ...env,
+        npm_config_registry: "http://127.0.0.1:1/", // install-cadet fails fast — a warning, not a hang
+        XDG_CONFIG_HOME: path.join(env["HOME"]!, ".config"),
+        XDG_DATA_HOME: path.join(env["HOME"]!, ".local", "share"),
+      },
+    });
+    expect(r.code).toBe(0);
+    // The started line: pid + the run-log path under the redirected HOME.
+    expect(r.stdout).toMatch(/✔ started\s+Begun migration at pid \d+, logs: .+\.cadet-migration-logs\/migrate-.+\.log/);
+    // The child's output was relayed through to this process's stdout.
+    expect(r.stdout).toContain("Migration complete");
+    // The log file holds the record (the tail-able artifact).
+    const logFiles = (await fs.readdir(logsDir)).filter((f) => f.startsWith("migrate-") && f.endsWith(".log"));
+    expect(logFiles.length).toBe(1);
+    const logText = await fs.readFile(path.join(logsDir, logFiles[0]!), "utf8");
+    expect(logText).toContain("Migration complete");
+    // The lock was released when the child finished.
+    expect(fsExistsSync(path.join(logsDir, "migrate.lock"))).toBe(false);
+  });
+
+  test("--foreground runs in-process and tees the run-log", { timeout: 30000 }, async () => {
+    const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
+    const { root } = await buildFullVellum0126();
+    const env = await deterministicDiscoveryEnv(root);
+    const logsDir = path.join(env["HOME"]!, ".cadet-migration-logs");
+    const r = runCli(["--cadet-root", path.join(env["HOME"]!, ".cadet"), "--yes", "--foreground"], {
+      env: {
+        ...env,
+        npm_config_registry: "http://127.0.0.1:1/",
+        XDG_CONFIG_HOME: path.join(env["HOME"]!, ".config"),
+        XDG_DATA_HOME: path.join(env["HOME"]!, ".local", "share"),
+      },
+    });
+    expect(r.code).toBe(0);
+    // The started line still prints (its own pid, its own log path).
+    expect(r.stdout).toMatch(/✔ started\s+Begun migration at pid \d+, logs: /);
+    expect(r.stdout).toContain("Migration complete");
+    // And the run-log holds everything the terminal saw.
+    const logFiles = (await fs.readdir(logsDir)).filter((f) => f.startsWith("migrate-") && f.endsWith(".log"));
+    expect(logFiles.length).toBe(1);
+    expect(await fs.readFile(path.join(logsDir, logFiles[0]!), "utf8")).toContain("Migration complete");
+  });
+
+  test("--internal-run renders append-only log lines and releases the lock", { timeout: 30000 }, async () => {
+    const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
+    const { root, home } = await buildFullVellum0126();
+    const logsDir = path.join(home, ".cadet-migration-logs");
+    await fs.mkdir(logsDir, { recursive: true });
+    const r = runCli(
+      [
+        "--cadet-root", path.join(home, ".cadet"),
+        "--yes",
+        "--internal-run",
+        "--run-log", path.join(logsDir, "migrate-manual.log"),
+        "--internal-lock", path.join(logsDir, "migrate.lock"),
+        "--internal-vellum-root", root,
+      ],
+      {
+        env: {
+          HOME: home,
+          npm_config_registry: "http://127.0.0.1:1/",
+          XDG_CONFIG_HOME: path.join(home, ".config"),
+          XDG_DATA_HOME: path.join(home, ".local", "share"),
+        },
+      },
+    );
+    expect(r.code).toBe(0);
+    // Log-mode pending lines stream to stderr as plain text…
+    expect(r.stderr).toContain("· detect …");
+    // …with NO cursor math — the run-log must read as clean lines.
+    expect(r.stderr).not.toContain("\u001b[1A");
+    expect(r.stderr).not.toContain("\u001b[2K");
+    // …and the final block lands on stdout.
+    expect(r.stdout).toContain("Migration complete");
+    expect(fsExistsSync(path.join(logsDir, "migrate.lock"))).toBe(false);
+  });
 });
 
-import { promises as fs } from "node:fs";
+import { existsSync as fsExistsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
