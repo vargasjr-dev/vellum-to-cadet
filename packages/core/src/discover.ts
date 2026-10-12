@@ -30,13 +30,20 @@ const MARKERS: ReadonlyArray<{ rel: string; weight: number }> = [
   { rel: ".vellumAssistant", weight: 3 },
   { rel: "device/registry.json", weight: 2 },
   { rel: "protected", weight: 2 },
+  { rel: "guardian-token.json", weight: 3 },
   { rel: "skills", weight: 1 },
   { rel: "plugins", weight: 1 },
   { rel: "config.json", weight: 1 },
 ];
 
 /** Markers only the vellum assistant creates — generic names don't count. */
-const STRONG_MARKERS = new Set([".vellum-assistant", ".vellumAssistant", "device/registry.json", "protected"]);
+const STRONG_MARKERS = new Set([
+  ".vellum-assistant",
+  ".vellumAssistant",
+  "device/registry.json",
+  "protected",
+  "guardian-token.json",
+]);
 
 /**
  * HOME-first home resolution. os.homedir() alone ignores runtime env changes
@@ -50,22 +57,44 @@ function home(): string {
 }
 
 /**
- * Where the modern (0.12.x) multi-instance production root lives:
- * ~/.local/share/vellum. The migrator targets production assistants only —
- * env siblings (vellum-dev, vellum-staging, …) are never candidates.
+ * Where the modern (0.12.x) multi-instance production DATA root lives:
+ * ~/.local/share/vellum — host assistants' state dirs (assistants/<name>/.vellum).
+ * The migrator targets production assistants only — env siblings
+ * (vellum-dev, vellum-staging, …) are never candidates.
  */
-export function modernRootPath(): string {
+export function modernDataRootPath(): string {
   return path.join(home(), ".local", "share", "vellum");
 }
 
-/** The modern root, when it exists on disk. */
+/**
+ * The modern CONFIG root: ~/.config/vellum — client identity, logs, and the
+ * per-assistant guardian tokens (assistants/<name>/guardian-token.json).
+ * Docker-only installs never create the data dir at all — all of their heavy
+ * data lives in docker volumes — so this is the ONLY on-disk vellum state
+ * those installs have (field QA: migrating a docker-only assistant found the
+ * lockfile but "no vellum root directory on disk").
+ */
+export function modernConfigRootPath(): string {
+  return path.join(home(), ".config", "vellum");
+}
+
+/**
+ * The modern root, when it exists on disk. The data root wins when both dirs
+ * exist (a host install) so one installation never surfaces as two roots to
+ * pick between; the config root is the root only for docker-only installs,
+ * and their config-dir state still rides the lockfile step's guardian-token
+ * copy on host installs.
+ */
 export async function modernRootCandidates(): Promise<Array<{ root: string; origin: string }>> {
-  try {
-    await fs.stat(modernRootPath());
-  } catch {
-    return [];
+  const dataRoot = modernDataRootPath();
+  if (await exists(dataRoot)) {
+    return [{ root: dataRoot, origin: "default XDG data location" }];
   }
-  return [{ root: modernRootPath(), origin: "default XDG data location" }];
+  const configRoot = modernConfigRootPath();
+  if (await exists(configRoot)) {
+    return [{ root: configRoot, origin: "default XDG config location" }];
+  }
+  return [];
 }
 
 /** Where the vellum 0.12.x assistant could plausibly live on this machine. */
@@ -104,7 +133,11 @@ function normalizeRoot(root: string): string {
  * reads like the modern layout was never looked for.
  */
 export function searchedRootPaths(): string[] {
-  return [...candidateRoots().map((c) => c.root), modernRootPath()];
+  return [
+    ...candidateRoots().map((c) => c.root),
+    modernDataRootPath(),
+    modernConfigRootPath(),
+  ];
 }
 
 /**
@@ -130,22 +163,30 @@ export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
     const stat = await statOrNull(candidate.root);
     if (!stat?.isDirectory()) continue;
 
-    // Modern multi-instance layout: assistants/<name>/.vellum/ state dirs.
+    // Modern multi-instance layout: assistants/<name>/.vellum/ state dirs
+    // (the data layout) or assistants/<name>/guardian-token.json (the
+    // config layout docker-only installs have).
     const modern = await modernAssistants(candidate.root);
     if (modern.length > 0) {
-      const stateDir = path.join(candidate.root, "assistants", modern[0]!, ".vellum");
-      const innerMarkers: string[] = [];
+      const innerMarkers = new Set<string>();
       let score = MODERN_LAYOUT_BONUS;
-      for (const marker of MARKERS) {
-        if (await exists(path.join(stateDir, marker.rel))) {
-          innerMarkers.push(marker.rel);
-          score += marker.weight;
+      for (const assistant of modern) {
+        for (const marker of MARKERS) {
+          if (innerMarkers.has(marker.rel)) continue; // counted once
+          if (await exists(path.join(assistant.markerDir, marker.rel))) {
+            innerMarkers.add(marker.rel);
+            score += marker.weight;
+          }
         }
       }
       // Same trust gate as legacy: a `.vellum` dir alone isn't enough —
       // require a marker only the assistant creates inside it.
-      if (!innerMarkers.some((m) => STRONG_MARKERS.has(m))) continue;
-      const markers = ["assistants/*/.vellum", ...innerMarkers];
+      if (![...innerMarkers].some((m) => STRONG_MARKERS.has(m))) continue;
+      const hasStateDirs = modern.some((a) => a.markerDir.endsWith(".vellum"));
+      const markers = [
+        hasStateDirs ? "assistants/*/.vellum" : "assistants/*/guardian-token.json",
+        ...innerMarkers,
+      ];
       const key = await realpath(candidate.root);
       const existing = found.get(key);
       if (!existing || existing.score < score) {
@@ -183,14 +224,19 @@ export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
   // marker scan couldn't trust.
   if (found.size === 0) {
     const docker = await readDockerLockfileEvidence();
-    if (docker.instances.length > 0 && (await exists(modernRootPath()))) {
-      found.set(await realpath(modernRootPath()), {
-        root: await realpath(modernRootPath()),
-        score: MODERN_LAYOUT_BONUS,
-        markers: ["vellum lockfile"],
-        origin: "docker-tracked vellum lockfile",
-        layout: "modern",
-      });
+    if (docker.instances.length > 0) {
+      for (const root of [modernDataRootPath(), modernConfigRootPath()]) {
+        if (!(await exists(root))) continue;
+        const key = await realpath(root);
+        found.set(key, {
+          root: key,
+          score: MODERN_LAYOUT_BONUS,
+          markers: ["vellum lockfile"],
+          origin: "docker-tracked vellum lockfile",
+          layout: "modern",
+        });
+        break;
+      }
     }
   }
 
@@ -200,8 +246,20 @@ export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
 /** Modern roots outrank a coexisting legacy root: they are what current versions write. */
 const MODERN_LAYOUT_BONUS = 10;
 
-/** Assistant names with a `.vellum` state dir under a modern XDG root. */
-async function modernAssistants(root: string): Promise<string[]> {
+/** A modern assistant dir under a root's assistants/: either carries the
+ * `.vellum` state dir (the data layout) or a guardian token directly (the
+ * config layout docker-only installs have — their data lives in docker
+ * volumes, so the config dir is the only on-disk state). */
+interface ModernAssistantDir {
+  name: string;
+  /** Where the trust markers live: the `.vellum` state dir, or the
+   * assistant dir itself in the config layout. */
+  markerDir: string;
+}
+
+/** Assistant dirs with a `.vellum` state dir or a guardian token under a
+ * modern XDG root. */
+async function modernAssistants(root: string): Promise<ModernAssistantDir[]> {
   const assistantsDir = path.join(root, "assistants");
   let names: string[];
   try {
@@ -211,9 +269,14 @@ async function modernAssistants(root: string): Promise<string[]> {
   } catch {
     return [];
   }
-  const found: string[] = [];
+  const found: ModernAssistantDir[] = [];
   for (const name of names) {
-    if (await exists(path.join(assistantsDir, name, ".vellum"))) found.push(name);
+    const dir = path.join(assistantsDir, name);
+    if (await exists(path.join(dir, ".vellum"))) {
+      found.push({ name, markerDir: path.join(dir, ".vellum") });
+    } else if (await exists(path.join(dir, "guardian-token.json"))) {
+      found.push({ name, markerDir: dir });
+    }
   }
   return found;
 }

@@ -38,6 +38,12 @@ function configLockfileDir(envSuffix: string): string {
   return path.join(configHome, `cadet${envSuffix}`);
 }
 
+/** The vellum config dir for the same env — the guardian tokens' source. */
+function vellumConfigDir(envSuffix: string): string {
+  const configHome = process.env.XDG_CONFIG_HOME?.trim() || path.join(homeDir(), ".config");
+  return path.join(configHome, `vellum${envSuffix}`);
+}
+
 export interface MigrateLockfileOptions {
   vellumRoot: string;
   cadetRoot: string;
@@ -56,6 +62,13 @@ export interface MigrateLockfileOptions {
    * regardless.
    */
   cadetImages?: { assistant: string; gateway: string; credentialExecutor: string } | null;
+  /**
+   * WHY cadetImages is null (binary missing vs unparsable `cadet --version`
+   * output) — the docker-image-refs warning names it instead of a vague
+   * "unavailable" (field QA: the warning fired while a working cadet printed
+   * a version the old parser couldn't read, with no reason shown).
+   */
+  cadetVersionUnavailableReason?: string;
 }
 
 /**
@@ -133,7 +146,9 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
       issues.push({
         severity: "warning",
         message:
-          "docker assistant(s) kept their vellum image refs — the cadet CLI version was unavailable to resolve cadet's. Wake will fail until `cadet hatch` or `cadet upgrade` refreshes them.",
+          `docker assistant(s) kept their vellum image refs — ${
+            opts.cadetVersionUnavailableReason ?? "the cadet CLI version was unavailable to resolve cadet's"
+          }. Wake will fail until \`cadet hatch\` or \`cadet upgrade\` refreshes them.`,
       });
     }
   } else {
@@ -166,7 +181,9 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
       issues.push({
         severity: "warning",
         message:
-          "docker assistant(s) kept their vellum image refs — the cadet CLI version was unavailable to resolve cadet's. Wake will fail until `cadet hatch` or `cadet upgrade` refreshes them.",
+          `docker assistant(s) kept their vellum image refs — ${
+            opts.cadetVersionUnavailableReason ?? "the cadet CLI version was unavailable to resolve cadet's"
+          }. Wake will fail until \`cadet hatch\` or \`cadet upgrade\` refreshes them.`,
       });
     }
   }
@@ -175,6 +192,10 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
   const home = await moveLegacyCadetLockfile(destDir, dest);
   parts.push(home.summary);
   issues.push(...home.issues);
+
+  // ── 3. Guardian tokens: the vellum config dir's per-assistant state. ──
+  const tokens = await migrateGuardianTokens(opts, destDir, issues);
+  if (tokens) parts.push(tokens);
 
   const summary = parts.filter((p) => p.length > 0).join("; ");
   return { step: "migrate-lockfile", status: "completed", summary, issues, data };
@@ -319,4 +340,58 @@ async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Copy the vellum config dir's per-assistant guardian tokens into cadet's.
+ * `$XDG_CONFIG_HOME/vellum[-env]/assistants/<id>/guardian-token.json` lives
+ * OUTSIDE every vellum root — docker-only installs (all their heavy data in
+ * docker volumes) never create the data root at all — so this lockfile step
+ * is the one place that knows both the source ids and the converted ones.
+ * Cadet reads the identical shape from its own config dir
+ * (`$XDG_CONFIG_HOME/cadet[-env]/assistants/<assistantId>/guardian-token.json`,
+ * mycadet-temp cli/src/lib/guardian-token.ts) — without the copy, `cadet
+ * client` after a completed migration 401s (field QA). COPY, never move:
+ * the vellum token stays as the untouched backup, and re-runs re-copy
+ * idempotently.
+ */
+async function migrateGuardianTokens(
+  opts: MigrateLockfileOptions,
+  destDir: string,
+  issues: StepIssue[],
+): Promise<string> {
+  const source = await readRawVellumLockfile();
+  if (source === null) return "";
+  const rawAssistants = source.data["assistants"];
+  if (!Array.isArray(rawAssistants)) return "";
+
+  const sourceConfigDir = vellumConfigDir(opts.envSuffix);
+  const copied = new Set<string>();
+  for (const raw of rawAssistants) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+    const ids = [record["assistantId"], record["name"]].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    );
+    if (ids.length === 0) continue;
+    // The converted lockfile drops the vellum- brand prefix (the same rule
+    // transformAssistantEntry applies) — cadet's token path keys on that id.
+    const destId = ids[0]!.replace(/^vellum-/, "");
+    for (const id of new Set(ids)) {
+      const token = path.join(sourceConfigDir, "assistants", id, "guardian-token.json");
+      const dest = path.join(destDir, "assistants", destId, "guardian-token.json");
+      if (!(await pathExists(token)) || copied.has(dest)) continue;
+      try {
+        await fs.mkdir(path.dirname(dest), { recursive: true });
+        await fs.copyFile(token, dest);
+        copied.add(dest);
+      } catch (err) {
+        issues.push({
+          severity: "warning",
+          message: `could not copy the guardian token for ${destId} (${(err as Error).message}) — run \`cadet login\` to re-authenticate`,
+        });
+      }
+    }
+  }
+  return copied.size > 0 ? `copied ${copied.size} guardian token(s) into the cadet config dir` : "";
 }

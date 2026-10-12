@@ -34,7 +34,7 @@ const noopOps: ProcessOps = {
   async installCadet() {},
   async cadetWakeAll() {},
   async cadetVersion() {
-    return null;
+    return { version: null };
   },
   async dockerVolumeToDir() {},
   async dockerDirToVolume() {},
@@ -464,7 +464,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async installCadet() {},
       async cadetWakeAll() {},
       async cadetVersion() {
-        return null;
+        return { version: null };
       },
       async dockerVolumeToDir() {},
       async dockerDirToVolume() {},
@@ -510,7 +510,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       async installCadet() {},
       async cadetWakeAll() {},
       async cadetVersion() {
-        return null;
+        return { version: null };
       },
       async dockerVolumeToDir() {},
       async dockerDirToVolume() {},
@@ -728,6 +728,70 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       else process.env.HOME = prevHome;
       if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = prevXdgData;
+    }
+  });
+
+  test("a docker-only install migrates from its config-dir root — the guardian token lands where cadet reads it", async () => {
+    const prevHome = process.env.HOME;
+    const prevXdgConfig = process.env.XDG_CONFIG_HOME;
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-docker-only-"));
+    process.env.HOME = home;
+    // Sandboxed like the lockfile tests: GH runners preset XDG_CONFIG_HOME.
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    try {
+      // Field QA: a modern install whose ONLY assistant is docker-backed
+      // never creates ~/.local/share/vellum — the config dir is the entire
+      // on-disk vellum state.
+      const configRoot = path.join(home, ".config", "vellum");
+      const assistantDir = path.join(configRoot, "assistants", "vellum-eager-otter-kdqnjj");
+      await fs.mkdir(assistantDir, { recursive: true });
+      await fs.writeFile(path.join(assistantDir, "guardian-token.json"), JSON.stringify({ accessToken: "tok-1" }));
+      await fs.writeFile(path.join(configRoot, "client-id"), "client-123");
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify({
+          assistants: [
+            {
+              assistantId: "vellum-eager-otter-kdqnjj",
+              name: "vellum-eager-otter-kdqnjj",
+              cloud: "docker",
+              containerInfo: { assistantImage: "vellumai/vellum-assistant" },
+            },
+          ],
+        }),
+      );
+
+      const report = await migrate({ vellumRoot: configRoot, processOps: noopOps });
+
+      expect(report.ok).toBe(true);
+      // The config root migrates root-to-root: cadet's own config dir is
+      // exactly where the cadet CLI reads its lockfile and guardian token.
+      expect(report.detect.cadetRoot).toBe(path.join(home, ".config", "cadet"));
+      const tokenDest = path.join(
+        home,
+        ".config",
+        "cadet",
+        "assistants",
+        "eager-otter-kdqnjj",
+        "guardian-token.json",
+      );
+      expect(await fs.readFile(tokenDest, "utf8")).toContain("tok-1");
+      const lockfileRaw = await fs.readFile(
+        path.join(home, ".config", "cadet", "lockfile.json"),
+        "utf8",
+      );
+      expect(lockfileRaw).toContain("eager-otter-kdqnjj");
+
+      // The image-refs warning (noopOps resolves no cadet version) now says
+      // WHY instead of a bare "unavailable".
+      const lockfileStep = report.steps.find((s) => s.step === "migrate-lockfile");
+      const warning = lockfileStep?.issues?.find((i) => i.severity === "warning");
+      expect(warning?.message).toContain("`cadet --version` printed no parsable version");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfig;
     }
   });
 
@@ -1116,7 +1180,7 @@ describe("e2e: repair mode", () => {
           async installCadet() {},
           async cadetWakeAll() {},
           async cadetVersion() {
-            return null;
+            return { version: null };
           },
           async dockerVolumeToDir() {},
           async dockerDirToVolume() {},
@@ -1248,7 +1312,7 @@ describe("e2e: repair mode", () => {
           async installCadet() {},
           async cadetWakeAll() {},
           async cadetVersion() {
-            return null;
+            return { version: null };
           },
           async dockerVolumeToDir() {},
           async dockerDirToVolume() {},
@@ -1328,7 +1392,7 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async installCadet() {},
           async cadetWakeAll() {},
           async cadetVersion() {
-            return null;
+            return { version: null };
           },
           async dockerVolumeToDir() {},
           async dockerDirToVolume() {},
@@ -1376,7 +1440,7 @@ describe("stop-assistant: vellum lockfile iteration", () => {
           async installCadet() {},
           async cadetWakeAll() {},
           async cadetVersion() {
-            return null;
+            return { version: null };
           },
           async dockerVolumeToDir() {},
           async dockerDirToVolume() {},
@@ -1576,7 +1640,7 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
         logins++;
       },
       async cadetVersion() {
-        return "0.12.7";
+        return { version: "0.12.7" };
       },
     };
     try {

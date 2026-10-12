@@ -183,13 +183,17 @@ export interface ProcessOps {
   /** True when the `cadet` binary resolves on PATH (`cadet --version`). */
   cadetBinAvailable(): Promise<boolean>;
   /**
-   * Ask the cadet CLI its own version (`cadet --version`), or null. The
-   * migrated docker entries must record the CADet image refs for the
-   * installed cadet (the images are tagged per cadet version) — so the
-   * version is captured right after the CLI is installed, before the
-   * lockfile conversion writes containerInfo.
+   * Ask the cadet CLI its own version (`cadet --version`), or null with a
+   * WHY when it can't be resolved. The migrated docker entries must record
+   * the CADet image refs for the installed cadet (the images are tagged per
+   * cadet version) — so the version is captured right after the CLI is
+   * installed, before the lockfile conversion writes containerInfo. The
+   * detail names the failure verbatim so the docker-image-refs warning can
+   * say exactly why the refs stayed vellum's (field QA: the warning fired
+   * with no reason shown while a working cadet printed "@mycadet/cli v0.12.9"
+   * the version parser couldn't read).
    */
-  cadetVersion(): Promise<string | null>;
+  cadetVersion(): Promise<{ version: string | null; detail?: string }>;
   /**
    * Copy a docker volume's contents down to a host dir (temp container +
    * docker cp). onProgress, when given, receives byte counts of the tar

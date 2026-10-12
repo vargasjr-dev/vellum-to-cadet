@@ -41,12 +41,17 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
     // The installed cadet's own version — the lockfile conversion derives
     // the docker entries' container image refs from it (the images are
     // tagged per cadet release).
-    const version = await ops.cadetVersion();
+    const { version, detail } = await ops.cadetVersion();
     return {
       step: "install-cadet",
       status: "completed",
       summary: `cadet CLI installed globally${version ? ` (v${version})` : ""}`,
-      data: { installed: true, binAvailable: true, version },
+      data: {
+        installed: true,
+        binAvailable: true,
+        version,
+        ...(version === null && detail ? { versionUnavailableReason: detail } : {}),
+      },
     };
   } catch (err) {
     return {

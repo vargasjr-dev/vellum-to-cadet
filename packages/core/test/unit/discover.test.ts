@@ -135,6 +135,57 @@ describe("discover: modern multi-instance layout", () => {
   });
 });
 
+describe("discover: the config root of docker-only installs", () => {
+  test("finds ~/.config/vellum via its assistants' guardian tokens when the data root never existed", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cfgroot-"));
+    process.env["HOME"] = tempHome;
+    // Docker-only install: the config dir holds the assistant state; the
+    // data dir is never created (all heavy data lives in docker volumes).
+    const root = path.join(tempHome, ".config", "vellum");
+    await fs.mkdir(path.join(root, "assistants", "vellum-eager-otter-kdqnjj"), { recursive: true });
+    await fs.writeFile(path.join(root, "assistants", "vellum-eager-otter-kdqnjj", "guardian-token.json"), "{}");
+
+    const found = await discoverVellumRoots();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.root).toBe(root);
+    expect(found[0]!.layout).toBe("modern");
+    expect(found[0]!.markers).toContain("assistants/*/guardian-token.json");
+    expect(found[0]!.origin).toBe("default XDG config location");
+  });
+
+  test("prefers the data root when both modern dirs exist", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cfgroot-"));
+    process.env["HOME"] = tempHome;
+    const dataRoot = path.join(tempHome, ".local", "share", "vellum");
+    const state = path.join(dataRoot, "assistants", "velly", ".vellum");
+    await fs.mkdir(path.join(state, "workspace"), { recursive: true });
+    await fs.mkdir(path.join(state, ".vellum-assistant"), { recursive: true });
+    const configRoot = path.join(tempHome, ".config", "vellum");
+    await fs.mkdir(path.join(configRoot, "assistants", "vellum-eager-otter-kdqnjj"), { recursive: true });
+    await fs.writeFile(path.join(configRoot, "assistants", "vellum-eager-otter-kdqnjj", "guardian-token.json"), "{}");
+
+    const found = await discoverVellumRoots();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.root).toBe(dataRoot);
+  });
+
+  test("an empty config dir (no assistants) is not a root", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cfgroot-"));
+    process.env["HOME"] = tempHome;
+    await fs.mkdir(path.join(tempHome, ".config", "vellum", "logs"), { recursive: true });
+
+    expect(await discoverVellumRoots()).toHaveLength(0);
+  });
+
+  test("the searched report names the config root too", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "discover-cfgroot-"));
+    process.env["HOME"] = tempHome;
+
+    const searched = await searchedLocations();
+    expect(searched).toContain(path.join(tempHome, ".config", "vellum"));
+  });
+});
+
 
 describe("discoverCadetRoots — production roots only", () => {
   const MANIFEST = ".cadet-migration-manifest.json";
