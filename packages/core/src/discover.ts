@@ -286,6 +286,34 @@ async function modernAssistants(root: string): Promise<ModernAssistantDir[]> {
   return found;
 }
 
+/**
+ * The vellum markers ONE directory carries, scored the way root discovery
+ * scores candidates: legacy markers at the root itself, modern
+ * multi-instance markers inside assistants/<name>/.vellum or the
+ * per-assistant config dirs. `strong` is the same trust gate discovery
+ * applies — at least one marker only the vellum assistant creates. Exported
+ * for the cloud export contract: a staged root must pass the gate discovery
+ * would apply to it before the migrator runs against it.
+ */
+export async function inspectRootMarkers(
+  root: string,
+): Promise<{ markers: string[]; strong: boolean }> {
+  const stat = await statOrNull(root);
+  if (!stat?.isDirectory()) return { markers: [], strong: false };
+
+  const found = new Set<string>();
+  for (const marker of MARKERS) {
+    if (await exists(path.join(root, marker.rel))) found.add(marker.rel);
+  }
+  for (const assistant of await modernAssistants(root)) {
+    for (const marker of MARKERS) {
+      if (await exists(path.join(assistant.markerDir, marker.rel))) found.add(marker.rel);
+    }
+  }
+  const markers = [...found];
+  return { markers, strong: markers.some((m) => STRONG_MARKERS.has(m)) };
+}
+
 async function statOrNull(p: string) {
   try {
     return await fs.stat(p);

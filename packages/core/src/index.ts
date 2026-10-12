@@ -5,6 +5,14 @@
  * CLI and (later) the desktop wrapper are thin shells over the same engine.
  */
 export { migrate } from "./runner.js";
+export {
+  migrateFromExport,
+  packVellumRoot,
+  stageExportedRoot,
+  validateStagedRoot,
+  type MigrateFromExportOptions,
+  type StagedRootVerdict,
+} from "./export-contract.js";
 export { detect as detectInstall } from "./steps/detect.js";
 export { buildCopyPlan } from "./steps/migrate-layout.js";
 export { verify } from "./steps/verify.js";

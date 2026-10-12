@@ -36,7 +36,7 @@ const VOLUME_STREAM_TIMEOUT_MS = 3_600_000;
  * or the timeout — on timeout every child is killed first so nothing
  * keeps running.
  */
-function settleStreams(children: Array<{ child: ChildProcess; label: string }>, what: string): Promise<void> {
+export function settleStreams(children: Array<{ child: ChildProcess; label: string }>, what: string): Promise<void> {
   return new Promise((resolve, reject) => {
     let pending = children.length;
     let failure: Error | null = null;
