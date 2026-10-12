@@ -35,7 +35,7 @@ jobs:
       base-ref: ${{ steps.compute.outputs.base-ref }}
       skip-ci: ${{ steps.compute.outputs.skip-ci }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -79,7 +79,7 @@ jobs:
       contents: write # cut/push the release branch
       actions: write # dispatch release.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 

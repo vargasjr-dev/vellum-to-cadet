@@ -36,7 +36,12 @@ const MARKERS: ReadonlyArray<{ rel: string; weight: number }> = [
   { rel: "config.json", weight: 1 },
 ];
 
-/** Markers only the vellum assistant creates — generic names don't count. */
+/**
+ * Markers only the vellum assistant creates inside its roots — generic names
+ * don't count. Cadet keeps its own guardian tokens under its config dir
+ * (~/.config/cadet/assistants/<id>/guardian-token.json), but discovery never
+ * scans cadet paths, so those can't tip a vellum-root decision.
+ */
 const STRONG_MARKERS = new Set([
   ".vellum-assistant",
   ".vellumAssistant",

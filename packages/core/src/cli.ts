@@ -801,13 +801,12 @@ function ensureRecommendedNode(): void {
   const previous = process.versions.node;
   console.error(
     detail(
-      `  · node ${previous} is older than recommended — installing node ${RECOMMENDED_NODE_MAJOR} via nvm (one-time; this can take a minute)…`,
+      `  · node ${previous} is older than recommended — installing node ${RECOMMENDED_NODE_MAJOR} via nvm…`,
     ),
   );
   // Stream nvm's own install output instead of swallowing it: the first
   // download is slow, and silence after the "installing…" line reads as a
-  // hang (field QA: an "immediate pause" before any step logged). fd 2
-  // keeps --json's stdout machine-readable.
+  // hang. fd 2 keeps --json's stdout machine-readable.
   const installed = spawnSync("bash", ["-c", nvmBash(shim, `nvm install ${RECOMMENDED_NODE_MAJOR}`)], {
     stdio: ["ignore", 2, 2],
   });
