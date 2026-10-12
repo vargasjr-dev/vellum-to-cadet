@@ -6,7 +6,7 @@ import {
   makeInstanceDirMapper,
   transformAssistantEntry,
 } from "../entry-transform.js";
-import { readRawVellumLockfile } from "./detect.js";
+import { readRawVellumLockfile } from "../discover.js";
 import type { StepIssue, StepResult } from "../types.js";
 
 /**

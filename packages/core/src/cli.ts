@@ -15,7 +15,11 @@ import { promises as fsPromises } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { discoverVellumRoots, candidateRoots } from "./discover.js";
+import {
+  discoverVellumRoots,
+  searchedLocations,
+  readRawVellumLockfile,
+} from "./discover.js";
 import { formatBytes, formatProgress } from "./fs-utils.js";
 import { handleToInstanceName } from "./layout.js";
 import { defaultProcessOps } from "./process.js";
@@ -196,6 +200,24 @@ async function resolveRoot(): Promise<string> {
   if (candidates.length === 0) return "";
   if (candidates.length === 1) return candidates[0]!.root;
   return await promptForRoot(candidates);
+}
+
+/**
+ * The no-root failure report. The searched list names EVERY location
+ * discovery looked at — the root dirs (legacy env/home + the modern XDG
+ * root) and every lockfile path; a report listing only the legacy home
+ * root reads like the modern layout and the docker-tracked installs were
+ * never looked for. When a vellum lockfile EXISTS, the message says so:
+ * a docker-tracked install keeps its record there, and its root directory
+ * on disk may be missing or carry no trusted marker.
+ */
+async function noRootReport(): Promise<{ message: string; searched: string[] }> {
+  const searched = await searchedLocations();
+  const lockfile = await readRawVellumLockfile();
+  const message = lockfile
+    ? `found a vellum lockfile (${lockfile.path}) but no vellum root directory on disk (searched: ${searched.join(", ")})`
+    : `no vellum installation found (searched: ${searched.join(", ")})`;
+  return { message, searched };
 }
 
 async function promptForRoot(
@@ -472,8 +494,8 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
     return EXIT_CODES.ambiguousRoot;
   }
   if (resolved === "") {
-    const searched = candidateRoots().map((c) => c.root).join(", ");
-    console.error(errorText(`no vellum installation found (searched: ${searched})`));
+    const { message } = await noRootReport();
+    console.error(errorText(message));
     return EXIT_CODES.nothingToMigrate;
   }
   parsed.vellumRoot = resolved;
@@ -954,11 +976,10 @@ async function main(): Promise<number> {
       return EXIT_CODES.ambiguousRoot;
     }
     if (resolved === "") {
-      const searched = candidateRoots().map((c) => c.root).join(", ");
-      const message = `no vellum installation found (searched: ${searched})`;
+      const { message, searched } = await noRootReport();
       if (parsed.json) {
         process.stdout.write(
-          `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched: candidateRoots() }, null, 2)}\n`,
+          `${JSON.stringify({ ok: false, exitCode: EXIT_CODES.nothingToMigrate, searched }, null, 2)}\n`,
         );
       } else {
         console.error(errorText(message));
