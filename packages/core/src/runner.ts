@@ -56,6 +56,20 @@ function utcStamp(): string {
 }
 
 /**
+ * The stop step's honest no-op for export-contract ingest
+ * (`stoppedByConstruction`): the root was packed from a sleeping assistant,
+ * and the ingesting VM has no vellum CLI — nothing here to sleep and
+ * nothing to sleep it with.
+ */
+function skippedStopStep(): StepResult {
+  return {
+    step: "stop-assistant",
+    status: "skipped",
+    summary: "skipped — exported root is asleep by construction",
+  };
+}
+
+/**
  * Assemble the pre-migration confirmation payload from a detect result —
  * shared by the runner's confirm hook and the launcher's pre-detach prompt
  * (the detached child has no stdin, so the LAUNCHER is the one that asks).
@@ -245,7 +259,11 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       // field run: the re-test fetched volumes while the assistant was
       // still generating data.)
       start("stop-assistant");
-      done(await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000));
+      done(
+        options.stoppedByConstruction
+          ? skippedStopStep()
+          : await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000),
+      );
       start("fetch-docker-volumes");
       const reFetched = done(
         await fetchDockerVolumes({
@@ -390,8 +408,13 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   }
 
   // 1. Put the vellum assistants to sleep (the vellum CLI does the stopping).
+  //    Export-contract ingest skips it: a staged root is asleep by
+  //    construction — export refused to pack a running assistant — and the
+  //    ingesting VM has no vellum CLI to sleep anything with.
   start("stop-assistant");
-  const stop = await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000);
+  const stop = options.stoppedByConstruction
+    ? skippedStopStep()
+    : await stopAssistant(ops, options.verbose, options.termGraceMs ?? 5_000);
   done(stop);
 
   // 2. (No backup step.) The vellum root is a read-only source of truth —

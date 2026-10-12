@@ -117,6 +117,14 @@ export interface MigrateOptions {
   /** True when this process IS the detached child (--internal-run): the launcher already confirmed. */
   internalRun?: boolean;
   /**
+   * Export-contract ingest: the staged root is asleep by construction —
+   * `vellum export` refuses to pack a running assistant, and the machine
+   * ingesting it (a fresh firecracker VM) has no vellum CLI to sleep
+   * anything with. Skips the stop-assistant step; the step is still
+   * reported, honestly as skipped.
+   */
+  stoppedByConstruction?: boolean;
+  /**
    * Pre-flight confirmation (v0.0.15 field feedback: the run puts assistants
    * to sleep and moves tens of GB before the user ever had a say). Called
    * once after detect + target resolution, before the FIRST mutating step —
