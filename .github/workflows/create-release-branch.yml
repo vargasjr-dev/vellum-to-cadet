@@ -1,0 +1,145 @@
+# Cuts a release branch: bumps both package versions, commits, pushes
+# release/vN, then dispatches release.yml on that branch (which publishes,
+# tags, merges to main, deletes the branch). Mirrors mycadet-temp's
+# create-release-branch.yml; manual workflow_dispatch only — no cron.
+name: Create Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          # hotfix: patch bump cut from the latest *release tag's* commit
+          # (not main HEAD), committed with [skip ci] and NOT dispatched —
+          # cherry-pick fixes onto the branch first, then dispatch
+          # release.yml from it manually.
+          - hotfix
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    if: github.actor == 'dvargasfuertes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      base-ref: ${{ steps.compute.outputs.base-ref }}
+      skip-ci: ${{ steps.compute.outputs.skip-ci }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version from bump type
+        id: compute
+        run: |
+          BUMP="${{ inputs.bump }}"
+
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          LATEST_VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch|hotfix) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "$BUMP" = "hotfix" ]; then
+            BASE_REF=$(git rev-list -n 1 "$LATEST_TAG")
+            echo "Hotfix: branching from $LATEST_TAG ($BASE_REF)"
+            echo "base-ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+            echo "skip-ci=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "base-ref=" >> "$GITHUB_OUTPUT"
+            echo "skip-ci=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-release-branch:
+    needs: compute-version
+    if: github.actor == 'dvargasfuertes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # cut/push the release branch
+      actions: write # dispatch release.yml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out hotfix base ref
+        if: ${{ needs.compute-version.outputs.base-ref != '' }}
+        run: git checkout "${{ needs.compute-version.outputs.base-ref }}"
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create release branch and bump versions
+        run: |
+          VERSION="${{ needs.compute-version.outputs.version }}"
+          BASE_REF="${{ needs.compute-version.outputs.base-ref }}"
+          SKIP_CI="${{ needs.compute-version.outputs.skip-ci }}"
+          BRANCH="release/v$VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Delete existing release branch if it exists
+          if git ls-remote --exit-code origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Deleting existing release branch: $BRANCH"
+            git push origin --delete "$BRANCH"
+          fi
+
+          if [ -n "$BASE_REF" ]; then
+            echo "Creating $BRANCH from $BASE_REF"
+            git checkout -b "$BRANCH" "$BASE_REF"
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+          jq --arg v "$VERSION" '.version = $v' packages/core/package.json > tmp && mv tmp packages/core/package.json
+          jq --arg v "$VERSION" '.version = $v' packages/alias/package.json > tmp && mv tmp packages/alias/package.json
+
+          # The caret on 0.0.x locks the patch digit — the dep spec MUST move
+          # with the version or installs resolve the published tarball.
+          jq --arg v "$VERSION" '.dependencies["@mycadet/vellum"] = "^\($v)"' packages/alias/package.json > tmp && mv tmp packages/alias/package.json
+
+          npm install --package-lock-only
+
+          COMMIT_MSG="Release v$VERSION"
+          if [ "$SKIP_CI" = "true" ]; then
+            COMMIT_MSG="Release v$VERSION [skip ci]"
+          fi
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "$COMMIT_MSG"
+          fi
+          git push --no-verify origin "$BRANCH"
+
+      - name: Dispatch the release workflow
+        if: ${{ needs.compute-version.outputs.skip-ci != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.compute-version.outputs.version }}"
+          gh workflow run release.yml --ref "release/v$VERSION"
+          echo "Dispatched release.yml at release/v$VERSION"
