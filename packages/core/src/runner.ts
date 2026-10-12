@@ -299,13 +299,21 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     // missing binary gets installed HERE (before the lockfile merge reads
     // the version) — a re-run after a failed install heals the CLI too.
     let reBinAvailable = await ops.cadetBinAvailable();
+    let reVersion: string | null = null;
+    let reVersionReason: string | undefined;
     if (!reBinAvailable) {
       start("install-cadet");
       const reInstall = await installCadetCli(ops, 1);
       done(reInstall);
       reBinAvailable = reInstall.data?.["binAvailable"] === true;
     }
-    const reVersion = reBinAvailable ? await ops.cadetVersion() : null;
+    if (reBinAvailable) {
+      const asked = await ops.cadetVersion();
+      reVersion = asked.version;
+      reVersionReason = asked.detail;
+    } else {
+      reVersionReason = "the cadet CLI was not available on PATH";
+    }
     start("migrate-lockfile");
     const reLockfile = await migrateLockfile({
       vellumRoot: detect.vellumRoot,
@@ -313,6 +321,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       envSuffix: envSuffixFor(detect.vellumRoot),
       applyRenames: false,
       cadetImages: reVersion ? cadetImageRefs(reVersion) : null,
+      cadetVersionUnavailableReason: reVersion ? undefined : reVersionReason,
     });
     done(reLockfile);
     start("migrate-retired");
@@ -507,6 +516,18 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   done(install);
   const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
   const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;
+  // Field QA: the image-refs warning used to fire with no reason shown —
+  // surface WHY the cadet version stayed unresolved (binary missing vs
+  // unparsable `cadet --version` output) straight into the warning.
+  const rawVersionReason = install.data?.["versionUnavailableReason"];
+  const cadetVersionReason =
+    cadetVersion !== null
+      ? undefined
+      : typeof rawVersionReason === "string"
+        ? rawVersionReason
+        : install.data?.["binAvailable"] === true
+          ? "`cadet --version` printed no parsable version"
+          : "the cadet CLI was not available on PATH";
 
   // 4. Convert the vellum lockfile into the cadet canonical config-dir
   //    lockfile (transformed entries, the path the cadet CLI reads), and
@@ -520,6 +541,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     envSuffix: envSuffixFor(detect.vellumRoot),
     applyRenames: true,
     cadetImages,
+    cadetVersionUnavailableReason: cadetVersionReason,
   });
   done(lockfile);
 

@@ -801,25 +801,28 @@ function ensureRecommendedNode(): void {
   const previous = process.versions.node;
   console.error(
     detail(
-      `  · node ${previous} is older than recommended — installing node ${RECOMMENDED_NODE_MAJOR} via nvm…`,
+      `  · node ${previous} is older than recommended — installing node ${RECOMMENDED_NODE_MAJOR} via nvm (one-time; this can take a minute)…`,
     ),
   );
+  // Stream nvm's own install output instead of swallowing it: the first
+  // download is slow, and silence after the "installing…" line reads as a
+  // hang (field QA: an "immediate pause" before any step logged). fd 2
+  // keeps --json's stdout machine-readable.
+  const installed = spawnSync("bash", ["-c", nvmBash(shim, `nvm install ${RECOMMENDED_NODE_MAJOR}`)], {
+    stdio: ["ignore", 2, 2],
+  });
   let nodeBin = "";
-  try {
-    const out = execFileSync(
-      "bash",
-      [
-        "-c",
-        nvmBash(
-          shim,
-          `nvm install ${RECOMMENDED_NODE_MAJOR} >/dev/null 2>&1; nvm which ${RECOMMENDED_NODE_MAJOR}`,
-        ),
-      ],
-      { encoding: "utf8" },
-    );
-    nodeBin = out.trim().split("\n").filter(Boolean).pop() ?? "";
-  } catch {
-    // Fall through to the recommendation.
+  if (installed.status === 0) {
+    try {
+      const out = execFileSync(
+        "bash",
+        ["-c", nvmBash(shim, `nvm which ${RECOMMENDED_NODE_MAJOR}`)],
+        { encoding: "utf8" },
+      );
+      nodeBin = out.trim().split("\n").filter(Boolean).pop() ?? "";
+    } catch {
+      // Fall through to the recommendation.
+    }
   }
   if (!nodeBin || !fsExistsSync(nodeBin)) {
     console.error(
@@ -853,8 +856,6 @@ function ensureRecommendedNode(): void {
 }
 
 async function main(): Promise<number> {
-  ensureRecommendedNode();
-
   let parsed: ParsedArgs;
   try {
     parsed = parseArgs(process.argv.slice(2));
@@ -868,6 +869,9 @@ async function main(): Promise<number> {
     process.stdout.write(parsed.uninstall ? UNINSTALL_HELP : HELP);
     return EXIT_CODES.ok;
   }
+  // One check, AFTER the help branch: --help must not install a node
+  // version, and a single call means a no-nvm machine never prints the
+  // recommendation twice.
   ensureRecommendedNode();
 
   // Repair mode: re-run the idempotent value steps against every already-

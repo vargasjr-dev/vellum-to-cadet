@@ -83,7 +83,7 @@ function baseOps(): ProcessOps {
     cadetSleep: async () => {},
     installCadet: async () => {},
     cadetWakeAll: async () => {},
-    cadetVersion: async () => null,
+    cadetVersion: async () => ({ version: null }),
     dockerVolumeToDir: async () => {},
     dockerDirToVolume: async () => {},
     dockerAvailable: async () => false,

@@ -214,6 +214,26 @@ export function parseDfAvail(stdout: string): number | undefined {
   return undefined;
 }
 
+/**
+ * The version from `cadet --version` output, or null with a WHY when the
+ * output carries none. The CLI prints its scoped package name before the
+ * version ("@mycadet/cli v0.12.9" — field QA: the migrator called the
+ * version unavailable on a working cadet because only a leading "cadet "
+ * was stripped); older shapes ("cadet 0.12.7", bare "0.12.7", "v0.12.7")
+ * parse the same way: the version is the LAST whitespace-separated token
+ * on the first line. The detail names the first line verbatim so the
+ * docker-image-refs warning can say exactly why the refs stayed vellum's.
+ */
+export function parseCadetVersion(stdout: string): { version: string | null; detail?: string } {
+  const line = stdout.split("\n")[0]?.trim() ?? "";
+  const token = line.split(/\s+/).pop() ?? "";
+  if (/^v?\d/.test(token)) return { version: token.replace(/^v/, "") };
+  return {
+    version: null,
+    detail: `expected "cadet --version" to include a version number, first line was: ${JSON.stringify(line)}`,
+  };
+}
+
 /** A host directory's size — the import direction's progress denominator. */
 async function dirSizeBytes(dir: string): Promise<number | undefined> {
   try {
@@ -331,13 +351,12 @@ export const defaultProcessOps: ProcessOps = {
   async cadetVersion() {
     try {
       const { stdout } = await execFileAsync("cadet", ["--version"]);
-      // First line only, accepting both "0.12.7" and "cadet 0.12.7". A
-      // non-version answer (an unrelated binary owns the name) yields null
-      // so the lockfile conversion never writes image refs derived from it.
-      const line = stdout.split("\n")[0]?.trim().replace(/^cadet\s+/i, "") ?? "";
-      return /^v?\d/.test(line) ? line.replace(/^v/, "") : null;
-    } catch {
-      return null;
+      return parseCadetVersion(stdout);
+    } catch (err) {
+      return {
+        version: null,
+        detail: `\`cadet --version\` could not run: ${(err as Error).message.split("\n")[0]}`,
+      };
     }
   },
 
