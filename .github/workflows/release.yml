@@ -1,7 +1,6 @@
-# Dispatch-only release: publish the version already committed on the
-# dispatched branch, tag it, then merge the branch into main. Bumps are done
-# manually before dispatching; the create-release-branch pattern from
-# mycadet-temp may replace that later. Invocable only by Vargas.
+# Release: publish the version committed on the dispatched branch, tag it,
+# then merge the branch into main. Dispatched by Vargas directly, or by
+# create-release-branch.yml (which does the bump/commit/branch first).
 
 name: release
 
@@ -18,7 +17,9 @@ concurrency:
 
 jobs:
   release:
-    if: github.actor == 'dvargasfuertes'
+    # dvargasfuertes = manual dispatches; github-actions[bot] = the dispatch
+    # from create-release-branch.yml (that workflow is itself actor-gated).
+    if: github.actor == 'dvargasfuertes' || github.actor == 'github-actions[bot]'
     runs-on: ubuntu-latest
     env:
       RELEASE_BRANCH: ${{ github.ref_name }}
