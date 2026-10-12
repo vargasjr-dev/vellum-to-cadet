@@ -26,7 +26,7 @@ import {
   vellumVolumeNames,
   verifyDockerVolumeData,
 } from "./steps/migrate-docker-volumes.js";
-import { readLockfileAssistants } from "./steps/detect.js";
+import { readLockfileAssistants } from "./discover.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
 import { handleToInstanceName, DEFAULT_TARGET_CTX } from "./layout.js";

@@ -244,6 +244,40 @@ describe("cli", () => {
     expect(r.stdout).toContain("Migration complete");
     expect(fsExistsSync(path.join(logsDir, "migrate.lock"))).toBe(false);
   });
+
+  test("the no-root failure names every searched location, modern roots included", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-noroot-"));
+    const r = runCli(["--cadet-root", path.join(home, ".cadet"), "--json"], {
+      env: { HOME: home },
+    });
+    expect(r.code).toBe(2);
+    const report = JSON.parse(r.stdout);
+    expect(report.ok).toBe(false);
+    expect(report.exitCode).toBe(2);
+    // Roots AND lockfiles: the modern XDG root must be visibly searched —
+    // a report naming only the legacy home root reads like the modern
+    // layout was never looked for.
+    expect(report.searched).toContain(path.join(home, ".vellum"));
+    expect(report.searched).toContain(path.join(home, ".local", "share", "vellum"));
+    expect(report.searched).toContain(path.join(home, ".vellum.lock.json"));
+    expect(report.searched).toContain(path.join(home, ".config", "vellum", "lockfile.json"));
+  });
+
+  test("a vellum lockfile without a root directory self-diagnoses", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-lockonly-"));
+    // A docker-tracked install's root may be missing or marker-less — the
+    // failure must say the lockfile was seen, not imply nothing was found.
+    await fs.writeFile(
+      path.join(home, ".vellum.lock.json"),
+      JSON.stringify({ assistants: [{ assistantId: "velly", cloud: "local" }] }),
+    );
+    const r = runCli(["--cadet-root", path.join(home, ".cadet")], {
+      env: { HOME: home },
+    });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("found a vellum lockfile");
+    expect(r.stderr).toContain(".vellum.lock.json");
+  });
 });
 
 /** Test view of the relay's piped contract: escape sequences and CRs gone. */

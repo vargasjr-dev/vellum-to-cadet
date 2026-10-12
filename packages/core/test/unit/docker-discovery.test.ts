@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 
-import { readDockerLockfileEvidence } from "../../src/steps/detect.js";
+import { readDockerLockfileEvidence } from "../../src/discover.js";
 import { expect } from "../helpers/expect.js";
 
 /** Redirect $HOME for the duration of fn (discovery reads it live). */

@@ -1,4 +1,4 @@
-import { readLockfileAssistants } from "./detect.js";
+import { readLockfileAssistants } from "../discover.js";
 import type { ProcessOps, StepResult } from "../types.js";
 
 /**

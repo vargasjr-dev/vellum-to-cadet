@@ -3,7 +3,11 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { discoverCadetRoots, discoverVellumRoots } from "../../src/discover.js";
+import {
+  discoverCadetRoots,
+  discoverVellumRoots,
+  searchedLocations,
+} from "../../src/discover.js";
 import { expect } from "../helpers/expect.js";
 
 const ENV_KEYS = ["VELLUM_DATA_DIR", "VELLUM_WORKSPACE_DIR"] as const;
@@ -163,5 +167,78 @@ describe("discoverCadetRoots — production roots only", () => {
     await fs.writeFile(path.join(production, MANIFEST), "{}");
 
     expect(await discoverCadetRoots()).toEqual([production]);
+  });
+});
+
+
+describe("lockfile-corroborated discovery", () => {
+  async function fakeHome(): Promise<string> {
+    return fs.mkdtemp(path.join(os.tmpdir(), "discover-home-"));
+  }
+
+  test("a docker-tracked lockfile trusts a modern root the marker scan cannot", async () => {
+    const home = await fakeHome();
+    process.env["HOME"] = home;
+    delete process.env["VELLUM_DATA_DIR"];
+    delete process.env["VELLUM_WORKSPACE_DIR"];
+    // The modern root exists but carries NO strong markers — a docker
+    // install's host root holds only the CLI's own state.
+    await fs.mkdir(path.join(home, ".local", "share", "vellum"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".vellum.lock.json"),
+      JSON.stringify({ assistants: [{ assistantId: "velly", cloud: "docker" }] }),
+    );
+
+    const found = await discoverVellumRoots();
+
+    expect(found).toHaveLength(1);
+    expect(found[0]!.root).toBe(path.join(home, ".local", "share", "vellum"));
+    expect(found[0]!.layout).toBe("modern");
+    expect(found[0]!.origin).toBe("docker-tracked vellum lockfile");
+  });
+
+  test("a docker-tracked lockfile cannot conjure a root that does not exist", async () => {
+    const home = await fakeHome();
+    process.env["HOME"] = home;
+    delete process.env["VELLUM_DATA_DIR"];
+    delete process.env["VELLUM_WORKSPACE_DIR"];
+    await fs.writeFile(
+      path.join(home, ".vellum.lock.json"),
+      JSON.stringify({ assistants: [{ assistantId: "velly", cloud: "docker" }] }),
+    );
+
+    const found = await discoverVellumRoots();
+
+    expect(found).toEqual([]);
+  });
+
+  test("a lockfile without docker entries does not corroborate a root", async () => {
+    const home = await fakeHome();
+    process.env["HOME"] = home;
+    delete process.env["VELLUM_DATA_DIR"];
+    delete process.env["VELLUM_WORKSPACE_DIR"];
+    await fs.mkdir(path.join(home, ".local", "share", "vellum"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".vellum.lock.json"),
+      JSON.stringify({ assistants: [{ assistantId: "loc", cloud: "local" }] }),
+    );
+
+    const found = await discoverVellumRoots();
+
+    expect(found).toEqual([]);
+  });
+
+  test("the failure report names the modern root and the lockfiles whether or not they exist", async () => {
+    const home = await fakeHome();
+    process.env["HOME"] = home;
+    delete process.env["VELLUM_DATA_DIR"];
+    delete process.env["VELLUM_WORKSPACE_DIR"];
+
+    const searched = await searchedLocations();
+
+    expect(searched).toContain(path.join(home, ".vellum"));
+    expect(searched).toContain(path.join(home, ".local", "share", "vellum"));
+    expect(searched).toContain(path.join(home, ".vellum.lock.json"));
+    expect(searched).toContain(path.join(home, ".config", "vellum", "lockfile.json"));
   });
 });

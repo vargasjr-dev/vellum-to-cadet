@@ -53,16 +53,19 @@ function home(): string {
  * Where the modern (0.12.x) multi-instance production root lives:
  * ~/.local/share/vellum. The migrator targets production assistants only —
  * env siblings (vellum-dev, vellum-staging, …) are never candidates.
- * Returned entries exist on disk.
  */
+export function modernRootPath(): string {
+  return path.join(home(), ".local", "share", "vellum");
+}
+
+/** The modern root, when it exists on disk. */
 export async function modernRootCandidates(): Promise<Array<{ root: string; origin: string }>> {
-  const shareDir = path.join(home(), ".local", "share");
   try {
-    await fs.stat(path.join(shareDir, "vellum"));
+    await fs.stat(modernRootPath());
   } catch {
     return [];
   }
-  return [{ root: path.join(shareDir, "vellum"), origin: "default XDG data location" }];
+  return [{ root: modernRootPath(), origin: "default XDG data location" }];
 }
 
 /** Where the vellum 0.12.x assistant could plausibly live on this machine. */
@@ -92,6 +95,32 @@ export function candidateRoots(): Array<{ root: string; origin: string }> {
 function normalizeRoot(root: string): string {
   if (path.basename(root) === "workspace") return path.dirname(root);
   return root;
+}
+
+/**
+ * Every root location discovery considers — the legacy env overrides and
+ * the home root, plus the modern XDG root whether or not it exists. The
+ * failure report must name them all: listing only the legacy home root
+ * reads like the modern layout was never looked for.
+ */
+export function searchedRootPaths(): string[] {
+  return [...candidateRoots().map((c) => c.root), modernRootPath()];
+}
+
+/**
+ * Every location the no-installation failure report names — the root dirs
+ * and every lockfile path, whether or not they exist on disk. A report
+ * that only names the legacy home root reads like the modern layout was
+ * never looked for.
+ */
+export async function searchedLocations(): Promise<string[]> {
+  return [
+    ...new Set([
+      ...searchedRootPaths(),
+      path.join(home(), ".config", "vellum", "lockfile.json"),
+      ...(await lockfileCandidates()),
+    ]),
+  ];
 }
 
 export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
@@ -142,6 +171,26 @@ export async function discoverVellumRoots(): Promise<VellumRootCandidate[]> {
     const existing = found.get(key);
     if (!existing || existing.score < score) {
       found.set(key, { root: key, score, markers, origin: candidate.origin, layout: "legacy" });
+    }
+  }
+
+  // Nothing on disk carried a trusted root. A docker-tracked install keeps
+  // its record in the vellum lockfile (the assistant data itself lives in
+  // docker volumes, not on disk), and real docker hatches still create the
+  // host root for the CLI's own state — but nothing in that root may carry
+  // a strong marker. The lockfile's own record is vellum's signature, so
+  // when it tracks docker instances it corroborates the modern root the
+  // marker scan couldn't trust.
+  if (found.size === 0) {
+    const docker = await readDockerLockfileEvidence();
+    if (docker.instances.length > 0 && (await exists(modernRootPath()))) {
+      found.set(await realpath(modernRootPath()), {
+        root: await realpath(modernRootPath()),
+        score: MODERN_LAYOUT_BONUS,
+        markers: ["vellum lockfile"],
+        origin: "docker-tracked vellum lockfile",
+        layout: "modern",
+      });
     }
   }
 
@@ -236,4 +285,151 @@ export async function discoverCadetRoots(): Promise<string[]> {
     }
   }
   return qualified;
+}
+
+const VELLUM_LOCKFILE_NAMES = [".vellum.lock.json", ".vellum.lockfile.json"];
+
+interface RawLockfileEntry {
+  assistantId?: unknown;
+  name?: unknown;
+  cloud?: unknown;
+  containerInfo?: {
+    assistantImage?: unknown;
+    gatewayImage?: unknown;
+    cesImage?: unknown;
+  } | null;
+}
+
+/**
+ * Every plausible vellum lockfile location: the e2e hook dir, the
+ * home-level legacy names, and the production XDG config dir (`vellum`
+ * variants) that hold the canonical lockfile.
+ */
+export async function lockfileCandidates(): Promise<string[]> {
+  const homeDir = home();
+  const candidates: string[] = [];
+  const lockfileDir = process.env.VELLUM_LOCKFILE_DIR?.trim();
+  if (lockfileDir) {
+    candidates.push(path.join(lockfileDir, "lockfile.json"));
+  }
+  for (const name of VELLUM_LOCKFILE_NAMES) {
+    candidates.push(path.join(homeDir, name));
+  }
+  try {
+    for (const entry of await fs.readdir(path.join(homeDir, ".config"))) {
+      if (entry === "vellum") {
+        candidates.push(path.join(homeDir, ".config", entry, "lockfile.json"));
+      }
+    }
+  } catch {
+    // No XDG config dir — fine.
+  }
+  return candidates;
+}
+
+/**
+ * Read the FIRST existing vellum lockfile as raw JSON — unknown fields
+ * intact, priority order the same one the vellum CLI reads in. Returns null
+ * when no candidate exists or none parses. The lockfile conversion uses
+ * this (not readLockfileEntries, which narrows to a few fields) so the
+ * cadet lockfile it writes preserves every field the entry carried.
+ */
+export async function readRawVellumLockfile(): Promise<{
+  path: string;
+  data: Record<string, unknown>;
+} | null> {
+  for (const candidate of await lockfileCandidates()) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(candidate, "utf8");
+    } catch {
+      continue;
+    }
+    try {
+      const data = JSON.parse(raw) as Record<string, unknown>;
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        return { path: candidate, data };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read every assistant entry the vellum lockfiles record — the same record
+ * `vellum ps` is derived from. Best-effort: missing, malformed, or lockless
+ * installs yield nothing.
+ */
+export async function readLockfileEntries(): Promise<RawLockfileEntry[]> {
+  const entries: RawLockfileEntry[] = [];
+  for (const candidate of await lockfileCandidates()) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(candidate, "utf8");
+    } catch {
+      continue;
+    }
+    let parsed: { assistants?: RawLockfileEntry[] };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    entries.push(...(parsed.assistants ?? []));
+  }
+  return entries;
+}
+
+/**
+ * Sleep targets for the stop step. The vellum CLI has no sleep-all flag,
+ * so the migrator sleeps each lockfile-tracked assistant by id (falling
+ * back to the entry's name when it has no id). Deduped: the same assistant
+ * can surface from more than one candidate file.
+ */
+export async function readLockfileAssistants(): Promise<
+  Array<{ identifier: string }>
+> {
+  const seen = new Set<string>();
+  const out: Array<{ identifier: string }> = [];
+  for (const entry of await readLockfileEntries()) {
+    const identifier =
+      typeof entry.assistantId === "string" && entry.assistantId.length > 0
+        ? entry.assistantId
+        : typeof entry.name === "string" && entry.name.length > 0
+          ? entry.name
+          : null;
+    if (identifier == null || seen.has(identifier)) continue;
+    seen.add(identifier);
+    out.push({ identifier });
+  }
+  return out;
+}
+
+/**
+ * The instances the lockfile records as docker-deployed, plus their images.
+ * Only lockfile-tracked assistants matter — the vellum CLI's own `sleep`
+ * command stops their containers, so the migrator never touches docker
+ * itself. Best-effort: a missing, malformed, or lockless install yields
+ * no evidence.
+ */
+export async function readDockerLockfileEvidence(): Promise<{
+  instances: string[];
+  images: string[];
+}> {
+  const instances = new Set<string>();
+  const images = new Set<string>();
+  for (const entry of await readLockfileEntries()) {
+    if (entry.cloud !== "docker" || typeof entry.assistantId !== "string") continue;
+    instances.add(entry.assistantId);
+    for (const image of [
+      entry.containerInfo?.assistantImage,
+      entry.containerInfo?.gatewayImage,
+      entry.containerInfo?.cesImage,
+    ]) {
+      if (typeof image === "string" && image.length > 0) images.add(image);
+    }
+  }
+  return { instances: [...instances], images: [...images] };
 }
