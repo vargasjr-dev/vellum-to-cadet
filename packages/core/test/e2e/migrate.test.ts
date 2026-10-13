@@ -603,7 +603,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(result.status).toBe("completed");
     // The phase that COULD run (attachment links) still ran — as the
     // per-table info bullet under the step line.
-    expect(result.issues ?? []).toEqual([{ severity: "info", message: "attachment links: 1 row(s)" }]);
+    expect(result.issues ?? []).toEqual([{ severity: "info", message: "assistant.db - messages.attachment links: 1 row(s)" }]);
     expect(result.summary).not.toContain("no such column");
     expect(result.summary).toContain("assistant db — 1 row(s)");
   });
@@ -1605,7 +1605,7 @@ describe("e2e: retired archives", () => {
 
     // Verify raised no leftover-data warnings at all.
     const verifyStep = report.steps.find((s) => s.step === "verify");
-    expect(verifyStep?.issues ?? []).toEqual([]);
+    expect((verifyStep?.issues ?? []).filter((issue) => issue.severity !== "info")).toEqual([]);
   });
 
   async function exists(p: string): Promise<boolean> {

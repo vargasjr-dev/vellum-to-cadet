@@ -30,6 +30,7 @@ describe("verify: findings are named warnings on a completed step", () => {
     await fs.writeFile(path.join(cadetLogDir, "day.log"), "manually edited content\n");
 
     const result = await verify(vellumRoot, cadetRoot);
+    result.issues = result.issues?.filter((issue) => issue.severity !== "info");
     expect(result.status).toBe("completed");
     expect(result.issues?.length).toBe(1);
     expect(result.issues?.[0]?.severity).toBe("warning");
@@ -46,6 +47,7 @@ describe("verify: findings are named warnings on a completed step", () => {
     await fs.writeFile(path.join(vellumRoot, "workspace", "notes", "keep.md"), "user data\n");
 
     const result = await verify(vellumRoot, cadetRoot);
+    result.issues = result.issues?.filter((issue) => issue.severity !== "info");
     expect(result.status).toBe("completed");
     expect(result.issues?.length).toBe(1);
     expect(result.issues?.[0]?.severity).toBe("warning");

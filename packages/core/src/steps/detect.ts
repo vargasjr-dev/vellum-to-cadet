@@ -50,6 +50,13 @@ export function envSuffixFor(vellumRoot: string): string {
   return "";
 }
 
+export function vellumDataRoot(root: string): string {
+  const base = path.basename(root);
+  return base === ".vellum" || base.startsWith(".vellum-")
+    ? path.join(process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share"), `vellum${envSuffixFor(root)}`)
+    : root;
+}
+
 /**
  * Known external places that may reference the vellum root without living
  * inside it. We detect and report these; touching them is a follow-up.
@@ -140,7 +147,9 @@ export async function detect(options: MigrateOptions, ops: ProcessOps): Promise<
     previousManifest: rootFlags.previousManifest,
     version: (await ops.vellumVersion()) ?? (await detectVersion(vellumRoot)),
     assistantHandles,
-    retiredCount: await countRetiredArchives(vellumRoot),
+    retiredCount: await countRetiredArchives(vellumRoot) + (
+      vellumDataRoot(vellumRoot) !== vellumRoot ? await countRetiredArchives(vellumDataRoot(vellumRoot)) : 0
+    ),
     deploymentKind: await detectDeploymentKind(vellumRoot, docker),
     docker,
     runningProcesses,

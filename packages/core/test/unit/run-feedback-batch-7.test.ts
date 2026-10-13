@@ -245,11 +245,12 @@ describe("lockfile merge-and-replace (v0.0.15 field run)", () => {
 });
 
 describe("volume naming", () => {
-  test("runtime volumes are the three cadet hatch creates empty", () => {
+  test("runtime volumes include the separate CES metadata volume", () => {
     expect(runtimeVolumeNames("prime-quail-3ezfs4")).toEqual([
       "prime-quail-3ezfs4-socket",
       "prime-quail-3ezfs4-assistant-ipc",
       "prime-quail-3ezfs4-gateway-ipc",
+      "prime-quail-3ezfs4-ces-data",
     ]);
     expect(vellumVolumeNames("vellum-prime-quail-3ezfs4")).toEqual([
       "vellum-prime-quail-3ezfs4-workspace",
@@ -320,8 +321,8 @@ describe("pre-migration confirmation", () => {
       });
       expect(prompted).toBe(1);
       expect(report.exitCode).toBe(EXIT_CODES.notConfirmed);
-      // Only detect ran — nothing mutated.
-      expect(report.steps.map((s) => s.step)).toEqual(["detect"]);
+      // Detect and preflight finish before confirmation.
+      expect(report.steps.map((s) => s.step)).toEqual(["detect", "preflight"]);
       expect(await fs.readdir(root)).toContain("workspace");
     } finally {
       if (prevHome === undefined) delete process.env.HOME;

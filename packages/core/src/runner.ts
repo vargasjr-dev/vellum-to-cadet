@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { discoverCadetRoots } from "./discover.js";
+import { cadetDataRoot, migrateCliState } from "./steps/migrate-cli-state.js";
 import { detect as detectStep, envSuffixFor, resolveMigrationTarget } from "./steps/detect.js";
 import { preflight } from "./steps/preflight.js";
 import { stopAssistant, stopCadet } from "./steps/stop-assistant.js";
@@ -219,6 +220,17 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     detect.cadetRoot = target.cadetRoot;
   }
 
+  start("preflight");
+  const pre = await preflight(detect, {
+    skipDiskSpaceCheck: options.skipDiskSpaceCheck,
+    dryRun: options.dryRun,
+    dockerOps: options.dockerOps ?? ops,
+  });
+  done(pre);
+  if (pre.status === "failed") {
+    return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.preflightFailed);
+  }
+
   // Pre-migration confirmation (v0.0.15 field feedback: "warn the user
   // that we are about to put their assistants to sleep and migrate X
   // amount of data. They should confirm with enter, skippable with -y").
@@ -342,6 +354,8 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       cadetVersionUnavailableReason: reVersion ? undefined : reVersionReason,
     });
     done(reLockfile);
+    start("migrate-cli-state");
+    done(await migrateCliState(detect.vellumRoot, detect.cadetRoot));
     start("migrate-retired");
     done(
       await migrateRetiredManifests(detect.cadetRoot, {
@@ -350,12 +364,17 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       }),
     );
 
+    if (cadetDataRoot(detect.cadetRoot) !== detect.cadetRoot) {
+      done(await migrateRetiredArchives(cadetDataRoot(detect.cadetRoot), targetCtx, onItem("migrate-retired"),
+        { vellumRoot: detect.vellumRoot, applyRenames: true }));
+    }
+
     start("verify");
     const reVerify = await verify(detect.vellumRoot, detect.cadetRoot, targetCtx);
     if (reDockerFlow && reWorkRoot) {
       const volumeVerify = await verifyDockerVolumeData(reWorkRoot);
       reVerify.issues = [...(reVerify.issues ?? []), ...volumeVerify.issues];
-      reVerify.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
+      reVerify.issues.push({ severity: "info", message: `${volumeVerify.dbsChecked} volume db(s) checked` }, { severity: "info", message: `${volumeVerify.storesChecked} volume credential store(s) checked` });
     }
     done(reVerify);
     if (reWorkRoot) await fs.rm(reWorkRoot, { recursive: true, force: true });
@@ -381,17 +400,6 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     start("wake-assistants");
     done(await wakeAssistants(ops, reAssistantCount, reBinAvailable));
     return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
-  }
-
-  start("preflight");
-  const pre = await preflight(detect, {
-    skipDiskSpaceCheck: options.skipDiskSpaceCheck,
-    dryRun: options.dryRun,
-    dockerOps: options.dockerOps ?? ops,
-  });
-  done(pre);
-  if (pre.status === "failed") {
-    return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.preflightFailed);
   }
 
   if (options.dryRun) {
@@ -572,6 +580,8 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // run the same assistant-logic migration over the extracted tree, re-tar.
   // Success is optional by design: failures warn and never fail the run.
   // The sibling metadata manifests + file names get the same cleaning.
+  start("migrate-cli-state");
+  done(await migrateCliState(detect.vellumRoot, detect.cadetRoot));
   start("migrate-retired");
   done(
     await migrateRetiredArchives(
@@ -581,6 +591,11 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       { vellumRoot: detect.vellumRoot, applyRenames: true },
     ),
   );
+
+  if (cadetDataRoot(detect.cadetRoot) !== detect.cadetRoot) {
+    done(await migrateRetiredArchives(cadetDataRoot(detect.cadetRoot), targetCtx, onItem("migrate-retired"),
+      { vellumRoot: detect.vellumRoot, applyRenames: true }));
+  }
 
   // 5. Verify against the vellum source. Findings are WARNINGS, not
   //    failures: the migration itself is complete, and residual branding in
@@ -594,7 +609,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   if (dockerFlow) {
     const volumeVerify = await verifyDockerVolumeData(volumeWorkRoot!);
     verifyResult.issues = [...(verifyResult.issues ?? []), ...volumeVerify.issues];
-    verifyResult.summary += `; ${volumeVerify.dbsChecked} volume db(s) + ${volumeVerify.storesChecked} volume credential store(s) clean`;
+    verifyResult.issues.push({ severity: "info", message: `${volumeVerify.dbsChecked} volume db(s) checked` }, { severity: "info", message: `${volumeVerify.storesChecked} volume credential store(s) checked` });
   }
   done(verifyResult);
 

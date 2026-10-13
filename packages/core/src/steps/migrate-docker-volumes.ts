@@ -62,16 +62,12 @@ export function vellumVolumeNames(rawInstanceId: string): string[] {
 }
 
 /**
- * The runtime (non-data) volumes cadet's docker hatch creates EMPTY — the
- * bootstrap/ipc socket dirs. Vellum's hatch never created them, so the
- * migrated install gets them pre-created at load time (v0.0.15 field
- * feedback: `docker volume ls` showed only the three data volumes). The
- * K8s-spec-only `-ces-data` is deliberately NOT here: the docker runtime
- * auto-creates it on the credential-executor's first boot, same as cadet's
- * own hatch; `-dockerd-data` was the removed docker-in-docker volume.
+ * Runtime socket volumes and the separate CES metadata volume are ensured
+ * before wake. CES security contains encrypted keys; ces-data contains
+ * identity and policy metadata initialized by CES.
  */
 export function runtimeVolumeNames(migratedName: string): string[] {
-  return [`${migratedName}-socket`, `${migratedName}-assistant-ipc`, `${migratedName}-gateway-ipc`];
+  return [`${migratedName}-socket`, `${migratedName}-assistant-ipc`, `${migratedName}-gateway-ipc`, `${migratedName}-ces-data`];
 }
 
 /** Compact duration for step summaries: 38s / 3m 12s / 1h 2m 3s. */

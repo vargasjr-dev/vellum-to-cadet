@@ -71,7 +71,7 @@ describe("wake steps: install-cadet / wake-assistants", () => {
 
     const install = await installCadetCli(ops, 2);
     expect(install.status).toBe("completed");
-    expect(install.summary).toContain("cadet CLI installed globally");
+    expect(install.summary).toContain("cadet installed globally");
     expect(install.data?.["binAvailable"]).toBe(true);
     const wake = await wakeAssistants(ops, 2, install.data?.["binAvailable"] === true);
     expect(wake.status).toBe("completed");
@@ -136,7 +136,7 @@ describe("wake steps: install-cadet / wake-assistants", () => {
     const wake = await wakeAssistants(ops, 1, true);
     expect(wake.status).toBe("completed");
     expect(wake.issues?.[0]?.severity).toBe("warning");
-    expect(wake.summary).toContain("`cadet wake --all` manually");
+    expect(wake.summary).toBe("cadet wake --all failed");
   });
 });
 
@@ -182,4 +182,22 @@ describe("cadet-login step", () => {
     expect(result.summary).toContain("`cadet login` manually");
     expect(result.issues?.[0]?.severity).toBe("warning");
   });
+});
+
+test("detached login runs and a timeout warns without failing the migration", async () => {
+  let logins = 0;
+  const result = await cadetLoginStep(baseOps({ cadetLogin: async () => { logins++; throw new Error("Login timed out after 5 minutes."); } }), {
+    binAvailable: true, detected: true, interactive: false,
+  });
+  expect(logins).toBe(1);
+  expect(result.status).toBe("completed");
+  expect(result.issues?.[0]?.message).toContain("5 minutes");
+});
+
+test("wake errors keep the assistant and missing image without Docker wrappers", async () => {
+  const result = await wakeAssistants(baseOps({ cadetWakeAll: async () => {
+    throw new Error('Error: failed to wake \'assistant-test\': docker exited with code 1 — Error response from daemon: failed to resolve reference "docker.io/example/assistant:v1": docker.io/example/assistant:v1: not found');
+  } }), 1, true);
+  expect(result.summary).toBe("cadet wake --all failed");
+  expect(result.issues?.[0]?.message).toBe('failed to wake \'assistant-test\': failed to resolve reference "docker.io/example/assistant:v1": not found');
 });

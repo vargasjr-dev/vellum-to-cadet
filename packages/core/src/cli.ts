@@ -22,10 +22,9 @@ import {
 } from "./discover.js";
 import { formatBytes, formatProgress } from "./fs-utils.js";
 import { handleToInstanceName } from "./layout.js";
-import { defaultProcessOps } from "./process.js";
-import { gatherConfirmInfo, migrate, repair } from "./runner.js";
+import { migrate, repair } from "./runner.js";
 import { renderUninstallHuman, runUninstall } from "./uninstall.js";
-import { detect as detectStep, toCadetRoot } from "./steps/detect.js";
+import { cadetDataRoot } from "./steps/migrate-cli-state.js";
 import { vellumVolumeNames } from "./steps/migrate-docker-volumes.js";
 import {
   acquireRunLock,
@@ -347,7 +346,7 @@ function createLiveProgress(force = false): {
         const nested = itemLines;
         const extra = result.summary.split("\n").length - 1;
         process.stderr.write(`\u001b[${nested + 1}A\u001b[2K`);
-        process.stderr.write(`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${result.summary}\n`);
+        process.stderr.write(stepLines(result).join("\n") + "\n");
         process.stderr.write(`\u001b[${nested + extra}B\r`);
       } else {
         if (!live) return;
@@ -366,8 +365,16 @@ function createLiveProgress(force = false): {
 
 /** A step's display lines: the step line, then the summary's continuation lines. */
 function stepLines(result: StepResult): string[] {
-  const [first, ...rest] = result.summary.split("\n");
-  const lines = [`  ${stepIcon(result.status)} ${result.step.padEnd(20)} ${first ?? ""}`];
+  const [original, ...rest] = result.summary.split("\n");
+  let first = original;
+  if (result.step === "migrate-lockfile") {
+    const match = original?.match(/wrote the cadet lockfile at ([^;(]+)(.*)/);
+    if (match) {
+      first = `wrote the cadet lockfile at ${match[1]!.trim().replace(os.homedir() + path.sep, "~/")}`;
+      if (match[2]?.trim()) rest.push(`    · ${match[2].trim().replace(/^;\s*/, "")}`);
+    }
+  }
+  const lines = [`  ${stepIcon(result.status)} ${result.step === "migrate-lockfile" ? "" : result.step.padEnd(20) + " "}${first ?? ""}`];
   // Continuation lines carry their own indent (the detect summary's
   // per-assistant branches) — write them verbatim.
   lines.push(...rest);
@@ -428,10 +435,10 @@ function renderConfirmPrompt(info: ConfirmMigrationInfo): string {
   }
   if (info.cadetRootExists) {
     lines.push(
-      `    ${detail("·")} cadet root ${info.cadetRoot} ALREADY EXISTS — its data will be updated in place; delete it first for a clean start`,
+      `    ${detail("·")} cadet root ${cadetDataRoot(info.cadetRoot)} ALREADY EXISTS — its data will be updated in place; delete it first for a clean start`,
     );
   } else {
-    lines.push(`    ${detail("·")} cadet root: ${info.cadetRoot}`);
+    lines.push(`    ${detail("·")} cadet root: ${cadetDataRoot(info.cadetRoot)}`);
   }
   lines.push("");
   lines.push(`  Press ${command("Enter")} to continue, Ctrl-C to cancel (skip this prompt with --yes).`);
@@ -471,9 +478,10 @@ async function promptConfirmMigration(info: ConfirmMigrationInfo): Promise<boole
  * runs in a DETACHED child that survives disconnects; this process
  * resolves the vellum root while the terminal is still attached (a
  * multi-root prompt needs stdin, which the detached child will not have),
- * takes the run lock, prints the started line with the child's pid + the
- * run-log path, then relays the log to stdout until the child exits —
- * with the session gone, the log file is the migration's tail-able record.
+ * takes the run lock and relays the child's log to stdout until it exits.
+ * The child logs started, detect, and preflight, then asks this launcher
+ * to confirm through IPC before continuing independently.
+ * With the session gone, the log file is the migration's tail-able record.
  */
 async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
   const lockPath = runLockPath();
@@ -499,26 +507,6 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
     return EXIT_CODES.nothingToMigrate;
   }
   parsed.vellumRoot = resolved;
-  if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
-
-  // The pre-migration confirmation (v0.0.15 field feedback: "warn the
-  // user that we are about to put their assistants to sleep and migrate X
-  // amount of data"). Ask HERE — while stdin still works; the detached
-  // child cannot prompt. A declined prompt exits before the lock, the
-  // log, or the child exist: nothing was touched.
-  if (!parsed.yes) {
-    const detect = await detectStep(
-      { vellumRoot: resolved, cadetRoot: parsed.cadetRoot, cadetRootExplicit: parsed.cadetRootExplicit },
-      defaultProcessOps,
-    );
-    if (detect.vellumRootExists) {
-      const ok = await promptConfirmMigration(await gatherConfirmInfo(detect, defaultProcessOps));
-      if (!ok) {
-        console.error(errorText("migration declined — nothing was touched."));
-        return EXIT_CODES.notConfirmed;
-      }
-    }
-  }
 
   const logPath = newRunLogPath();
   const startedAt = new Date().toISOString();
@@ -552,9 +540,10 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
       "--internal-vellum-root",
       resolved,
     ],
-    { detached: true, stdio: ["ignore", logFd, logFd] },
+    { detached: true, stdio: ["ignore", logFd, logFd, "ipc"] },
   );
   child.unref();
+  const relayed = relayChild(logPath, child);
 
   // The child outlives this process (that is the point) — the lock must
   // name IT, so a re-run while the relay is dead still finds the owner.
@@ -563,8 +552,7 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
     JSON.stringify({ pid: child.pid ?? process.pid, startedAt, logPath } satisfies RunLockInfo),
   );
 
-  printStarted(child.pid ?? process.pid, logPath);
-  const code = await relayChild(logPath, child);
+  const code = await relayed;
   await releaseRunLock(lockPath, child.pid ?? -1);
   return code;
 }
@@ -577,6 +565,12 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
  * drain after the child closes.
  */
 async function relayChild(logPath: string, child: ChildProcess): Promise<number> {
+  child.on("message", async (message: { type?: string; info?: ConfirmMigrationInfo }) => {
+    if (message.type !== "confirm" || !message.info) return;
+    await drainLog();
+    const confirmed = await promptConfirmMigration(message.info);
+    if (child.connected) child.send({ type: "confirmed", confirmed });
+  });
   // The relayed bytes are the child's terminal stream (cursor math + color,
   // see createLiveProgress). A real terminal renders them as if the
   // migration ran in-process; when THIS process's stdout is not a terminal
@@ -592,6 +586,7 @@ async function relayChild(logPath: string, child: ChildProcess): Promise<number>
     child.on("close", (code) => resolve(code ?? EXIT_CODES.migrationFailed));
   });
   let offset = 0;
+  let draining = Promise.resolve();
   for (;;) {
     await drainLog();
     if (exitCode !== null) {
@@ -611,7 +606,12 @@ async function relayChild(logPath: string, child: ChildProcess): Promise<number>
     carry = "";
   }
 
-  async function drainLog(): Promise<void> {
+  function drainLog(): Promise<void> {
+    draining = draining.then(readLogOnce);
+    return draining;
+  }
+
+  async function readLogOnce(): Promise<void> {
     let handle: FileHandle | undefined;
     try {
       handle = await fsPromises.open(logPath, "r");
@@ -713,7 +713,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     // it's a docker assistant").
     const dockerInstances = report.detect.docker.instances;
     if (dockerInstances.length > 0) {
-      lines.push(`    ${command(cadetRootDir(report.detect.cadetRoot))}`);
+      lines.push(`    ${command(cadetDataRoot(report.detect.cadetRoot))}`);
       for (const instance of dockerInstances) {
         lines.push(
           `    ${detail(`· docker volumes: cadet-${handleToInstanceName(instance)}-{workspace,gateway-sec,ces-sec}`)}`,
@@ -724,9 +724,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
     }
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
     lines.push("");
-    lines.push(`  ${header("Optional next steps")}`);
-    lines.push(`    · Install and launch the cadet assistant, then sign in`);
-    lines.push(`    · Once you've confirmed everything is there, retire vellum for good:`);
+    lines.push(`  Once you've confirmed your Cadet is online, you can optionally delete vellum for good:`);
     lines.push(`      ${command(`npx migrate-vellum-assistant-to-cadet uninstall`)}`);
   } else {
     lines.push(`  ${failIcon()} ${colors.red("Migration did not complete.")} ${detail("Nothing was deleted.")}`);
@@ -736,13 +734,6 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   }
   lines.push("");
   return lines.join("\n");
-}
-
-/** The cadet ROOT dir for a cadetRoot that may be a nested instance dir (`…/cadet/assistants/<name>`). */
-function cadetRootDir(cadetRoot: string): string {
-  return path.basename(path.dirname(cadetRoot)) === "assistants"
-    ? path.dirname(path.dirname(cadetRoot))
-    : cadetRoot;
 }
 
 /** Wall-clock duration, human-formatted: 1h 2m 3s / 4m 12s / 38s. */
@@ -991,7 +982,6 @@ async function main(): Promise<number> {
     }
   }
   parsed.vellumRoot = resolved;
-  if (!parsed.cadetRoot) parsed.cadetRoot = toCadetRoot(resolved);
 
   // The run lock: one migration at a time. The detached child's parent
   // already took it (the path was handed down via --internal-lock); every
@@ -1024,7 +1014,7 @@ async function main(): Promise<number> {
 
   // The started line: the detach flow prints it from the parent; a
   // foreground run prints it here (its own pid, its own log path).
-  if (parsed.foreground && !parsed.json && parsed.runLog) {
+  if ((parsed.foreground || parsed.internalRun) && !parsed.json && parsed.runLog) {
     printStarted(process.pid, parsed.runLog);
   }
 
@@ -1034,18 +1024,29 @@ async function main(): Promise<number> {
   // run, and `tail -f` replays the same stream after a disconnect.
   const logMode = parsed.internalRun === true;
   if (logMode) forceColor();
+  if (parsed.internalRun && parsed.yes && process.connected) process.disconnect?.();
   const live = !parsed.json && !parsed.verbose && (logMode || Boolean(process.stderr.isTTY));
   const progress = createLiveProgress(logMode);
   try {
     const report = await migrate({
       ...parsed,
-      // The runner asks right after detect (before stop-assistant) — only
-      // when this process actually has a terminal to ask with. The
-      // detached child never gets a callback (the launcher confirmed).
+      // Confirmation follows detect and preflight. The detached worker
+      // delegates the terminal prompt to its attached launcher through IPC.
       confirm:
-        !parsed.json && !parsed.yes && Boolean(process.stdin.isTTY)
-          ? (info) => promptConfirmMigration(info)
-          : undefined,
+        parsed.internalRun && !parsed.yes && process.send
+          ? (info) => new Promise<boolean>((resolve) => {
+              const disconnect = () => resolve(false);
+              process.once("disconnect", disconnect);
+              process.once("message", (message: { type?: string; confirmed?: boolean }) => {
+                process.removeListener("disconnect", disconnect);
+                resolve(message.type === "confirmed" && message.confirmed === true);
+                process.disconnect?.();
+              });
+              process.send!({ type: "confirm", info });
+            })
+          : !parsed.json && !parsed.yes && Boolean(process.stdin.isTTY)
+            ? (info) => promptConfirmMigration(info)
+            : undefined,
       onStepStart: live ? progress.onStepStart : undefined,
       onStepDone: live ? progress.onStepDone : undefined,
       onStepItem: live ? progress.onStepItem : undefined,

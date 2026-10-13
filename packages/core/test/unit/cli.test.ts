@@ -96,7 +96,7 @@ describe("cli", () => {
     expect(r.stdout).toContain(".cadet");
     // Colorful success output carries an optional-next-steps section that
     // includes the manual deletion of the (read-only) old root.
-    expect(r.stdout).toContain("Optional next steps");
+    expect(r.stdout).toContain("Once you've confirmed your Cadet is online");
     expect(r.stdout).toContain("npx migrate-vellum-assistant-to-cadet uninstall");
     expect(r.stdout).not.toContain(`rm -rf ${root}`);
   });
@@ -183,6 +183,28 @@ describe("cli", () => {
     expect(fsExistsSync(path.join(logsDir, "migrate.lock"))).toBe(false);
   });
 
+  test("detached checks are logged before confirmation, and the prompt names the global root", { timeout: 30000 }, async () => {
+    const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
+    const { root } = await buildFullVellum0126();
+    const env = await deterministicDiscoveryEnv(root);
+    const cadetRoot = path.join(env["HOME"]!, ".local/share/cadet/assistants/example-assistant");
+    const r = runCli(["--cadet-root", cadetRoot], { stdin: "\n", env: {
+      ...env,
+      XDG_CONFIG_HOME: path.join(env["HOME"]!, ".config"),
+      XDG_DATA_HOME: path.join(env["HOME"]!, ".local/share"),
+    } });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain(`cadet root: ${path.join(env["HOME"]!, ".local/share/cadet")}`);
+    const logsDir = path.join(env["HOME"]!, ".cadet-migration-logs");
+    const logName = (await fs.readdir(logsDir)).find((name) => name.endsWith(".log"))!;
+    const logged = stripAnsi(await fs.readFile(path.join(logsDir, logName), "utf8"));
+    expect(logged).toContain("✔ started");
+    expect(logged).toContain("✔ detect");
+    expect(logged).toContain("✔ preflight");
+    expect(logged.indexOf("✔ started") < logged.indexOf("✔ detect")).toBe(true);
+    expect(logged.indexOf("✔ preflight") < logged.indexOf("✔ stop-assistant")).toBe(true);
+  });
+
   test("--foreground runs in-process and tees the run-log", { timeout: 30000 }, async () => {
     const { buildFullVellum0126 } = await import("../helpers/build-fixture.js");
     const { root } = await buildFullVellum0126();
@@ -223,6 +245,7 @@ describe("cli", () => {
       {
         env: {
           HOME: home,
+          NO_COLOR: "",
           npm_config_registry: "http://127.0.0.1:1/",
           XDG_CONFIG_HOME: path.join(home, ".config"),
           XDG_DATA_HOME: path.join(home, ".local", "share"),

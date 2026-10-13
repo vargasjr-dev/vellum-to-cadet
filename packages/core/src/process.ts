@@ -304,15 +304,12 @@ export const defaultProcessOps: ProcessOps = {
   },
 
   async cadetLogin() {
-    // Interactive by design: the browser PKCE flow. stdout + stdin stay
-    // inherited so the user sees the browser handoff and any prompts;
-    // stderr is captured and echoed on failure — "cadet login exited 1"
-    // alone tells the user nothing (v0.0.15 field feedback asked for the
-    // actual reason).
+    // Inherit the worker's stdin so cadet can choose browser or polling login.
+    // Both output streams reach the terminal/run log, including the login URL.
     await new Promise<void>((resolve, reject) => {
       const child = spawn("cadet", ["login"], { stdio: ["inherit", "inherit", "pipe"] });
       const stderrChunks: Buffer[] = [];
-      child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+      child.stderr?.on("data", (chunk: Buffer) => { stderrChunks.push(chunk); process.stderr.write(chunk); });
       child.on("error", reject);
       child.on("close", (code) => {
         if (code === 0) {
