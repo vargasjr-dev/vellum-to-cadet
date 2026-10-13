@@ -29,16 +29,27 @@ npx migrate-vellum-assistant-to-cadet --dry-run   # plan only, touches nothing
 npx migrate-vellum-assistant-to-cadet --json      # machine-readable report
 ```
 
-Before anything moves, the CLI prints what it is about to do — the
-assistants it will put to sleep, the data it will migrate (including the
-docker volumes), and whether a cadet root already exists — and waits for
-Enter (`-y`/`--yes` skips the prompt for scripts). The migration runs
-detached: a dropped SSH session never takes it down, and the live log
-tails with `tail -f ~/.cadet-migration-logs/<run>.log`.
+The CLI starts a logged worker and runs detection and preflight before
+asking for confirmation. It lists the assistants it will put to sleep, the
+host data and Docker volumes it will migrate, and the Cadet data root.
+Press Enter to continue (`-y`/`--yes` skips the prompt). After confirmation,
+the detached worker survives dropped SSH sessions; follow its log with
+`tail -f ~/.cadet-migration-logs/<run>.log`.
 
-On success the CLI prints a colorful summary plus **optional next steps**
-(install and launch cadet, and — only once you've confirmed your data —
-the `uninstall` subcommand to retire vellum for good).
+Shared retired archives, backups, and upgrade logs are copied from the
+Vellum XDG data root into the Cadet data root. CLI logs are copied from
+`~/.config/vellum/logs` to `~/.config/cadet/logs`. Existing Cadet files are
+preserved. Environment-specific roots and XDG overrides are respected.
+
+The migration installs Cadet, establishes cloud login when needed, and
+wakes the migrated assistants. Detached login prints a browser URL and
+polls for approval for up to five minutes; a timeout warns and continues.
+This requires a Cadet release and cloud platform with terminal login
+polling support. CES security and metadata use separate `-ces-sec` and
+`-ces-data` volumes; the metadata volume is ensured before wake.
+
+Once you've confirmed your Cadet is online, you can optionally delete
+Vellum for good with `npx migrate-vellum-assistant-to-cadet uninstall`.
 
 ## Guarantees
 

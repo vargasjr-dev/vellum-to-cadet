@@ -520,7 +520,7 @@ describe("wake-assistants: failure reporting", () => {
     };
     const wake = await wakeAssistants(ops, 1, true);
     const warning = wake.issues?.[0]?.message ?? "";
-    expect(warning.startsWith("cadet wake --all failed:")).toBe(true);
+    expect(wake.summary).toBe("cadet wake --all failed");
     expect(warning).toContain("No such container: prime-quail-3ezfs4-assistant");
     expect(warning).not.toContain("Command failed");
   });

@@ -184,11 +184,16 @@ export async function verify(
   return {
     step: "verify",
     status: "completed",
-    summary:
-      problems.length > 0
-        ? `verified ${checked} files with ${problems.length} warning(s) (see ⚠)`
-        : `verified ${checked} files (${byteIdentical} byte-identical, ${rewrittenClean} rewritten clean, ${dbsChecked} db value-checked)`,
-    issues,
+    summary: `verified ${checked} files${problems.length ? ` with ${problems.length} warning(s) (see ⚠)` : ""}`,
+    issues: [
+      ...[
+        `${checked} files checked`,
+        `${byteIdentical} byte-identical`,
+        `${rewrittenClean} rewritten clean`,
+        `${dbsChecked} db value-checked`,
+      ].map((message): StepIssue => ({ severity: "info", message })),
+      ...issues,
+    ],
     data: { checked, byteIdentical, rewrittenClean, dbsChecked, warnings: problems.length },
   };
 }

@@ -284,7 +284,13 @@ async function migrateDbsAt(
   for (const target of targets) {
     results.push(await migrateDbValues({ ...options, cadetRoot: target.root, destRel: target.destRel }));
   }
-  if (results.length === 1) return results[0]!;
+  if (results.length === 1) {
+    const result = results[0]!;
+    result.issues = result.issues?.map((issue) => issue.severity === "info"
+      ? { ...issue, message: `${path.basename(targets[0]!.destRel)} - ${issue.message}` }
+      : issue);
+    return result;
+  }
 
   // Multi-db fold: per-db info bullets carry their path so N workspaces read
   // as N lines, and the headline reports the combined row count.
@@ -297,12 +303,12 @@ async function migrateDbsAt(
     // handle (`vellum-prime-quail-3ezfs4/workspace/…`) — the raw brand
     // prefix is noise the user never chose (v0.0.15 field feedback), so
     // labels read under the migrated instance name.
-    const displayRel = displayDbRel(destRel);
+    const displayRel = path.basename(destRel);
     if (r.status === "completed") completed++;
     for (const issue of r.issues ?? []) {
       issues.push(
         issue.severity === "info"
-          ? { ...issue, message: `${displayRel} — ${issue.message}` }
+          ? { ...issue, message: `${displayRel} - ${issue.message}` }
           : { ...issue, message: `${displayRel}: ${issue.message}` },
       );
     }
@@ -409,6 +415,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
         .prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`)
         .get(table, column);
     let channelRows = 0;
+    const tableRows: Record<string, number> = {};
     for (const { table, column } of columns) {
       if (!tableExists(table)) continue;
       if (!columnExists(table, column)) continue;
@@ -436,9 +443,11 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
             message: `${table}.${column}: merged ${mergedRows} duplicate row(s) — a 'cadet' twin already held the unique key; the vellum-spelled row was dropped`,
           });
         }
-        channelRows += runCounted(
+        const rows = runCounted(
           `UPDATE ${table} SET ${column} = 'cadet' WHERE ${column} = 'vellum'`,
         );
+        channelRows += rows;
+        tableRows[table] = (tableRows[table] ?? 0) + rows;
       } catch (err) {
         note(`${table}.${column}`, err);
       }
@@ -446,10 +455,12 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
     if (options.rewriteMessages && tableExists("messages") && columnExists("messages", "metadata")) {
       // Message metadata records channel refs as JSON string values.
       try {
-        channelRows += runCounted(
+        const rows = runCounted(
           `UPDATE messages SET metadata = REPLACE(metadata, '"vellum"', '"cadet"')
            WHERE metadata LIKE '%"vellum"%'`,
         );
+        channelRows += rows;
+        tableRows["messages"] = (tableRows["messages"] ?? 0) + rows;
       } catch (err) {
         note("messages.metadata", err);
       }
@@ -501,11 +512,14 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
 
     db.close();
 
-    const parts = Object.entries(substeps)
-      .filter(([, n]) => n > 0)
-      .map(([name, n]) => `${name}: ${n} row(s)`);
+    const parts = [
+      ...Object.entries(tableRows).filter(([, n]) => n > 0).map(([table, n]) => `${table}.channel values: ${n} row(s)`),
+      ...Object.entries(substeps).filter(([name, n]) => name !== "channel values" && n > 0)
+        .map(([name, n]) => `${name === "attachment links" ? "messages" : "provider_connections"}.${name}: ${n} row(s)`),
+    ];
     const totalRows = Object.values(substeps).reduce((a, b) => a + b, 0);
-    const warningNote = issues.length > 0 ? ` — ${issues.length} skipped (see ⚠)` : "";
+    const warnings = issues.filter((issue) => issue.severity === "warning").length;
+    const warningNote = warnings > 0 ? ` — ${warnings} skipped (see ⚠)` : "";
     return {
       step,
       status: "completed",

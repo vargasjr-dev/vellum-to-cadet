@@ -45,7 +45,7 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
     return {
       step: "install-cadet",
       status: "completed",
-      summary: `cadet CLI installed globally${version ? ` (v${version})` : ""}`,
+      summary: `cadet installed globally${version ? ` (${version})` : ""}`,
       data: {
         installed: true,
         binAvailable: true,
@@ -109,25 +109,18 @@ export async function wakeAssistants(ops: ProcessOps, assistantCount: number, bi
     return {
       step: "wake-assistants",
       status: "completed",
-      summary: "wake failed (see ⚠) — run `cadet wake --all` manually",
+      summary: "cadet wake --all failed",
       issues: [
         {
           severity: "warning",
-          message: `cadet wake --all failed: ${detail ?? "unknown reason (re-run with --verbose)"}`,
+          message: (detail ?? "unknown reason (re-run with --verbose)").replace(/^Error:\s*/, "").replace(/docker exited with code \d+\s*[—–-]\s*(?:Error response from daemon:\s*)?/g, "").replace(/(failed to resolve reference "[^"]+"): \S+: not found/g, "$1: not found"),
         },
       ],
     };
   }
 }
 
-/**
- * The cadet-login step: when the migration detected legacy vellum cloud
- * credentials (the api key / webhook secret can't be kept), the migrated
- * assistants need fresh cadet cloud credentials — `cadet login` runs the
- * browser PKCE flow and re-registers them. Interactive by design, so it
- * runs BEFORE wake with the terminal handed to the user; a failure (user
- * skips it, no browser, no network) warns and the migration still completes.
- */
+/** Establish fresh cloud credentials before wake, including detached runs. */
 export async function cadetLoginStep(
   ops: ProcessOps,
   opts: { binAvailable: boolean; detected: boolean; interactive?: boolean },
@@ -144,18 +137,6 @@ export async function cadetLoginStep(
       step: "cadet-login",
       status: "skipped",
       summary: "skipped — no `cadet` binary on PATH (see install-cadet ⚠)",
-    };
-  }
-  if (opts.interactive === false) {
-    // The detached child has no terminal — the browser PKCE flow cannot
-    // run here, and attempting it just fails (v0.0.15 field run: "cadet
-    // login failed: cadet login exited 1" with no reason). Skip with the
-    // instruction instead.
-    return {
-      step: "cadet-login",
-      status: "skipped",
-      summary:
-        "the migration runs detached, so `cadet login` (an interactive browser flow) did not run — run `cadet login` in your terminal before using cloud features",
     };
   }
   try {
