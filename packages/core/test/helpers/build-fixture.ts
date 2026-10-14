@@ -110,6 +110,92 @@ export async function writeAssistantState(root: string): Promise<void> {
           { name: "byok", provider: "anthropic", model: "claude" },
         ],
         services: { stt: { provider: "vellum" }, tts: { provider: "vellum" } },
+        // The legacy platform section: the vellum platform host. The
+        // migration must land it as the cadet cloud section with the
+        // product URL — never the mangled `platform.local/share/...`
+        // garbage the raw path substitutions would produce.
+        platform: { baseUrl: "https://platform.vellum.ai" },
+      },
+      null,
+      2,
+    ),
+  );
+
+  // Assistant-authored workspace scripts referencing the legacy workspace
+  // env var — the migration's env sweep is the ONE rewrite these get.
+  // Other VELLUM_* vars and prose stay exactly as written (the-force's
+  // daemon vars are its own bug, not the migrator's business).
+  await mkdirs(root, ["workspace/bin", "workspace/schedules", "workspace/lib"]);
+  await write(
+    root,
+    "workspace/bin/vj",
+    [
+      "#!/usr/bin/env bun",
+      "// vj — first-party CLI (vellum flavor prose stays vellum)",
+      "const dbPath = `${process.env.VELLUM_WORKSPACE_DIR}/data/db/vj.sqlite`;",
+      "const port = Number(process.env.VELLUM_DAEMON_PORT || 8000);",
+      "",
+    ].join("\n"),
+  );
+  await write(
+    root,
+    "workspace/schedules/clean-worktrees.sh",
+    'WORKSPACE_DIR="${VELLUM_WORKSPACE_DIR:-/workspace}"\n',
+  );
+  await write(
+    root,
+    "workspace/lib/ledger.ts",
+    "const DATA_DIR = join(process.env.VELLUM_WORKSPACE_DIR!, 'data');\n",
+  );
+
+  // The CES credential metadata index: values live in the secure-key
+  // backend, so the index is all the migrator sees. Legacy product-service
+  // entries are placeholders (no cadet meaning) — dropped during
+  // migration; every other service — including custom user ones — is kept.
+  await write(
+    root,
+    "data/credentials/metadata.json",
+    JSON.stringify(
+      {
+        version: 5,
+        credentials: [
+          {
+            credentialId: "aaaaaaaa-1111-4111-8111-111111111111",
+            service: "telegram",
+            field: "bot_token",
+            allowedTools: [],
+            allowedDomains: [],
+            createdAt: 1775268882201,
+            updatedAt: 1775268882203,
+          },
+          {
+            credentialId: "bbbbbbbb-2222-4222-8222-222222222222",
+            service: "vellum",
+            field: "assistant_api_key",
+            allowedTools: [],
+            allowedDomains: [],
+            createdAt: 1776515695802,
+            updatedAt: 1776515695818,
+          },
+          {
+            credentialId: "cccccccc-3333-4333-8333-333333333333",
+            service: "vellum",
+            field: "platform_base_url",
+            allowedTools: [],
+            allowedDomains: [],
+            createdAt: 1776515696653,
+            updatedAt: 1776515696657,
+          },
+          {
+            credentialId: "dddddddd-4444-4444-8444-444444444444",
+            service: "my-site.dev",
+            field: "api_key",
+            allowedTools: [],
+            allowedDomains: [],
+            createdAt: 1775268882999,
+            updatedAt: 1775268882999,
+          },
+        ],
       },
       null,
       2,

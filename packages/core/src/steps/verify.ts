@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import {
+  findLegacyTokens,
   isDbArtifact,
   isRewriteEligible,
   renameRelativePath,
@@ -159,7 +160,7 @@ export async function verify(
         continue;
       }
       const text = destBuf.toString("utf8");
-      const leftovers = text.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
+      const leftovers = findLegacyTokens(text);
       if (leftovers && leftovers.length > 0) {
         issues.push({
           severity: "warning",

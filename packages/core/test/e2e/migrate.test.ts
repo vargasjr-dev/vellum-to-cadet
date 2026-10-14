@@ -135,6 +135,10 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(wsConfig.profiles[0].provider).toBe("cadet");
     expect(wsConfig.profiles[1].provider).toBe("anthropic");
     expect(wsConfig.services.stt.provider).toBe("cadet");
+    // The legacy platform section lands as the cadet cloud section with the
+    // product URL — never the mangled platform.local/share/... garbage.
+    expect(wsConfig.cloud.baseUrl).toBe("https://cloud.mycadet.ai");
+    expect(wsConfig.platform).toBeUndefined();
     const installMeta = JSON.parse(
       await fs.readFile(path.join(cadetRoot, "workspace/skills/github-summary/install-meta.json"), "utf8"),
     );
@@ -146,6 +150,36 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       await fs.readFile(path.join(cadetRoot, "workspace/plugins/greeter/package.json"), "utf8"),
     );
     expect(Object.keys(pluginPkg.dependencies)[0]).toBe("@mycadet/plugin-api");
+
+    // ── Workspace env sweep: assistant-authored scripts get exactly the one
+    // token rewritten — other VELLUM_* vars and vellum prose stay as written. ──
+    const vjScript = await fs.readFile(path.join(cadetRoot, "workspace/bin/vj"), "utf8");
+    expect(vjScript).toContain("process.env.CADET_WORKSPACE_DIR");
+    expect(vjScript).not.toContain("VELLUM_WORKSPACE_DIR");
+    expect(vjScript).toContain("process.env.VELLUM_DAEMON_PORT");
+    expect(vjScript).toContain("vellum flavor prose stays vellum");
+    const schedule = await fs.readFile(
+      path.join(cadetRoot, "workspace/schedules/clean-worktrees.sh"),
+      "utf8",
+    );
+    expect(schedule).toContain("${CADET_WORKSPACE_DIR:-/workspace}");
+    const ledger = await fs.readFile(path.join(cadetRoot, "workspace/lib/ledger.ts"), "utf8");
+    expect(ledger).toContain("process.env.CADET_WORKSPACE_DIR!");
+    const layoutData = report.steps.find((s) => s.step === "migrate-layout")?.data as
+      | { substeps?: Record<string, { files: number; changes: number }> }
+      | undefined;
+    expect(layoutData?.substeps?.["workspace env sweep"]?.changes).toBeGreaterThan(0);
+
+    // ── Credential metadata: legacy product-service placeholders dropped,
+    // every other service — including custom user ones — kept. ──
+    const credMeta = JSON.parse(
+      await fs.readFile(path.join(cadetRoot, "data/credentials/metadata.json"), "utf8"),
+    );
+    const credServices = credMeta.credentials.map((c: { service: string }) => c.service);
+    expect(credServices).not.toContain("vellum");
+    expect(credServices).toContain("telegram");
+    expect(credServices).toContain("my-site.dev");
+    expect(credMeta.credentials).toHaveLength(2);
 
     // ── User content inside the workspace stays byte-for-byte — EXCEPT the
     // skill frontmatter contract (metadata.vellum → metadata.cadet), its own

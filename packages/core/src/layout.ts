@@ -20,6 +20,14 @@
 export const LEGACY_INSTANCE_NAME = "vellum";
 
 /**
+ * The product cloud every migrated assistant lands on. The legacy install's
+ * `platform.baseUrl` pointed at the vellum platform; cadet's equivalent is
+ * the cadet cloud (config section `cloud`, key `baseUrl` — the harness's
+ * `auth info` reports it verbatim).
+ */
+export const CADET_CLOUD_BASE_URL = "https://cloud.mycadet.ai";
+
+/**
  * The cadet instance name for a migrated assistant: vellum assistants have
  * handles like "vellum-fresh-eel-8di6pa" — cadet keeps the distinctive part
  * ("fresh-eel-8di6pa"), dropping the brand prefix. Falls back to the legacy
@@ -229,8 +237,13 @@ function buildPathPattern(): RegExp {
     // still reads those for device-id continuity.
     "\\.vellum\\.lock(?:file)?\\.json",
     // The legacy single root: ~/.vellum or ~/.vellum-<env> — but not a
-    // prefix of a longer name (those were already consumed above).
-    "\\.vellum(-[A-Za-z0-9-]+)?(?![A-Za-z-])",
+    // prefix of a longer name (those were already consumed above), and
+    // never inside a URL authority (`https://api.vellum.ai` is a hostname,
+    // not a dotfile path — the lookbehind blocks any match whose run-up
+    // reaches a scheme://... position). The old platform URL
+    // `https://platform.vellum.ai` must survive text substitution intact;
+    // the config contract's JSON pass owns that value instead.
+    "(?<!://[^\\s/]*)\\.vellum(-[A-Za-z0-9-]+)?(?![A-Za-z-])",
   ];
   return new RegExp(tokens.join("|"), "g");
 }
@@ -306,6 +319,76 @@ export const WORKSPACE_RUNTIME_DIR = "data";
 export function isWorkspaceConfigContract(relPath: string): boolean {
   const norm = relPath.split("\\").join("/");
   return norm === `${USER_WORKSPACE_DIR}/config.json`;
+}
+
+/**
+ * The CES credential metadata index — service/field/allow-list records.
+ * Secret values never live in this file (secure-key backend only), so the
+ * index is also where legacy product-service PLACEHOLDERS surface: entries
+ * whose service is the legacy product name carry no cadet meaning and are
+ * dropped during migration (see sanitizeCesCredentialMetadata).
+ */
+export function isCesCredentialMetadata(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  return (
+    norm === "data/credentials/metadata.json" ||
+    norm === "protected/credential-executor/metadata.json"
+  );
+}
+
+/** Path segments that never count as assistant-authored scripts. */
+const WORKSPACE_SWEEP_EXCLUDED_SEGMENTS = new Set([
+  ".git",
+  "node_modules",
+  "__pycache__",
+  ".venv",
+  "vendor",
+]);
+
+/** Local lowercase-extension helper (layout stays dependency-free). */
+function extensionOf(name: string): string {
+  const base = name.split("/").pop() ?? name;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return "";
+  return base.slice(dot).toLowerCase();
+}
+
+/**
+ * Assistant-authored workspace files (bin/, lib/, schedules/, notes/ …):
+ * plain text that may reference the legacy workspace env var. These are
+ * USER files — the only rewrite they may ever receive is the single-token
+ * workspace env sweep (see sanctionedContentTransform), never the full
+ * machine-file substitution list.
+ */
+export function isWorkspaceScript(relPath: string): boolean {
+  const norm = relPath.split("\\").join("/");
+  const ws = `${USER_WORKSPACE_DIR}/`;
+  if (!norm.startsWith(ws)) return false;
+  // Local db-artifact check (fs-utils imports from here — no round trip).
+  if (DB_EXTENSIONS.has(extensionOf(norm))) return false;
+  // The machine-owned workspace categories have their own transforms and
+  // must not be claimed by the sweep.
+  if (
+    isWorkspaceConfigContract(norm) ||
+    isSkillInstallMeta(norm) ||
+    isSkillFrontmatter(norm) ||
+    isPluginSource(norm) ||
+    isConversationLog(norm) ||
+    isRuntimeLog(norm) ||
+    isPersonaPrompt(norm)
+  ) {
+    return false;
+  }
+  const segments = norm.slice(ws.length).split("/");
+  for (const seg of segments) {
+    if (WORKSPACE_SWEEP_EXCLUDED_SEGMENTS.has(seg)) return false;
+  }
+  const base = segments[segments.length - 1] ?? norm;
+  // Extensionless files (bin/vj, Makefile, Dockerfile…) are eligible: the
+  // sweep only touches bytes that literally contain the legacy token, and
+  // copyOne's utf-8 guard keeps true binaries out of text handling.
+  if (!base.includes(".")) return true;
+  return REWRITE_EXACT_NAMES.has(base) || REWRITE_EXTENSIONS.has(extensionOf(base));
 }
 
 /** Per-skill install metadata (`workspace/skills/<name>/install-meta.json`). */
@@ -529,7 +612,13 @@ export function renamePlatformConfigSection(content: string): string | null {
     return null;
   }
   const root = parsed as Record<string, unknown>;
-  if (root.platform === undefined) {
+  const hasPlatform = root.platform !== undefined;
+  const hasCloud =
+    root.cloud !== null &&
+    typeof root.cloud === "object" &&
+    !Array.isArray(root.cloud) &&
+    typeof (root.cloud as Record<string, unknown>).baseUrl === "string";
+  if (!hasPlatform && !hasCloud) {
     return null;
   }
   const renamed: Record<string, unknown> = {};
@@ -548,7 +637,41 @@ export function renamePlatformConfigSection(content: string): string | null {
     }
     renamed[key] = value;
   }
+  // A vellum-branded (or path-mangled) cloud baseUrl — the legacy platform
+  // host, or the garbage the raw path substitutions used to make of it —
+  // lands on the product cloud. Self-hosted non-vellum URLs pass through.
+  let touched = hasPlatform;
+  const cloud = renamed.cloud;
+  if (
+    cloud !== null &&
+    typeof cloud === "object" &&
+    !Array.isArray(cloud) &&
+    typeof (cloud as Record<string, unknown>).baseUrl === "string"
+  ) {
+    const section = cloud as Record<string, unknown>;
+    const baseUrl = normalizeCloudBaseUrl(section.baseUrl as string);
+    if (baseUrl !== section.baseUrl) {
+      section.baseUrl = baseUrl;
+      touched = true;
+    }
+  }
+  if (!touched) {
+    return null;
+  }
   return JSON.stringify(renamed, null, 2) + "\n";
+}
+
+/**
+ * The cloud base URL a migrated assistant lands on. Legacy values — the
+ * vellum platform host, empty strings, or URLs the path substitutions
+ * mangled (`https://platform.vellum.ai` reads as the legacy root token and
+ * became `https://platform.local/share/cadet/assistants/vellum.ai` in the
+ * wild) — are replaced with the product cloud. Self-hosted non-vellum URLs
+ * pass through untouched.
+ */
+export function normalizeCloudBaseUrl(url: string): string {
+  if (!url || /vellum/i.test(url)) return CADET_CLOUD_BASE_URL;
+  return url;
 }
 
 /** Database artifacts are copied verbatim and recorded for later inspection. */

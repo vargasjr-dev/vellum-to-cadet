@@ -35,6 +35,7 @@ import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
 import { defaultProcessOps } from "./process.js";
 import {
   applySubstitutions,
+  findLegacyTokens,
   isDbArtifact,
   isRewriteEligible,
   sanctionedContentTransform,
@@ -781,7 +782,7 @@ async function verifyRepair(cadetRoot: string, scan: CadetScan): Promise<StepRes
       continue;
     }
     // Generic machine file: same leftover-token scan the migrate verify uses.
-    const leftovers = raw.match(/VELLUM_|@vellumai\/|\.vellum(?![A-Za-z-])/g);
+    const leftovers = findLegacyTokens(raw);
     if (leftovers && leftovers.length > 0) {
       issues.push({
         severity: "warning",

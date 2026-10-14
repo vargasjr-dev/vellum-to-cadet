@@ -2,15 +2,22 @@ import { describe, test } from "node:test";
 
 import {
   applySubstitutions,
+  findLegacyTokens,
   formatBytes,
   formatProgress,
+  isRewriteEligible,
   rewriteLegacyTokens,
   rewritePersonaPrompt,
+  sanitizeCesCredentialMetadata,
   sanctionedContentTransform,
 } from "../../src/fs-utils.js";
 import {
+  CADET_CLOUD_BASE_URL,
   consolidateDefaultProvider,
   DEFAULT_TARGET_CTX,
+  isCesCredentialMetadata,
+  isWorkspaceScript,
+  normalizeCloudBaseUrl,
   renamePlatformConfigSection,
 } from "../../src/layout.js";
 import { expect } from "../helpers/expect.js";
@@ -147,7 +154,8 @@ describe("sanctionedContentTransform — the shared dispatch", () => {
 
   test("unmapped files return null (generic machine-file treatment)", () => {
     expect(sanctionedContentTransform("hooks/on-wake.sh", "VELLUM_")).toBeNull();
-    expect(sanctionedContentTransform("workspace/notes/vellum-history.md", "vellum")).toBeNull();
+    // workspace text files are sweep-eligible now (see the workspace env
+    // sweep describe) — they are no longer "unmapped".
   });
 });
 
@@ -305,5 +313,166 @@ describe("renamePlatformConfigSection — the config section key", () => {
       '{"platform": {"subdomain": "x"}}',
     );
     expect(out?.counts["platform-section-key"]).toBeUndefined();
+  });
+});
+
+describe("workspace env sweep — the one rewrite user scripts may receive", () => {
+  test("isWorkspaceScript claims assistant-authored text files", () => {
+    expect(isWorkspaceScript("workspace/bin/vj")).toBe(true); // extensionless
+    expect(isWorkspaceScript("workspace/lib/ledger.ts")).toBe(true);
+    expect(isWorkspaceScript("workspace/schedules/clean-worktrees.sh")).toBe(true);
+    expect(isWorkspaceScript("workspace/notes/vellum-history.md")).toBe(true);
+    expect(isWorkspaceScript("workspace/.env.local")).toBe(true);
+  });
+
+  test("isWorkspaceScript skips non-user and non-text paths", () => {
+    expect(isWorkspaceScript("workspace/config.json")).toBe(false); // contract file
+    expect(isWorkspaceScript("workspace/skills/s/install-meta.json")).toBe(false);
+    expect(isWorkspaceScript("workspace/plugins/p/index.ts")).toBe(false);
+    expect(isWorkspaceScript("workspace/data/db/assistant.db")).toBe(false); // db
+    expect(isWorkspaceScript("workspace/data/db/assistant.db-wal")).toBe(false);
+    expect(isWorkspaceScript("workspace/.git/objects/pack")).toBe(false); // vendor dirs
+    expect(isWorkspaceScript("workspace/node_modules/x/index.js")).toBe(false);
+    expect(isWorkspaceScript("workspace/avatar.png")).toBe(false); // binary ext
+    expect(isWorkspaceScript("bin/vj")).toBe(false); // outside the workspace
+    expect(isWorkspaceScript("workspace/notes/photo.png")).toBe(false);
+  });
+
+  test("rewrites ONLY the workspace env token — other vars and prose stay", () => {
+    const script = [
+      "#!/usr/bin/env bun",
+      "const dbPath = `${process.env.VELLUM_WORKSPACE_DIR}/data/db/vj.sqlite`;",
+      "const port = Number(process.env.VELLUM_DAEMON_PORT || 8000);",
+      "// vellum flavor prose stays vellum",
+      "",
+    ].join("\n");
+    const out = sanctionedContentTransform("workspace/bin/vj", script);
+    expect(out?.substep).toBe("workspace env sweep");
+    expect(out?.text).toContain("process.env.CADET_WORKSPACE_DIR");
+    expect(out?.text).not.toContain("VELLUM_WORKSPACE_DIR");
+    expect(out?.text).toContain("process.env.VELLUM_DAEMON_PORT");
+    expect(out?.text).toContain("vellum flavor prose stays vellum");
+    expect(out?.counts).toEqual({ "workspace-env-sweep": 1 });
+  });
+
+  test("shell fallback syntax sweeps too", () => {
+    const out = sanctionedContentTransform(
+      "workspace/schedules/clean.sh",
+      'WORKSPACE_DIR="${VELLUM_WORKSPACE_DIR:-/workspace}"\n',
+    );
+    expect(out?.text).toBe('WORKSPACE_DIR="${CADET_WORKSPACE_DIR:-/workspace}"\n');
+  });
+
+  test("a sweep-eligible file with no token is a no-op (stays byte-identical)", () => {
+    const out = sanctionedContentTransform(
+      "workspace/notes/vellum-history.md",
+      "# History\n\nI used vellum before it was cadet. VELLUM_ROOT_DIR was a nice env var.\n",
+    );
+    expect(out?.substep).toBe("workspace env sweep");
+    expect(out?.counts).toEqual({});
+    expect(out?.text).toContain("VELLUM_ROOT_DIR was a nice env var");
+  });
+});
+
+describe("CES credential metadata — legacy product-service placeholders dropped", () => {
+  const meta = (services: string[]): string =>
+    JSON.stringify({
+      version: 5,
+      credentials: services.map((service, i) => ({
+        credentialId: `id-${i}`,
+        service,
+        field: "field",
+        allowedTools: [],
+        allowedDomains: [],
+        createdAt: 1,
+        updatedAt: 1,
+      })),
+    });
+
+  test("drops vellum-service entries, keeps everything else", () => {
+    const out = sanitizeCesCredentialMetadata(meta(["telegram", "vellum", "my-site.dev", "vellum"]));
+    expect(out.removed).toBe(2);
+    const parsed = JSON.parse(out.text) as { credentials: Array<{ service: string }> };
+    expect(parsed.credentials.map((c) => c.service)).toEqual(["telegram", "my-site.dev"]);
+  });
+
+  test("is a no-op when nothing is vellum-branded (bytes untouched)", () => {
+    const raw = meta(["telegram"]);
+    expect(sanitizeCesCredentialMetadata(raw)).toEqual({ text: raw, removed: 0 });
+  });
+
+  test("unparseable or unexpected-shape files pass through untouched", () => {
+    expect(sanitizeCesCredentialMetadata("not json {")).toEqual({
+      text: "not json {",
+      removed: 0,
+    });
+    expect(sanitizeCesCredentialMetadata('{"other": []}').removed).toBe(0);
+  });
+
+  test("isCesCredentialMetadata matches both known index locations", () => {
+    expect(isCesCredentialMetadata("data/credentials/metadata.json")).toBe(true);
+    expect(isCesCredentialMetadata("protected/credential-executor/metadata.json")).toBe(true);
+    expect(isCesCredentialMetadata("data/credentials/other.json")).toBe(false);
+  });
+
+  test("the index opts out of verbatim protected/ handling", () => {
+    expect(isRewriteEligible("protected/credential-executor/metadata.json")).toBe(true);
+    expect(isRewriteEligible("protected/credential-executor/grants.json")).toBe(false);
+    expect(isRewriteEligible("protected/keys.enc")).toBe(false);
+  });
+});
+
+describe("cloud baseUrl — the product cloud, never the mangled garbage", () => {
+  test("platform.vellum.ai lands as cloud.mycadet.ai through the section rename", () => {
+    const out = renamePlatformConfigSection(
+      JSON.stringify({ platform: { baseUrl: "https://platform.vellum.ai" } }),
+    );
+    const parsed = JSON.parse(out!) as { cloud?: { baseUrl?: string }; platform?: unknown };
+    expect(parsed.cloud?.baseUrl).toBe(CADET_CLOUD_BASE_URL);
+    expect(parsed.platform).toBeUndefined();
+  });
+
+  test("an existing cloud section with mangled vellum bytes normalizes in place", () => {
+    const out = renamePlatformConfigSection(
+      JSON.stringify({
+        cloud: { baseUrl: "https://platform.local/share/cadet/assistants/vellum.ai", subdomain: "" },
+      }),
+    );
+    const parsed = JSON.parse(out!) as { cloud: { baseUrl: string; subdomain: string } };
+    expect(parsed.cloud.baseUrl).toBe(CADET_CLOUD_BASE_URL);
+    expect(parsed.cloud.subdomain).toBe("");
+  });
+
+  test("a self-hosted non-vellum platform URL passes through untouched", () => {
+    expect(
+      renamePlatformConfigSection(JSON.stringify({ cloud: { baseUrl: "https://assistant.internal.corp" } })),
+    ).toBeNull();
+    expect(normalizeCloudBaseUrl("https://assistant.internal.corp")).toBe(
+      "https://assistant.internal.corp",
+    );
+  });
+
+  test("empty baseUrl normalizes to the product cloud", () => {
+    expect(normalizeCloudBaseUrl("")).toBe(CADET_CLOUD_BASE_URL);
+  });
+});
+
+describe("path substitutions never mangle URL hostnames", () => {
+  test("platform.vellum.ai in prose/URLs survives applySubstitutions", () => {
+    const { text } = applySubstitutions("docs at https://platform.vellum.ai/guide and api.vellum.ai\n");
+    expect(text).toContain("https://platform.vellum.ai/guide");
+    expect(text).not.toContain("platform.local");
+  });
+
+  test("real dotfile paths still rewrite", () => {
+    const { text } = applySubstitutions("root=~/.vellum workspace=~/.vellum/workspace\n");
+    expect(text).not.toContain(".vellum");
+    expect(text).toContain(".local/share/cadet");
+  });
+
+  test("findLegacyTokens ignores preserved URL hosts but flags real leftovers", () => {
+    expect(findLegacyTokens("docs at https://api.vellum.example/guide")).toEqual([]);
+    expect(findLegacyTokens("root=~/.vellum")).toHaveLength(1);
+    expect(findLegacyTokens("import from @vellumai/plugin-api")).toHaveLength(1);
   });
 });
