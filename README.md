@@ -63,6 +63,13 @@ Vellum for good with `npx migrate-vellum-assistant-to-cadet uninstall`.
 - The vellum root is a **read-only source of truth**: nothing in it is ever
   modified or deleted by this tool — the original IS the backup, so no
   separate backup copy is made.
+- The user-facing workspace is migrated byte-for-byte **except one
+  sanctioned sweep**: files that reference `VELLUM_WORKSPACE_DIR` get that
+  single token rewritten to `CADET_WORKSPACE_DIR` (other `VELLUM_*` vars and
+  vellum prose are never touched — a workspace script's other bugs are its
+  own). The CES credential index additionally drops legacy product-service
+  placeholder entries, and the legacy `platform` section lands as cadet's
+  `cloud` section with `baseUrl` pointed at `https://cloud.mycadet.ai`.
 - `.cadet-migration-manifest.json` in the cadet root records what happened and
   makes re-runs verify-only.
 - Running vellum assistant processes are put to sleep automatically (via

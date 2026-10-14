@@ -234,6 +234,13 @@ async function copyOne(
 ): Promise<void> {
   if (f.action === "rewrite") {
     const raw = await fs.readFile(srcAbs, "utf8");
+    // Binary guard: rewrite-class eligibility is extension-based, and an
+    // extensionless binary must never round-trip through utf-8. A decoded
+    // read containing U+FFFD is invalid utf-8 — copy the bytes verbatim.
+    if (raw.includes("\uFFFD")) {
+      await fs.copyFile(srcAbs, destAbs);
+      return;
+    }
     // One shared dispatch with repair + verify: every sanctioned rewrite
     // is a named substep, everything unmapped stays generic machine-file
     // substitutions.

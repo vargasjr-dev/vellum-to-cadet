@@ -14,6 +14,7 @@ import {
   WORKSPACE_RUNTIME_DIR,
   dissolveProtectedDir,
   handleToInstanceName,
+  isCesCredentialMetadata,
   isConversationLog,
   isPersonaPrompt,
   consolidateDefaultProvider,
@@ -22,6 +23,7 @@ import {
   isSkillFrontmatter,
   isSkillInstallMeta,
   isWorkspaceConfigContract,
+  isWorkspaceScript,
   renamePlatformConfigSection,
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
@@ -117,7 +119,8 @@ export function isRewriteEligible(relPath: string): boolean {
   // Never rewrite the user-facing workspace or protected keys — except the
   // explicit machine-owned targets inside it (the config contract, skill
   // install metadata, skill frontmatter, plugin sources, conversation logs,
-  // runtime logs, persona prompts), each its own reported substep.
+  // runtime logs, persona prompts), each its own reported substep, plus the
+  // single-token workspace env sweep for assistant-authored scripts.
   if (norm === USER_WORKSPACE_DIR || norm.startsWith(`${USER_WORKSPACE_DIR}/`)) {
     if (isDbArtifact(norm)) return false;
     return (
@@ -127,9 +130,14 @@ export function isRewriteEligible(relPath: string): boolean {
       isPluginSource(norm) ||
       isConversationLog(norm) ||
       isRuntimeLog(norm) ||
-      isPersonaPrompt(norm)
+      isPersonaPrompt(norm) ||
+      isWorkspaceScript(norm)
     );
   }
+  // The CES credential metadata index may live under protected/ (verbatim
+  // by default) — it opts into exactly one structural transform: dropping
+  // legacy product-service placeholder entries.
+  if (isCesCredentialMetadata(norm)) return true;
   for (const dir of VERBATIM_DIRS) {
     if (norm === dir || norm.startsWith(`${dir}/`)) return false;
   }
@@ -447,5 +455,75 @@ export function sanctionedContentTransform(
     const { text, counts } = rewritePersonaPrompt(raw, ctx);
     return { substep: "persona prompt rewrites", text, counts };
   }
+  if (isCesCredentialMetadata(stateRel)) {
+    const { text, removed } = sanitizeCesCredentialMetadata(raw);
+    return {
+      substep: "credential placeholder cleanup",
+      text,
+      counts: removed > 0 ? { "ces-placeholder-drop": removed } : {},
+    };
+  }
+  if (isWorkspaceScript(stateRel)) {
+    // The ONE rewrite an assistant-authored file may receive: the legacy
+    // workspace env var token, so migrated scripts keep working against the
+    // renamed harness. Everything else — prose, other VELLUM_* vars, paths —
+    // stays exactly as the user wrote it.
+    const hits = raw.match(/\bVELLUM_WORKSPACE_DIR\b/g)?.length ?? 0;
+    const text = raw.replace(/\bVELLUM_WORKSPACE_DIR\b/g, "CADET_WORKSPACE_DIR");
+    return {
+      substep: "workspace env sweep",
+      text,
+      counts: hits > 0 ? { "workspace-env-sweep": hits } : {},
+    };
+  }
   return null;
+}
+
+/**
+ * Drop legacy product-service credential entries from the CES metadata
+ * index. Secret values live only in the secure-key backend — the index
+ * cannot tell an empty placeholder from a valued entry — but entries whose
+ * service is the legacy product name have no cadet meaning: the cadet
+ * platform provisions its own service credentials on first connect. Custom
+ * user services (anything not the legacy product name) are always kept.
+ * Unparseable or unexpected-shape files pass through untouched.
+ */
+export function sanitizeCesCredentialMetadata(raw: string): {
+  text: string;
+  removed: number;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { text: raw, removed: 0 };
+  }
+  const doc = parsed as { credentials?: unknown } | null;
+  if (typeof doc !== "object" || doc === null || !Array.isArray(doc.credentials)) {
+    return { text: raw, removed: 0 };
+  }
+  const kept = doc.credentials.filter(
+    (c) =>
+      !(
+        typeof c === "object" &&
+        c !== null &&
+        (c as { service?: unknown }).service === "vellum"
+      ),
+  );
+  const removed = doc.credentials.length - kept.length;
+  if (removed === 0) return { text: raw, removed: 0 };
+  return {
+    text: JSON.stringify({ ...doc, credentials: kept }, null, 2) + "\n",
+    removed,
+  };
+}
+
+/**
+ * Leftover legacy tokens in a rewritten machine file. The `.vellum` path
+ * token carries the same URL-authority guard as the substitution itself: a
+ * PRESERVED hostname like `api.vellum.example` is not a leftover — it is
+ * the substitution working as intended (URLs must survive text passes).
+ */
+export function findLegacyTokens(text: string): string[] {
+  return text.match(/VELLUM_|@vellumai\/|(?<!:\/\/[^\s/]*)\.vellum(?![A-Za-z-])/g) ?? [];
 }

@@ -126,13 +126,20 @@ describe("layout: text substitutions", () => {
 });
 
 describe("layout: rewrite eligibility", () => {
-  test("never rewrites the user workspace — except named machine files", () => {
-    expect(isRewriteEligible("workspace/notes/README.md")).toBe(false);
+  test("never rewrites the user workspace — except named machine files + the env sweep", () => {
+    // Workspace text files ARE rewrite-eligible now — but only for the
+    // single-token VELLUM_WORKSPACE_DIR sweep (see fs-utils dispatch). A
+    // file without the token is a byte-for-byte no-op.
+    expect(isRewriteEligible("workspace/notes/README.md")).toBe(true);
     // The frontmatter metadata block is a machine contract (its own substep);
     // the notes file is user content.
     expect(isRewriteEligible("workspace/skills/github-summary/SKILL.md")).toBe(true);
     // The gateway-facing config contract carries vellum provider ids.
     expect(isRewriteEligible("workspace/config.json")).toBe(true);
+    // Dbs, vendor dirs, and binaries stay verbatim.
+    expect(isRewriteEligible("workspace/data/db/assistant.db")).toBe(false);
+    expect(isRewriteEligible("workspace/node_modules/x/index.js")).toBe(false);
+    expect(isRewriteEligible("workspace/avatar.png")).toBe(false);
   });
 
   test("never rewrites protected keys", () => {
