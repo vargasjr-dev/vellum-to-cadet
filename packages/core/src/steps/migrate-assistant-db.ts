@@ -515,7 +515,7 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       const principals = migratePrincipalIds(db);
       substeps["principal ids"] = principals.rows;
       if (principals.revoked > 0) {
-        issues.push({ severity: "warning", message: "Legacy signed access tokens were revoked after renaming their principal. Browser refresh tokens remain valid; run `cadet login` again for CLI clients without a refresh token." });
+        issues.push({ severity: "warning", message: "Legacy signed access tokens were revoked after renaming their principal. Browser refresh tokens remain valid; clients without a refresh token must re-pair with the assistant." });
       }
     } catch (err) {
       note("principal ids (rolled back together)", err);

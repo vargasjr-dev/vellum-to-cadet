@@ -60,7 +60,7 @@ test("the gateway migration applies the rename and reports access-token recovery
   try {
     const result = await migrateGatewayDbAt(root, rel);
     assert.equal(result.status, "completed");
-    assert.ok(result.issues?.some((issue) => issue.message.includes("cadet login")));
+    assert.ok(result.issues?.some((issue) => issue.message.includes("re-pair with the assistant")));
     const read = new DatabaseSync(path.join(root, rel));
     try { assert.equal(read.prepare("SELECT principal_id FROM contacts").get()?.principal_id, "principal-123"); }
     finally { read.close(); }
