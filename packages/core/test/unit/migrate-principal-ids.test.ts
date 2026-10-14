@@ -10,8 +10,8 @@ import { migratePrincipalIds } from "../../src/steps/migrate-principal-ids.js";
 function fixture() {
   const db = new DatabaseSync(":memory:");
   db.exec(`
-    CREATE TABLE contacts (principal_id TEXT UNIQUE, role TEXT);
     CREATE TABLE actor_token_records (guardian_principal_id TEXT, status TEXT, token_hash TEXT);
+    CREATE TABLE contacts (principal_id TEXT UNIQUE, role TEXT);
     CREATE TABLE actor_refresh_token_records (guardian_principal_id TEXT, status TEXT, token_hash TEXT);
     CREATE TABLE contact_channels (type TEXT, address TEXT);
     CREATE TABLE guardian_requests (guardian_principal_id TEXT, decided_by_principal_id TEXT, guardian_external_user_id TEXT);
