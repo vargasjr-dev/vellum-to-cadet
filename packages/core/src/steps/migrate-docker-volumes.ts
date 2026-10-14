@@ -291,7 +291,12 @@ export async function loadDockerVolumes(opts: DockerVolumeFlowOptions): Promise<
         vols.map(async (vol) => {
           const extractDir = extractedDir(opts.workRoot, instanceId, vol.stateDir);
           if (!(await exists(extractDir))) return; // fetch failed for this kind — already warned
-          await opts.dockerOps.dockerDirToVolume(extractDir, vol.to, opts.images[0], onVolumeProgress(vol.kind));
+          // Host extraction gives private files the migration user's uid.
+          // CES runs as 1001 and must own its 0600 encrypted store and key.
+          await opts.dockerOps.dockerDirToVolume(
+            extractDir, vol.to, opts.images[0], onVolumeProgress(vol.kind),
+            vol.kind === "ces-sec" ? { uid: 1001, gid: 1001 } : undefined,
+          );
           loaded++;
         }),
       );

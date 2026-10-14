@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 
-import { volumeTarCreateArgs } from "../../src/process.js";
+import { volumeTarCreateArgs, volumeTarExtractArgs } from "../../src/process.js";
 import { expect } from "../helpers/expect.js";
 
 /**
@@ -69,4 +69,37 @@ describe("volumeTarCreateArgs", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+});
+
+
+test("private volume import keeps bytes and sets service-owned private permissions", async () => {
+  const src = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-private-src-"));
+  const dest = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-private-dest-"));
+  const key = Buffer.alloc(32, 123);
+  try {
+    await fs.writeFile(path.join(src, "keys.enc"), '{"version":2,"entries":{}}', { mode: 0o644 });
+    await fs.writeFile(path.join(src, "store.key"), key, { mode: 0o644 });
+    const archive = await runTar(volumeTarCreateArgs(src));
+    expect(archive.code).toBe(0);
+    const args = volumeTarExtractArgs("fixture-image", { uid: process.getuid!(), gid: process.getgid!() });
+    args[args.length - 2] = dest;
+    const child = spawn("sh", args.slice(5), { stdio: ["pipe", "ignore", "pipe"] });
+    child.stdin.end(archive.stdout);
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    expect(code).toBe(0);
+    for (const name of ["keys.enc", "store.key"]) {
+      const stat = await fs.stat(path.join(dest, name));
+      expect(stat.uid).toBe(process.getuid!());
+      expect(stat.gid).toBe(process.getgid!());
+      expect(stat.mode & 0o777).toBe(0o600);
+      expect(await fs.readFile(path.join(dest, name))).toEqual(await fs.readFile(path.join(src, name)));
+    }
+    expect((await fs.stat(dest)).mode & 0o777).toBe(0o700);
+  } finally {
+    await fs.rm(src, { recursive: true, force: true });
+    await fs.rm(dest, { recursive: true, force: true });
+  }
 });

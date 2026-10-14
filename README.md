@@ -98,3 +98,16 @@ npm run typecheck   # both packages, src + tests
 npm test            # node:test; fixtures build synthetic vellum 0.12.6 trees
 npm run build       # dist for packages/core
 ```
+
+### Docker credential-store permissions
+
+The CES security volume is imported with ownership `1001:1001`, matching the
+Cadet credential-executor container. Its files remain owner-only readable and
+writable. The host account used to run migration does not become the owner of
+the imported credential store. An ownership or permission failure aborts the
+volume import before wake.
+
+For an already migrated installation reporting a reachable CES health endpoint
+but HTTP 500 from `/v1/credentials`, inspect ownership of `keys.enc` and
+`store.key` in the credential-executor container. Host-owned mode-600 files
+must be reassigned to CES, preserving both file contents and the existing key.
