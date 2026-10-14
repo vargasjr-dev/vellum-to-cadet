@@ -48,6 +48,13 @@ This requires a Cadet release and cloud platform with terminal login
 polling support. CES security and metadata use separate `-ces-sec` and
 `-ces-data` volumes; the metadata volume is ensured before wake.
 
+Legacy `vellum-principal-…` guardian IDs become `principal-…`, with stored
+identity references updated together. Old signed access tokens are revoked;
+browser refresh credentials remain valid and rotate into the renamed identity.
+CLI clients without a refresh credential must run `cadet login` again. A
+uniqueness collision preserves the original identity references and reports a
+warning instead of partially renaming them.
+
 Once you've confirmed your Cadet is online, you can optionally delete
 Vellum for good with `npx migrate-vellum-assistant-to-cadet uninstall`.
 

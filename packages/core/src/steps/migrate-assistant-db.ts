@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { handleToInstanceName, USER_WORKSPACE_DIR } from "../layout.js";
 import { walkTree } from "../fs-utils.js";
 import { openSqliteDatabase, type SqliteDatabase } from "../sqlite.js";
+import { migratePrincipalIds } from "./migrate-principal-ids.js";
 import type { StepIssue, StepResult } from "../types.js";
 
 /**
@@ -510,12 +511,21 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
       substeps["provider connections"] = connectionRows;
     }
 
+    try {
+      const principals = migratePrincipalIds(db);
+      substeps["principal ids"] = principals.rows;
+      if (principals.revoked > 0) {
+        issues.push({ severity: "warning", message: "Legacy signed access tokens were revoked after renaming their principal. Browser refresh tokens remain valid; run `cadet login` again for CLI clients without a refresh token." });
+      }
+    } catch (err) {
+      note("principal ids (rolled back together)", err);
+    }
     db.close();
 
     const parts = [
       ...Object.entries(tableRows).filter(([, n]) => n > 0).map(([table, n]) => `${table}.channel values: ${n} row(s)`),
       ...Object.entries(substeps).filter(([name, n]) => name !== "channel values" && n > 0)
-        .map(([name, n]) => `${name === "attachment links" ? "messages" : "provider_connections"}.${name}: ${n} row(s)`),
+        .map(([name, n]) => `${name === "principal ids" ? label : name === "attachment links" ? "messages" : "provider_connections"}.${name}: ${n} row(s)`),
     ];
     const totalRows = Object.values(substeps).reduce((a, b) => a + b, 0);
     const warnings = issues.filter((issue) => issue.severity === "warning").length;
