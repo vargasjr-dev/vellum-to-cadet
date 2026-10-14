@@ -214,12 +214,13 @@ export interface ProcessOps {
     image?: string,
     onProgress?: (bytes: number, totalBytes?: number) => void,
   ): Promise<void>;
-  /** Copy a host dir's contents up into a docker volume (created if missing). */
+  /** Copy a host tree into a volume; owner normalizes private destination ownership and access. */
   dockerDirToVolume(
     srcDir: string,
     volume: string,
     image?: string,
     onProgress?: (bytes: number, totalBytes?: number) => void,
+    owner?: { uid: number; gid: number },
   ): Promise<void>;
   /**
    * Create an empty named docker volume if missing (`docker volume create`

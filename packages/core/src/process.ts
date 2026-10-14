@@ -248,6 +248,16 @@ async function dirSizeBytes(dir: string): Promise<number | undefined> {
   }
 }
 
+/** Extract private state as its destination service, without retaining host ownership. */
+export function volumeTarExtractArgs(image: string, owner?: { uid: number; gid: number }): string[] {
+  if (!owner) return ["--entrypoint", "tar", image, "-x", "-C", "/data"];
+  return [
+    "--user", "0:0", "--entrypoint", "sh", image, "-c",
+    'tar -x -C "$1" && chown -R "$2" "$1" && chmod -R u+rwX,go-rwx "$1"',
+    "migrate-private-volume", "/data", `${owner.uid}:${owner.gid}`,
+  ];
+}
+
 /**
  * Default process discovery + stop, backed by pgrep and the vellum CLI's
  * own sleep command. Kept behind the ProcessOps seam so tests can inject a
@@ -408,7 +418,7 @@ export const defaultProcessOps: ProcessOps = {
     );
   },
 
-  async dockerDirToVolume(srcDir, volume, image, onProgress) {
+  async dockerDirToVolume(srcDir, volume, image, onProgress, owner) {
     // Idempotent by itself: `docker volume create` on an existing name is a
     // no-op. Import streams the host dir's tar into the mounted volume —
     // same --rm contract, nothing left behind. Byte progress mirrors the
@@ -426,12 +436,7 @@ export const defaultProcessOps: ProcessOps = {
         "-i",
         "-v",
         `${volume}:/data`,
-        "--entrypoint",
-        "tar",
-        image ?? VOLUME_HELPER_IMAGE,
-        "-x",
-        "-C",
-        "/data",
+        ...volumeTarExtractArgs(image ?? VOLUME_HELPER_IMAGE, owner),
       ],
       { stdio: ["pipe", "ignore", "pipe"] },
     );

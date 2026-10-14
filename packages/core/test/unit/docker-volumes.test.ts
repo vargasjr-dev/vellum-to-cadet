@@ -525,3 +525,21 @@ describe("wake-assistants: failure reporting", () => {
     expect(warning).not.toContain("Command failed");
   });
 });
+
+
+test("only CES security imports request the destination service owner", async () => {
+  const sim = makeVolumeStore();
+  const workRoot = await seededVolumes(sim);
+  const owners: Array<{ volume: string; owner: unknown }> = [];
+  await fetchDockerVolumes({ dockerOps: sim.ops, instances: [INSTANCE], images: [], workRoot });
+  const result = await loadDockerVolumes({
+    dockerOps: { ...sim.ops, async dockerDirToVolume(src, volume, image, progress, owner) {
+      owners.push({ volume, owner });
+      await sim.ops.dockerDirToVolume(src, volume);
+    } },
+    instances: [INSTANCE], images: [], workRoot,
+  });
+  expect(result.status).toBe("completed");
+  expect(owners.find((item) => item.volume === `${MIGRATED}-ces-sec`)?.owner).toEqual({ uid: 1001, gid: 1001 });
+  expect(owners.filter((item) => item.volume !== `${MIGRATED}-ces-sec`).every((item) => item.owner === undefined)).toBe(true);
+});
