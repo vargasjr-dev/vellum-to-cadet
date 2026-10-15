@@ -527,6 +527,9 @@ export function rewriteWorkspaceJsonValues(content: string): {
   return { text: JSON.stringify(rewritten, null, 2) + "\n", changed };
 }
 
+/** The managed-service ids cadet retired (vellum-era spelling + renamed). */
+const MANAGED_SERVICE_IDS = new Set(["vellum", "cadet"]);
+
 /**
  * Cadet retired its managed speech providers — speech now runs exclusively on
  * real, user-keyed providers. A vellum-era config pointing
@@ -540,7 +543,7 @@ export function rewriteWorkspaceJsonValues(content: string): {
  * older migrator releases carry the renamed spelling. The swapped-in
  * providers were never keyed by the user (the managed service billed
  * credits), so the runner surfaces "add your API key" next steps when this
- * fired — see speechCutoverNextSteps. Idempotent: with the managed ids gone
+ * fired — see cutoverNextSteps. Idempotent: with the managed ids gone
  * there is nothing to cut over. Returns the rewritten text, or null when
  * there was nothing to do (unparseable content, no services block, or no
  * managed speech config).
@@ -565,13 +568,12 @@ export function cutOverManagedSpeechProviders(content: string): {
   }
   const servicesRecord = services as Record<string, unknown>;
 
-  const MANAGED_IDS = new Set(["vellum", "cadet"]);
   let changed = 0;
 
   const stt = servicesRecord.stt;
   if (stt !== null && typeof stt === "object" && !Array.isArray(stt)) {
     const sttRecord = stt as Record<string, unknown>;
-    if (typeof sttRecord.provider === "string" && MANAGED_IDS.has(sttRecord.provider)) {
+    if (typeof sttRecord.provider === "string" && MANAGED_SERVICE_IDS.has(sttRecord.provider)) {
       sttRecord.provider = "deepgram";
       changed++;
     }
@@ -580,7 +582,7 @@ export function cutOverManagedSpeechProviders(content: string): {
       for (const role of Object.values(roles)) {
         if (role === null || typeof role !== "object" || Array.isArray(role)) continue;
         const roleRecord = role as Record<string, unknown>;
-        if (typeof roleRecord.provider === "string" && MANAGED_IDS.has(roleRecord.provider)) {
+        if (typeof roleRecord.provider === "string" && MANAGED_SERVICE_IDS.has(roleRecord.provider)) {
           roleRecord.provider = "deepgram";
           changed++;
         }
@@ -592,7 +594,7 @@ export function cutOverManagedSpeechProviders(content: string): {
   const tts = servicesRecord.tts;
   if (tts !== null && typeof tts === "object" && !Array.isArray(tts)) {
     const ttsRecord = tts as Record<string, unknown>;
-    if (typeof ttsRecord.provider === "string" && MANAGED_IDS.has(ttsRecord.provider)) {
+    if (typeof ttsRecord.provider === "string" && MANAGED_SERVICE_IDS.has(ttsRecord.provider)) {
       ttsRecord.provider = "elevenlabs";
       changed++;
     }
@@ -618,6 +620,66 @@ function deleteManagedProviderBlocks(section: Record<string, unknown>): number {
     }
   }
   return removed;
+}
+
+/**
+ * Cadet retired its managed web-search provider alongside the managed speech
+ * service — search now runs exclusively on real providers, with
+ * `inference-provider-native` (the inference provider's own hosted search) as
+ * the only zero-key default. A vellum-era config pointing
+ * `services.web-search.provider` at the managed id would boot with a provider
+ * the daemon's schema rejects, so the rewrite swaps in that default and drops
+ * the managed service's dead per-provider settings blocks
+ * (`services.web-search.providers."vellum"/"cadet"`); real providers' blocks
+ * (e.g. perplexity) ride untouched. Unlike speech there are no per-role
+ * overrides — web search is a single `provider` pick. Accepts BOTH spellings
+ * for the same reason as the speech cutover: the generic token sweep runs
+ * before the JSON passes and rewrites the ids textually, and roots already
+ * migrated by older migrator releases carry the renamed spelling. The
+ * swapped-in default needs no key (BYOK providers like Perplexity or Brave
+ * can be added for stronger results — the runner surfaces that as a next
+ * step, see cutoverNextSteps). Idempotent: with the managed ids gone there
+ * is nothing to cut over. Returns the rewritten text, or null when there was
+ * nothing to do (unparseable content, no services block, or no managed
+ * web-search config).
+ */
+export function cutOverManagedWebSearchProvider(content: string): {
+  text: string;
+  changes: number;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const services = root.services;
+  if (services === null || typeof services !== "object" || Array.isArray(services)) {
+    return null;
+  }
+  const servicesRecord = services as Record<string, unknown>;
+
+  const webSearch = servicesRecord["web-search"];
+  if (webSearch === null || typeof webSearch !== "object" || Array.isArray(webSearch)) {
+    return null;
+  }
+  const webSearchRecord = webSearch as Record<string, unknown>;
+  let changed = 0;
+  if (
+    typeof webSearchRecord.provider === "string" &&
+    MANAGED_SERVICE_IDS.has(webSearchRecord.provider)
+  ) {
+    webSearchRecord.provider = "inference-provider-native";
+    changed++;
+  }
+  changed += deleteManagedProviderBlocks(webSearchRecord);
+
+  if (changed === 0) return null;
+  return { text: JSON.stringify(root, null, 2) + "\n", changes: changed };
 }
 
 /**

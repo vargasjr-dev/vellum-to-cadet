@@ -87,12 +87,14 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(report.backupPath).toBe(null);
     // The run reports its own wall-clock duration.
     expect(report.durationMs).toBeGreaterThanOrEqual(0);
-    // The fixture's managed speech providers were cut over — the run surfaces
-    // the API-key reminders as end-of-run next steps.
+    // The fixture's managed speech + web-search providers were cut over — the
+    // run surfaces the API-key reminders as end-of-run next steps.
     const next = report.nextSteps?.join(" ") ?? "";
     expect(next).toContain("STT now defaults to Deepgram");
     expect(next).toContain("Add a Deepgram API key");
     expect(next).toContain("Add an ElevenLabs API key");
+    expect(next).toContain("built-in web search");
+    expect(next).toContain("Perplexity or Brave");
     // Post-migration setup: the fixture has no lockfile, so both skip.
     const install = report.steps.find((s) => s.step === "install-cadet");
     expect(install?.status).toBe("skipped");
@@ -140,10 +142,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     const wsConfig = JSON.parse(await fs.readFile(path.join(cadetRoot, "workspace/config.json"), "utf8"));
     expect(wsConfig.profiles[0].provider).toBe("cadet");
     expect(wsConfig.profiles[1].provider).toBe("anthropic");
-    // Managed speech is retired: the vellum-era provider ids cut over to real
-    // defaults — never the bare "cadet" id, which the daemon's schema rejects.
+    // Managed speech + web search are retired: the vellum-era provider ids cut
+    // over to real defaults — never the bare "cadet" id, which the daemon's
+    // schema rejects.
     expect(wsConfig.services.stt.provider).toBe("deepgram");
     expect(wsConfig.services.tts.provider).toBe("elevenlabs");
+    expect(wsConfig.services["web-search"].provider).toBe("inference-provider-native");
     // The legacy platform section lands as the cadet cloud section with the
     // product URL — never the mangled platform.local/share/... garbage.
     expect(wsConfig.cloud.baseUrl).toBe("https://cloud.mycadet.ai");
@@ -1190,7 +1194,11 @@ describe("e2e: repair mode", () => {
     const configPath = path.join(cadetRoot, "workspace/config.json");
     await fs.writeFile(
       configPath,
-      JSON.stringify({ services: { stt: { provider: "vellum" } } }, null, 2),
+      JSON.stringify(
+        { services: { stt: { provider: "vellum" }, "web-search": { provider: "vellum" } } },
+        null,
+        2,
+      ),
     );
     const soulPath = path.join(cadetRoot, "workspace/SOUL.md");
     await fs.appendFile(soulPath, "Bugged addendum: comes with the Vellum harness again.\n");
@@ -1244,9 +1252,10 @@ describe("e2e: repair mode", () => {
       expect(report.mode).toBe("repair");
       expect(report.ok).toBe(true);
       expect(report.exitCode).toBe(0);
-      // Repair fires the speech cutover too (this root's config carried the
-      // managed provider) — the API-key reminders surface here as well.
+      // Repair fires the speech + web-search cutovers too (this root's config
+      // carried the managed providers) — the reminders surface here as well.
       expect(report.nextSteps?.join(" ")).toContain("Add a Deepgram API key");
+      expect(report.nextSteps?.join(" ")).toContain("Perplexity or Brave");
       expect(vellumSleeps).toBe(0); // repair never touches the vellum CLI
       // The sleep runs unconditionally — pgrep can't be trusted to gate it.
       expect(cadetSleeps).toBe(1);
@@ -1262,6 +1271,7 @@ describe("e2e: repair mode", () => {
       expect(log).toContain("cadet://workspace/data/attachments/late.txt");
       const config = JSON.parse(await fs.readFile(configPath, "utf8"));
       expect(config.services.stt.provider).toBe("deepgram");
+      expect(config.services["web-search"].provider).toBe("inference-provider-native");
       const soul = await fs.readFile(soulPath, "utf8");
       expect(soul).toContain("comes with the Cadet harness again.");
       const checked = new Database(path.join(cadetRoot, "workspace/data/db/assistant.db"), {

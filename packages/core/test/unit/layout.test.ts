@@ -8,6 +8,7 @@ import {
 import {
   CADET_PROCESS_PATTERNS,
   cutOverManagedSpeechProviders,
+  cutOverManagedWebSearchProvider,
   isConversationLog,
   isPersonaPrompt,
   isPluginSource,
@@ -331,6 +332,64 @@ describe("layout: managed speech provider cutover", () => {
     expect(
       cutOverManagedSpeechProviders(
         JSON.stringify({ services: { stt: { provider: "openai-whisper" } } }),
+      ),
+    ).toBe(null);
+  });
+});
+
+describe("layout: managed web search provider cutover", () => {
+  test("cuts the vellum-era managed web search over to inference-provider-native and drops the dead block", () => {
+    const result = cutOverManagedWebSearchProvider(
+      JSON.stringify({
+        services: {
+          stt: { provider: "deepgram" },
+          "web-search": {
+            provider: "vellum",
+            providers: { vellum: { model: "managed-brave" }, perplexity: { model: "sonar" } },
+          },
+        },
+      }),
+    );
+    expect(result).not.toBe(null);
+    const parsed = JSON.parse(result!.text);
+    expect(parsed.services["web-search"].provider).toBe("inference-provider-native");
+    // The managed provider's settings block is meaningless post-cutover.
+    expect(parsed.services["web-search"].providers.vellum).toBeUndefined();
+    // Real providers' blocks ride untouched.
+    expect(parsed.services["web-search"].providers.perplexity).toEqual({ model: "sonar" });
+    // Neighboring services untouched.
+    expect(parsed.services.stt.provider).toBe("deepgram");
+    // web-search provider + the dead managed block.
+    expect(result!.changes).toBe(2);
+  });
+
+  test("accepts the renamed spelling — roots migrated by older migrator releases", () => {
+    // The generic token sweep rewrites the ids textually before the JSON
+    // passes run, and an already-migrated root carries "cadet".
+    const result = cutOverManagedWebSearchProvider(
+      JSON.stringify({
+        services: { "web-search": { provider: "cadet", providers: { cadet: {} } } },
+      }),
+    );
+    expect(result).not.toBe(null);
+    const parsed = JSON.parse(result!.text);
+    expect(parsed.services["web-search"].provider).toBe("inference-provider-native");
+    expect(parsed.services["web-search"].providers.cadet).toBeUndefined();
+  });
+
+  test("is idempotent — a cut-over config has nothing left to do", () => {
+    const raw = JSON.stringify({
+      services: { "web-search": { provider: "inference-provider-native" } },
+    });
+    expect(cutOverManagedWebSearchProvider(raw)).toBe(null);
+  });
+
+  test("leaves configs without managed web search (or a services block) alone", () => {
+    expect(cutOverManagedWebSearchProvider("not json")).toBe(null);
+    expect(cutOverManagedWebSearchProvider('{"llm": {}}')).toBe(null);
+    expect(
+      cutOverManagedWebSearchProvider(
+        JSON.stringify({ services: { "web-search": { provider: "perplexity" } } }),
       ),
     ).toBe(null);
   });

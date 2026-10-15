@@ -634,35 +634,51 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.ok);
 }
 
-/** The substep label the managed-speech cutover reports its changes under. */
+/** The substep labels the managed-provider cutovers report their changes under. */
 const SPEECH_CUTOVER_SUBSTEP = "speech provider cutover";
+const WEB_SEARCH_CUTOVER_SUBSTEP = "web search provider cutover";
 
 /**
- * The speech cutover swaps the retired managed providers for real ones whose
- * API keys the user never had (the managed service billed credits, not keys)
- * — without them voice input and spoken replies fail after the wake. When the
- * cutover fired anywhere in the run, surface the API-key reminders as
- * end-of-run next steps in the final summary block. Any step's substep totals
- * count: migrate-layout during a fresh copy, rewrite-content in repair mode.
+ * The managed-provider cutovers swap the retired managed service ids for real
+ * defaults, and follow-ups surface as end-of-run next steps in the final
+ * summary block when a cutover fired anywhere in the run. Any step's substep
+ * totals count: migrate-layout during a fresh copy, rewrite-content in repair
+ * mode. Speech swapped in providers whose API keys the user never had (the
+ * managed service billed credits, not keys) — without them voice input and
+ * spoken replies fail after the wake. Web search swapped in the inference
+ * provider's built-in search, which needs no key — the reminder only suggests
+ * adding a BYOK search provider for stronger results.
  */
-function speechCutoverNextSteps(steps: StepResult[]): string[] | undefined {
-  let fired = false;
+function cutoverNextSteps(steps: StepResult[]): string[] | undefined {
+  const fired = new Set<string>();
   for (const step of steps) {
     const data = step.data;
     if (data === null || typeof data !== "object") continue;
     const substeps: unknown = (data as Record<string, unknown>).substeps;
     if (substeps === null || typeof substeps !== "object") continue;
-    const entry: unknown = (substeps as Record<string, unknown>)[SPEECH_CUTOVER_SUBSTEP];
-    if (entry === null || typeof entry !== "object") continue;
-    const changes: unknown = (entry as Record<string, unknown>).changes;
-    if (typeof changes === "number" && changes > 0) fired = true;
+    for (const [label, entry] of Object.entries(substeps as Record<string, unknown>)) {
+      if (label !== SPEECH_CUTOVER_SUBSTEP && label !== WEB_SEARCH_CUTOVER_SUBSTEP) continue;
+      if (entry === null || typeof entry !== "object") continue;
+      const changes: unknown = (entry as Record<string, unknown>).changes;
+      if (typeof changes === "number" && changes > 0) fired.add(label);
+    }
   }
-  if (!fired) return undefined;
-  return [
-    "The managed speech service is retired: STT now defaults to Deepgram and TTS to ElevenLabs.",
-    "Add a Deepgram API key so voice input keeps working (Cadet settings → Models & Services).",
-    "Add an ElevenLabs API key so spoken replies keep working (Cadet settings → Models & Services).",
-  ];
+  if (fired.size === 0) return undefined;
+  const warnings: string[] = [];
+  if (fired.has(SPEECH_CUTOVER_SUBSTEP)) {
+    warnings.push(
+      "The managed speech service is retired: STT now defaults to Deepgram and TTS to ElevenLabs.",
+      "Add a Deepgram API key so voice input keeps working (Cadet settings → Models & Services).",
+      "Add an ElevenLabs API key so spoken replies keep working (Cadet settings → Models & Services).",
+    );
+  }
+  if (fired.has(WEB_SEARCH_CUTOVER_SUBSTEP)) {
+    warnings.push(
+      "The managed web search service is retired: search now defaults to your model's built-in web search — no key needed.",
+      "Add a Perplexity or Brave API key for stronger search results (Cadet settings → Models & Services).",
+    );
+  }
+  return warnings;
 }
 
 function finish(
@@ -684,7 +700,7 @@ function finish(
     startedAt,
     finishedAt,
     durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-    nextSteps: speechCutoverNextSteps(steps),
+    nextSteps: cutoverNextSteps(steps),
   };
 }
 

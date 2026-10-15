@@ -109,7 +109,11 @@ export async function writeAssistantState(root: string): Promise<void> {
           { name: "daily", provider: "vellum", model: "claude-sonnet" },
           { name: "byok", provider: "anthropic", model: "claude" },
         ],
-        services: { stt: { provider: "vellum" }, tts: { provider: "vellum" } },
+        services: {
+          stt: { provider: "vellum" },
+          tts: { provider: "vellum" },
+          "web-search": { provider: "vellum", providers: { vellum: {} } },
+        },
         // The legacy platform section: the vellum platform host. The
         // migration must land it as the cadet cloud section with the
         // product URL — never the mangled `platform.local/share/...`
