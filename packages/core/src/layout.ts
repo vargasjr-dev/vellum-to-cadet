@@ -913,11 +913,14 @@ export const MIGRATION_CLI_MARKER = "migrate-vellum";
  * JSON-aware and VALUE-scoped like rewriteWorkspaceJsonValues: only string
  * values whose URL authority is exactly `tunnel` or `tunnel-<env>` on
  * mycadet.ai are rewritten (`tunnel-staging.mycadet.ai/abc/…` →
- * `staging-tunnel.mycadet.ai/abc/…`); third-party ingress (ngrok et al),
- * bare paths, and prose ride untouched. Scheme, port, path, and query are
- * preserved. Idempotent: new-shape hosts no longer match the pattern.
- * Returns the rewritten text, or null when there was nothing to do
- * (unparseable content, no matching value).
+ * `staging-tunnel.mycadet.ai/abc/…`), plus the vellum-era managed tunnel
+ * host `velay.vellum.ai` → `tunnel.mycadet.ai` (the vellum product only
+ * ever ran the one production tunnel). Third-party ingress (ngrok et al),
+ * other vellum.ai hosts (api., platform., …), bare paths, and prose ride
+ * untouched. Scheme, port, path, and query are preserved. Idempotent:
+ * new-shape hosts no longer match the pattern. Returns the rewritten
+ * text, or null when there was nothing to do (unparseable content, no
+ * matching value).
  */
 export function rewriteTunnelIngressUrls(content: string): {
   text: string;
@@ -937,6 +940,10 @@ export function rewriteTunnelIngressUrls(content: string): {
     } catch {
       return value;
     }
+    if (url.host === "velay.vellum.ai") {
+      url.host = "tunnel.mycadet.ai";
+      return url.toString();
+    }
     const match = /^tunnel(?:-([a-z0-9-]+))?\.mycadet\.ai$/.exec(url.host);
     if (match === null) return value;
     const env = match[1];
@@ -950,7 +957,11 @@ export function rewriteTunnelIngressUrls(content: string): {
         Object.entries(node).map(([k, v]) => [k, walk(v)]),
       );
     }
-    if (typeof node === "string" && node.includes("tunnel") && node.includes("mycadet.ai")) {
+    if (
+      typeof node === "string" &&
+      ((node.includes("tunnel") && node.includes("mycadet.ai")) ||
+        node.includes("velay.vellum.ai"))
+    ) {
       const rewritten = rewriteUrl(node);
       if (rewritten !== node) {
         changed++;
