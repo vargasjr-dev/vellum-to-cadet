@@ -322,6 +322,17 @@ export function isWorkspaceConfigContract(relPath: string): boolean {
 }
 
 /**
+ * The instance (assistant/gateway) config: `config.json` at the STATE ROOT —
+ * after dissolveInstanceState a vellum-era `assistants/<n>/.vellum/config.json`
+ * lands at the instance dir root. This is the file the daemon and gateway read
+ * (cloud connection, ingress/tunnel state), distinct from the workspace
+ * contract above.
+ */
+export function isInstanceStateConfig(relPath: string): boolean {
+  return relPath === "config.json";
+}
+
+/**
  * The CES credential metadata index — service/field/allow-list records.
  * Secret values never live in this file (secure-key backend only), so the
  * index is also where legacy product-service PLACEHOLDERS surface: entries
@@ -888,3 +899,67 @@ export const CADET_PROCESS_PATTERNS: ReadonlyArray<string> = [
 
 /** Marker present in every invocation of our own CLI (npx bin name). */
 export const MIGRATION_CLI_MARKER = "migrate-vellum";
+
+/**
+ * The managed tunnel's public host convention changed: `tunnel-{env}` became
+ * `{env}-tunnel` (consistent with `{env}-cloud`, with `{env}.tunnel` as a
+ * possible future form). Configs migrated from vellum-era or pre-rename
+ * cadet installs record tunnel ingress URLs under the old shape —
+ * `ingress.publicBaseUrl` is the live one (the gateway derives every
+ * provider webhook address from it and re-registers the webhooks themselves
+ * on the next reconcile), so rewriting the recorded URL updates what the
+ * providers get re-pointed at.
+ *
+ * JSON-aware and VALUE-scoped like rewriteWorkspaceJsonValues: only string
+ * values whose URL authority is exactly `tunnel` or `tunnel-<env>` on
+ * mycadet.ai are rewritten (`tunnel-staging.mycadet.ai/abc/…` →
+ * `staging-tunnel.mycadet.ai/abc/…`); third-party ingress (ngrok et al),
+ * bare paths, and prose ride untouched. Scheme, port, path, and query are
+ * preserved. Idempotent: new-shape hosts no longer match the pattern.
+ * Returns the rewritten text, or null when there was nothing to do
+ * (unparseable content, no matching value).
+ */
+export function rewriteTunnelIngressUrls(content: string): {
+  text: string;
+  changes: number;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  let changed = 0;
+  const rewriteUrl = (value: string): string => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return value;
+    }
+    const match = /^tunnel(?:-([a-z0-9-]+))?\.mycadet\.ai$/.exec(url.host);
+    if (match === null) return value;
+    const env = match[1];
+    url.host = env === undefined ? "tunnel.mycadet.ai" : `${env}-tunnel.mycadet.ai`;
+    return url.toString();
+  };
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node !== null && typeof node === "object") {
+      return Object.fromEntries(
+        Object.entries(node).map(([k, v]) => [k, walk(v)]),
+      );
+    }
+    if (typeof node === "string" && node.includes("tunnel") && node.includes("mycadet.ai")) {
+      const rewritten = rewriteUrl(node);
+      if (rewritten !== node) {
+        changed++;
+        return rewritten;
+      }
+    }
+    return node;
+  };
+  const rewritten = walk(parsed);
+  if (changed === 0) return null;
+  return { text: JSON.stringify(rewritten, null, 2) + "\n", changes: changed };
+}
