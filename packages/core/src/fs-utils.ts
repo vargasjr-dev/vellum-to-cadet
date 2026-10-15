@@ -25,6 +25,7 @@ import {
   isWorkspaceConfigContract,
   isWorkspaceScript,
   cutOverManagedSpeechProviders,
+  cutOverManagedWebSearchProvider,
   renamePlatformConfigSection,
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
@@ -411,11 +412,16 @@ export function sanctionedContentTransform(
 } | null {
   if (isWorkspaceConfigContract(stateRel)) {
     const applied = applySubstitutions(raw, ctx);
-    // Managed (vellum/cadet) speech provider ids are retired — cut them over
-    // BEFORE the generic value sweep so the swap counts once, here, and the
-    // sweep never re-counts (or re-spells) the provider fields.
+    // Managed (vellum/cadet) speech and web-search provider ids are retired —
+    // cut them over BEFORE the generic value sweep so each swap counts once,
+    // here, and the sweep never re-counts (or re-spells) the provider fields.
     const speech = cutOverManagedSpeechProviders(applied.text);
-    const values = rewriteWorkspaceJsonValues(speech !== null ? speech.text : applied.text);
+    const webSearch = cutOverManagedWebSearchProvider(
+      speech !== null ? speech.text : applied.text,
+    );
+    const values = rewriteWorkspaceJsonValues(
+      webSearch !== null ? webSearch.text : speech !== null ? speech.text : applied.text,
+    );
     const counts = { ...applied.counts };
     if (values.changed > 0) counts["json-values"] = values.changed;
     let text = values.text;
@@ -439,8 +445,12 @@ export function sanctionedContentTransform(
       substep: "config.json rewrite",
       text,
       counts,
-      substeps:
-        speech !== null ? { "speech provider cutover": speech.changes } : undefined,
+      substeps: (() => {
+        const cutovers: Record<string, number> = {};
+        if (speech !== null) cutovers["speech provider cutover"] = speech.changes;
+        if (webSearch !== null) cutovers["web search provider cutover"] = webSearch.changes;
+        return Object.keys(cutovers).length > 0 ? cutovers : undefined;
+      })(),
     };
   }
   if (isSkillInstallMeta(stateRel)) {
