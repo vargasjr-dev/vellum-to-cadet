@@ -7,6 +7,7 @@ import {
 } from "../../src/fs-utils.js";
 import {
   CADET_PROCESS_PATTERNS,
+  cutOverManagedSpeechProviders,
   isConversationLog,
   isPersonaPrompt,
   isPluginSource,
@@ -269,6 +270,69 @@ describe("layout: workspace machine files", () => {
   test("rewriteWorkspaceJsonValues is a no-op when nothing matches", () => {
     const raw = JSON.stringify({ provider: "anthropic" }, null, 2);
     expect(rewriteWorkspaceJsonValues(raw)).toEqual({ text: raw, changed: 0 });
+  });
+});
+
+describe("layout: managed speech provider cutover", () => {
+  test("cuts vellum-era managed speech over to deepgram/elevenlabs and drops the dead blocks", () => {
+    const result = cutOverManagedSpeechProviders(
+      JSON.stringify({
+        services: {
+          stt: { provider: "vellum", language: "multi", providers: { vellum: {} } },
+          tts: {
+            provider: "vellum",
+            providers: { elevenlabs: { voiceId: "x" }, vellum: { model: "old-voice" } },
+          },
+        },
+      }),
+    );
+    expect(result).not.toBe(null);
+    const parsed = JSON.parse(result!.text);
+    expect(parsed.services.stt.provider).toBe("deepgram");
+    expect(parsed.services.tts.provider).toBe("elevenlabs");
+    // The managed provider's settings blocks are meaningless post-cutover.
+    expect(parsed.services.stt.providers.vellum).toBeUndefined();
+    expect(parsed.services.tts.providers.vellum).toBeUndefined();
+    // Real providers' blocks ride untouched.
+    expect(parsed.services.tts.providers.elevenlabs).toEqual({ voiceId: "x" });
+    // stt provider + tts provider + the two dead blocks.
+    expect(result!.changes).toBe(4);
+  });
+
+  test("accepts the renamed spelling — roots migrated by older migrator releases", () => {
+    // The generic token sweep rewrites the ids textually before the JSON
+    // passes run, and an already-migrated root carries "cadet".
+    const result = cutOverManagedSpeechProviders(
+      JSON.stringify({
+        services: {
+          stt: { provider: "cadet", roles: { live: { provider: "cadet" } } },
+          tts: { provider: "cadet", providers: { cadet: {} } },
+        },
+      }),
+    );
+    expect(result).not.toBe(null);
+    const parsed = JSON.parse(result!.text);
+    expect(parsed.services.stt.provider).toBe("deepgram");
+    expect(parsed.services.stt.roles.live.provider).toBe("deepgram");
+    expect(parsed.services.tts.provider).toBe("elevenlabs");
+    expect(parsed.services.tts.providers.cadet).toBeUndefined();
+  });
+
+  test("is idempotent — a cut-over config has nothing left to do", () => {
+    const raw = JSON.stringify({
+      services: { stt: { provider: "deepgram" }, tts: { provider: "elevenlabs" } },
+    });
+    expect(cutOverManagedSpeechProviders(raw)).toBe(null);
+  });
+
+  test("leaves configs without managed speech (or a services block) alone", () => {
+    expect(cutOverManagedSpeechProviders("not json")).toBe(null);
+    expect(cutOverManagedSpeechProviders('{"llm": {}}')).toBe(null);
+    expect(
+      cutOverManagedSpeechProviders(
+        JSON.stringify({ services: { stt: { provider: "openai-whisper" } } }),
+      ),
+    ).toBe(null);
   });
 });
 

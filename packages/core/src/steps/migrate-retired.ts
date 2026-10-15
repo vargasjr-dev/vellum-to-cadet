@@ -360,8 +360,17 @@ async function migrateExtractedTree(
       const raw = await fs.readFile(entry.absPath, "utf8");
       const sanctioned = sanctionedContentTransform(stateRel, raw, ctx);
       if (!sanctioned) continue;
-      const total = Object.values(sanctioned.counts).reduce((a, b) => a + b, 0);
-      if (total > 0) {
+      const sideTotal = Object.values(sanctioned.substeps ?? {}).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      const total =
+        Object.values(sanctioned.counts).reduce((a, b) => a + b, 0) + sideTotal;
+      // Gate on the text actually differing, not on the counts: a file whose
+      // only change is a side-channel substep (e.g. the speech provider
+      // cutover — the generic token rules don't touch those ids) reports no
+      // `counts` and would silently skip its write.
+      if (sanctioned.text !== raw) {
         await fs.writeFile(entry.absPath, sanctioned.text, "utf8");
         contentChanges += total;
       }

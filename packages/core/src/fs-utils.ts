@@ -24,6 +24,7 @@ import {
   isSkillInstallMeta,
   isWorkspaceConfigContract,
   isWorkspaceScript,
+  cutOverManagedSpeechProviders,
   renamePlatformConfigSection,
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
@@ -393,15 +394,28 @@ function countMatches(before: string, pattern: RegExp): number {
  * The ONE dispatch for content rewrites, shared by migrate-layout (during
  * copy), repair (post-migration re-run), and verify (semantic comparison).
  * Every case is a named substep; anything unmapped returns null (verbatim).
+ * A case can carry ADDITIONAL named substeps (side-channel semantic passes
+ * riding the same file — the speech cutover inside the config.json rewrite);
+ * callers bump each on its own line so the semantic migration is visible and
+ * reportable separately.
  */
 export function sanctionedContentTransform(
   stateRel: string,
   raw: string,
   ctx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
-): { substep: string; text: string; counts: Record<string, number> } | null {
+): {
+  substep: string;
+  text: string;
+  counts: Record<string, number>;
+  substeps?: Record<string, number>;
+} | null {
   if (isWorkspaceConfigContract(stateRel)) {
     const applied = applySubstitutions(raw, ctx);
-    const values = rewriteWorkspaceJsonValues(applied.text);
+    // Managed (vellum/cadet) speech provider ids are retired — cut them over
+    // BEFORE the generic value sweep so the swap counts once, here, and the
+    // sweep never re-counts (or re-spells) the provider fields.
+    const speech = cutOverManagedSpeechProviders(applied.text);
+    const values = rewriteWorkspaceJsonValues(speech !== null ? speech.text : applied.text);
     const counts = { ...applied.counts };
     if (values.changed > 0) counts["json-values"] = values.changed;
     let text = values.text;
@@ -421,7 +435,13 @@ export function sanctionedContentTransform(
       text = cloudRenamed;
       counts["platform-section-key"] = 1;
     }
-    return { substep: "config.json rewrite", text, counts };
+    return {
+      substep: "config.json rewrite",
+      text,
+      counts,
+      substeps:
+        speech !== null ? { "speech provider cutover": speech.changes } : undefined,
+    };
   }
   if (isSkillInstallMeta(stateRel)) {
     const values = rewriteWorkspaceJsonValues(raw);

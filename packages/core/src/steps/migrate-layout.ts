@@ -251,6 +251,9 @@ async function copyOne(
       text = sanctioned.text;
       counts = sanctioned.counts;
       bump(sanctioned.substep, Object.values(counts).reduce((a, b) => a + b, 0));
+      for (const [name, n] of Object.entries(sanctioned.substeps ?? {})) {
+        if (n > 0) bump(name, n);
+      }
     } else {
       const applied = applySubstitutions(raw, targetCtx);
       text = applied.text;
