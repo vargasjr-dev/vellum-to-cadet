@@ -518,10 +518,32 @@ describe("rewriteTunnelIngressUrls", () => {
     expect(rewriteTunnelIngressUrls(JSON.stringify({ u: "https://tunnel.mycadet.ai/x" }))).toBeNull();
   });
 
+  test("rewrites the vellum-era managed tunnel host velay.vellum.ai to the cadet prod tunnel", () => {
+    const config = {
+      ingress: {
+        publicBaseUrl: "https://velay.vellum.ai/11111111-2222-4333-8444-555555555555",
+      },
+    };
+    const result = rewriteTunnelIngressUrls(JSON.stringify(config, null, 2));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unreachable");
+    expect(result.changes).toBe(1);
+    const rewritten = JSON.parse(result.text) as {
+      ingress: { publicBaseUrl: string };
+    };
+    expect(rewritten.ingress.publicBaseUrl).toBe(
+      "https://tunnel.mycadet.ai/11111111-2222-4333-8444-555555555555",
+    );
+    // Idempotent: the rewritten host no longer matches anything.
+    expect(rewriteTunnelIngressUrls(result.text)).toBeNull();
+  });
+
   test("never touches third-party ingress or non-URL values", () => {
     const config = {
       ingress: { publicBaseUrl: "https://abc123.ngrok-free.app/assistant" },
       selfHosted: "https://tunnel.example.com:8443/webhooks",
+      // Other vellum.ai hosts are not tunnel ingress — they stay.
+      platform: "https://platform.vellum.ai/guide",
       count: 7,
     };
     expect(rewriteTunnelIngressUrls(JSON.stringify(config))).toBeNull();
