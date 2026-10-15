@@ -98,6 +98,10 @@ describe("cli", () => {
     // includes the manual deletion of the (read-only) old root.
     expect(r.stdout).toContain("Once you've confirmed your Cadet is online");
     expect(r.stdout).toContain("npx migrate-vellum-assistant-to-cadet uninstall");
+    // The fixture's managed speech was cut over — the final block warns with
+    // the API-key next steps.
+    expect(r.stdout).toContain("Next steps:");
+    expect(r.stdout).toContain("Add a Deepgram API key");
     expect(r.stdout).not.toContain(`rm -rf ${root}`);
   });
 
