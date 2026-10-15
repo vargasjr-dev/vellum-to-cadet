@@ -637,6 +637,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 /** The substep labels the managed-provider cutovers report their changes under. */
 const SPEECH_CUTOVER_SUBSTEP = "speech provider cutover";
 const WEB_SEARCH_CUTOVER_SUBSTEP = "web search provider cutover";
+const TUNNEL_INGRESS_SUBSTEP = "tunnel ingress urls";
 
 /**
  * The managed-provider cutovers swap the retired managed service ids for real
@@ -657,7 +658,13 @@ function cutoverNextSteps(steps: StepResult[]): string[] | undefined {
     const substeps: unknown = (data as Record<string, unknown>).substeps;
     if (substeps === null || typeof substeps !== "object") continue;
     for (const [label, entry] of Object.entries(substeps as Record<string, unknown>)) {
-      if (label !== SPEECH_CUTOVER_SUBSTEP && label !== WEB_SEARCH_CUTOVER_SUBSTEP) continue;
+      if (
+        label !== SPEECH_CUTOVER_SUBSTEP &&
+        label !== WEB_SEARCH_CUTOVER_SUBSTEP &&
+        label !== TUNNEL_INGRESS_SUBSTEP
+      ) {
+        continue;
+      }
       if (entry === null || typeof entry !== "object") continue;
       const changes: unknown = (entry as Record<string, unknown>).changes;
       if (typeof changes === "number" && changes > 0) fired.add(label);
@@ -676,6 +683,12 @@ function cutoverNextSteps(steps: StepResult[]): string[] | undefined {
     warnings.push(
       "The managed web search service is retired: search now defaults to your model's built-in web search — no key needed.",
       "Add a Perplexity or Brave API key for stronger search results (Cadet settings → Models & Services).",
+    );
+  }
+  if (fired.has(TUNNEL_INGRESS_SUBSTEP)) {
+    warnings.push(
+      "The managed tunnel host convention changed: recorded tunnel ingress URLs were rewritten from tunnel-{env}.mycadet.ai to {env}-tunnel.mycadet.ai.",
+      "Telegram and Twilio webhooks re-register against the rewritten URL on the next wake — no action needed, but check delivery after the first message.",
     );
   }
   return warnings;

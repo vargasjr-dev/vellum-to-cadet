@@ -18,6 +18,7 @@ import {
   isConversationLog,
   isPersonaPrompt,
   consolidateDefaultProvider,
+  isInstanceStateConfig,
   isPluginSource,
   isRuntimeLog,
   isSkillFrontmatter,
@@ -27,6 +28,7 @@ import {
   cutOverManagedSpeechProviders,
   cutOverManagedWebSearchProvider,
   renamePlatformConfigSection,
+  rewriteTunnelIngressUrls,
   rewriteSkillFrontmatter,
   rewriteWorkspaceJsonValues,
   textSubstitutions,
@@ -412,6 +414,7 @@ export function sanctionedContentTransform(
 } | null {
   if (isWorkspaceConfigContract(stateRel)) {
     const applied = applySubstitutions(raw, ctx);
+    const cutovers: Record<string, number> = {};
     // Managed (vellum/cadet) speech and web-search provider ids are retired —
     // cut them over BEFORE the generic value sweep so each swap counts once,
     // here, and the sweep never re-counts (or re-spells) the provider fields.
@@ -441,16 +444,44 @@ export function sanctionedContentTransform(
       text = cloudRenamed;
       counts["platform-section-key"] = 1;
     }
+    // The managed tunnel host convention changed (tunnel-{env} →
+    // {env}-tunnel): migrated configs recording an old-shape tunnel ingress
+    // URL get it rewritten so the gateway's next webhook reconcile
+    // re-registers the providers (Telegram, Twilio, …) on the new path.
+    const ingressUrls = rewriteTunnelIngressUrls(text);
+    if (ingressUrls !== null) {
+      text = ingressUrls.text;
+      counts["tunnel ingress urls"] = ingressUrls.changes;
+      cutovers["tunnel ingress urls"] = ingressUrls.changes;
+    }
     return {
       substep: "config.json rewrite",
       text,
       counts,
       substeps: (() => {
-        const cutovers: Record<string, number> = {};
         if (speech !== null) cutovers["speech provider cutover"] = speech.changes;
         if (webSearch !== null) cutovers["web search provider cutover"] = webSearch.changes;
         return Object.keys(cutovers).length > 0 ? cutovers : undefined;
       })(),
+    };
+  }
+  if (isInstanceStateConfig(stateRel)) {
+    // The instance (daemon/gateway) config rides the generic machine-file
+    // substitutions PLUS the JSON-aware value passes that target it: today
+    // the tunnel ingress URL convention (tunnel-{env} → {env}-tunnel) —
+    // the gateway derives every provider webhook address from this value
+    // and re-registers the webhooks on its next reconcile.
+    const applied = applySubstitutions(raw, ctx);
+    const ingressUrls = rewriteTunnelIngressUrls(applied.text);
+    const counts = { ...applied.counts };
+    const substeps: Record<string, number> | undefined =
+      ingressUrls !== null ? { "tunnel ingress urls": ingressUrls.changes } : undefined;
+    if (ingressUrls !== null) counts["tunnel ingress urls"] = ingressUrls.changes;
+    return {
+      substep: "instance config rewrite",
+      text: ingressUrls !== null ? ingressUrls.text : applied.text,
+      counts,
+      substeps,
     };
   }
   if (isSkillInstallMeta(stateRel)) {

@@ -4,6 +4,7 @@ import {
   applySubstitutions,
   isRewriteEligible,
   renameRelativePath,
+  sanctionedContentTransform,
 } from "../../src/fs-utils.js";
 import {
   CADET_PROCESS_PATTERNS,
@@ -17,6 +18,7 @@ import {
   isSkillInstallMeta,
   isWorkspaceConfigContract,
   rewriteSkillFrontmatter,
+  rewriteTunnelIngressUrls,
   rewriteWorkspaceJsonValues,
 } from "../../src/layout.js";
 import { expect } from "../helpers/expect.js";
@@ -480,5 +482,86 @@ describe("layout: workspace content categories", () => {
     expect(CADET_PROCESS_PATTERNS).toContain("cadet-gateway");
     expect(CADET_PROCESS_PATTERNS).toContain("credential-executor");
     expect(CADET_PROCESS_PATTERNS).not.toContain("vellum-daemon");
+  });
+});
+
+describe("rewriteTunnelIngressUrls", () => {
+  test("rewrites old-shape tunnel hosts to the env-first convention, preserving everything else", () => {
+    const config = {
+      ingress: {
+        publicBaseUrl: "https://tunnel-dev.mycadet.ai/11111111-2222-4333-8444-555555555555",
+      },
+      notes: "the tunnel serves webhooks",
+    };
+    const result = rewriteTunnelIngressUrls(JSON.stringify(config, null, 2));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unreachable");
+    expect(result.changes).toBe(1);
+    const rewritten = JSON.parse(result.text) as {
+      ingress: { publicBaseUrl: string };
+      notes: string;
+    };
+    expect(rewritten.ingress.publicBaseUrl).toBe(
+      "https://dev-tunnel.mycadet.ai/11111111-2222-4333-8444-555555555555",
+    );
+    // Prose mentioning the tunnel rides untouched.
+    expect(rewritten.notes).toBe("the tunnel serves webhooks");
+  });
+
+  test("rewrites staging tunnels, the bare prod host, and every scheme/path shape", () => {
+    expect(
+      rewriteTunnelIngressUrls(
+        JSON.stringify({ u: "https://tunnel-staging.mycadet.ai/abc" }),
+      )?.text,
+    ).toBe(JSON.stringify({ u: "https://staging-tunnel.mycadet.ai/abc" }, null, 2) + "\n");
+    // The bare prod host is already correct — no change.
+    expect(rewriteTunnelIngressUrls(JSON.stringify({ u: "https://tunnel.mycadet.ai/x" }))).toBeNull();
+  });
+
+  test("never touches third-party ingress or non-URL values", () => {
+    const config = {
+      ingress: { publicBaseUrl: "https://abc123.ngrok-free.app/assistant" },
+      selfHosted: "https://tunnel.example.com:8443/webhooks",
+      count: 7,
+    };
+    expect(rewriteTunnelIngressUrls(JSON.stringify(config))).toBeNull();
+  });
+
+  test("is idempotent", () => {
+    const once = rewriteTunnelIngressUrls(
+      JSON.stringify({ ingress: { publicBaseUrl: "https://tunnel-dev.mycadet.ai/a" } }),
+    );
+    expect(once).not.toBeNull();
+    if (once === null) throw new Error("unreachable");
+    expect(rewriteTunnelIngressUrls(once.text)).toBeNull();
+  });
+
+  test("leaves malformed content untouched", () => {
+    expect(rewriteTunnelIngressUrls("not json at all")).toBeNull();
+  });
+});
+
+describe("sanctionedContentTransform — instance config", () => {
+  test("the instance config rides its own substep and rewrites tunnel ingress URLs", () => {
+    const result = sanctionedContentTransform(
+      "config.json",
+      JSON.stringify({
+        ingress: { publicBaseUrl: "https://tunnel-dev.mycadet.ai/abc" },
+      }),
+    );
+    expect(result?.substep).toBe("instance config rewrite");
+    if (!result) throw new Error("unreachable");
+    const parsed = JSON.parse(result.text) as { ingress: { publicBaseUrl: string } };
+    expect(parsed.ingress.publicBaseUrl).toBe("https://dev-tunnel.mycadet.ai/abc");
+    expect(result.substeps).toEqual({ "tunnel ingress urls": 1 });
+  });
+
+  test("a config with no tunnel URLs reports no tunnel substep", () => {
+    const result = sanctionedContentTransform(
+      "config.json",
+      JSON.stringify({ hooks: [] }),
+    );
+    expect(result?.substep).toBe("instance config rewrite");
+    expect(result?.substeps).toBeUndefined();
   });
 });

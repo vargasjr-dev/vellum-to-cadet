@@ -1089,6 +1089,35 @@ describe("e2e: modern multi-instance layout", () => {
     expect(report.detect.cadetRoot).toBe(path.join(home, ".local", "share", "cadet-dev"));
     expect(await exists(path.join(home, ".local", "share", "cadet-dev", "assistants", "velly", "workspace", "notes", "README.md"))).toBe(true);
   });
+
+  test("rewrites old-shape tunnel ingress URLs in the migrated config", async () => {
+    const { root, home } = await buildModernVellum();
+    const state = path.join(root, "assistants", "velly", ".vellum");
+    await fs.writeFile(
+      path.join(state, "config.json"),
+      JSON.stringify(
+        {
+          ingress: {
+            publicBaseUrl:
+              "https://tunnel-dev.mycadet.ai/11111111-2222-4333-8444-555555555555",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const report = await migrate({ vellumRoot: root, processOps: noopOps });
+    expect(report.ok).toBe(true);
+    const instance = path.join(home, ".local", "share", "cadet", "assistants", "velly");
+    const config = JSON.parse(
+      await fs.readFile(path.join(instance, "config.json"), "utf8"),
+    ) as { ingress?: { publicBaseUrl?: string } };
+    // The tunnel-{env} host convention became {env}-tunnel — the gateway's
+    // next webhook reconcile registers the providers on the new path.
+    expect(config.ingress?.publicBaseUrl).toBe(
+      "https://dev-tunnel.mycadet.ai/11111111-2222-4333-8444-555555555555",
+    );
+  });
 });
 
 describe("e2e: legacy home-level lockfile move", () => {
