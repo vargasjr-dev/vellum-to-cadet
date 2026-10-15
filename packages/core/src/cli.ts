@@ -703,6 +703,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
       if (report.backupPath) {
         lines.push(`    ${detail(`A full backup of the cadet root is at ${report.backupPath}`)}`);
       }
+      lines.push(...nextStepLines(report));
       lines.push("");
       return lines.join("\n");
     }
@@ -723,6 +724,7 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
       lines.push(`    ${command(report.detect.cadetRoot)}`);
     }
     lines.push(`    ${detail(`Total time: ${humanDuration(report.durationMs)}`)}`);
+    lines.push(...nextStepLines(report));
     lines.push("");
     lines.push(`  Once you've confirmed your Cadet is online, you can optionally delete vellum for good:`);
     lines.push(`      ${command(`npx migrate-vellum-assistant-to-cadet uninstall`)}`);
@@ -734,6 +736,21 @@ function renderHuman(report: MigrationReport, opts?: { stepsStreamedLive?: boole
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/**
+ * End-of-run follow-ups (e.g. the speech cutover's "add an API key"
+ * reminders), rendered as ⚠ warnings under their own "Next steps" block so
+ * they stay on screen after the step stream scrolls away.
+ */
+function nextStepLines(report: MigrationReport): string[] {
+  const steps = report.nextSteps ?? [];
+  if (steps.length === 0) return [];
+  const lines = [`  ${issueIcon("warning")} ${colors.yellow("Next steps:")}`];
+  for (const step of steps) {
+    lines.push(`    ${issueIcon("warning")} ${step}`);
+  }
+  return lines;
 }
 
 /** Wall-clock duration, human-formatted: 1h 2m 3s / 4m 12s / 38s. */

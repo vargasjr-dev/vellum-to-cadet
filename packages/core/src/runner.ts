@@ -634,6 +634,37 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.ok);
 }
 
+/** The substep label the managed-speech cutover reports its changes under. */
+const SPEECH_CUTOVER_SUBSTEP = "speech provider cutover";
+
+/**
+ * The speech cutover swaps the retired managed providers for real ones whose
+ * API keys the user never had (the managed service billed credits, not keys)
+ * — without them voice input and spoken replies fail after the wake. When the
+ * cutover fired anywhere in the run, surface the API-key reminders as
+ * end-of-run next steps in the final summary block. Any step's substep totals
+ * count: migrate-layout during a fresh copy, rewrite-content in repair mode.
+ */
+function speechCutoverNextSteps(steps: StepResult[]): string[] | undefined {
+  let fired = false;
+  for (const step of steps) {
+    const data = step.data;
+    if (data === null || typeof data !== "object") continue;
+    const substeps: unknown = (data as Record<string, unknown>).substeps;
+    if (substeps === null || typeof substeps !== "object") continue;
+    const entry: unknown = (substeps as Record<string, unknown>)[SPEECH_CUTOVER_SUBSTEP];
+    if (entry === null || typeof entry !== "object") continue;
+    const changes: unknown = (entry as Record<string, unknown>).changes;
+    if (typeof changes === "number" && changes > 0) fired = true;
+  }
+  if (!fired) return undefined;
+  return [
+    "The managed speech service is retired: STT now defaults to Deepgram and TTS to ElevenLabs.",
+    "Add a Deepgram API key so voice input keeps working (Cadet settings → Models & Services).",
+    "Add an ElevenLabs API key so spoken replies keep working (Cadet settings → Models & Services).",
+  ];
+}
+
 function finish(
   detect: DetectInfo,
   steps: StepResult[],
@@ -653,6 +684,7 @@ function finish(
     startedAt,
     finishedAt,
     durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
+    nextSteps: speechCutoverNextSteps(steps),
   };
 }
 
@@ -728,6 +760,12 @@ async function rewriteContent(
     const s = (substeps[substep] ??= { files: 0, changes: 0 });
     s.files++;
     s.changes += changes;
+    for (const [name, n] of Object.entries(sanctioned?.substeps ?? {})) {
+      if (n <= 0) continue;
+      const side = (substeps[name] ??= { files: 0, changes: 0 });
+      side.files++;
+      side.changes += n;
+    }
     log(`${substep}: ${destRel}`);
   }
   return {

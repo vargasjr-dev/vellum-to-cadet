@@ -528,6 +528,99 @@ export function rewriteWorkspaceJsonValues(content: string): {
 }
 
 /**
+ * Cadet retired its managed speech providers — speech now runs exclusively on
+ * real, user-keyed providers. A vellum-era config pointing
+ * `services.stt.provider` / `services.tts.provider` at the managed id would
+ * boot with a provider the daemon's schema rejects, so the rewrite swaps in
+ * real defaults: Deepgram for STT, ElevenLabs for TTS. The managed service's
+ * per-provider settings blocks (`services.*.providers."vellum"/"cadet"`) and
+ * any per-role managed overrides (`services.stt.roles.<role>.provider`) go
+ * with it. Accepts BOTH spellings: the generic token sweep runs before the
+ * JSON passes and rewrites the ids textually, and roots already migrated by
+ * older migrator releases carry the renamed spelling. The swapped-in
+ * providers were never keyed by the user (the managed service billed
+ * credits), so the runner surfaces "add your API key" next steps when this
+ * fired — see speechCutoverNextSteps. Idempotent: with the managed ids gone
+ * there is nothing to cut over. Returns the rewritten text, or null when
+ * there was nothing to do (unparseable content, no services block, or no
+ * managed speech config).
+ */
+export function cutOverManagedSpeechProviders(content: string): {
+  text: string;
+  changes: number;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const services = root.services;
+  if (services === null || typeof services !== "object" || Array.isArray(services)) {
+    return null;
+  }
+  const servicesRecord = services as Record<string, unknown>;
+
+  const MANAGED_IDS = new Set(["vellum", "cadet"]);
+  let changed = 0;
+
+  const stt = servicesRecord.stt;
+  if (stt !== null && typeof stt === "object" && !Array.isArray(stt)) {
+    const sttRecord = stt as Record<string, unknown>;
+    if (typeof sttRecord.provider === "string" && MANAGED_IDS.has(sttRecord.provider)) {
+      sttRecord.provider = "deepgram";
+      changed++;
+    }
+    const roles = sttRecord.roles;
+    if (roles !== null && typeof roles === "object" && !Array.isArray(roles)) {
+      for (const role of Object.values(roles)) {
+        if (role === null || typeof role !== "object" || Array.isArray(role)) continue;
+        const roleRecord = role as Record<string, unknown>;
+        if (typeof roleRecord.provider === "string" && MANAGED_IDS.has(roleRecord.provider)) {
+          roleRecord.provider = "deepgram";
+          changed++;
+        }
+      }
+    }
+    changed += deleteManagedProviderBlocks(sttRecord);
+  }
+
+  const tts = servicesRecord.tts;
+  if (tts !== null && typeof tts === "object" && !Array.isArray(tts)) {
+    const ttsRecord = tts as Record<string, unknown>;
+    if (typeof ttsRecord.provider === "string" && MANAGED_IDS.has(ttsRecord.provider)) {
+      ttsRecord.provider = "elevenlabs";
+      changed++;
+    }
+    changed += deleteManagedProviderBlocks(ttsRecord);
+  }
+
+  if (changed === 0) return null;
+  return { text: JSON.stringify(root, null, 2) + "\n", changes: changed };
+}
+
+/** Drop the retired managed provider's settings blocks from a services.* record. */
+function deleteManagedProviderBlocks(section: Record<string, unknown>): number {
+  const providers = section.providers;
+  if (providers === null || typeof providers !== "object" || Array.isArray(providers)) {
+    return 0;
+  }
+  const providersRecord = providers as Record<string, unknown>;
+  let removed = 0;
+  for (const dead of ["vellum", "cadet"]) {
+    if (dead in providersRecord) {
+      delete providersRecord[dead];
+      removed++;
+    }
+  }
+  return removed;
+}
+
+/**
  * The default-provider selection consolidates into the `llm.default` blob:
  * cadet's runtime reads the blob's `provider` (clamped to a matrix column)
  * plus its `provider_connection` pin, and the retired `llm.defaultProvider`

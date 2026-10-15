@@ -283,6 +283,12 @@ export interface MigrationReport {
   finishedAt: string;
   /** Wall-clock duration of the whole run, in milliseconds. */
   durationMs: number;
+  /**
+   * End-of-run follow-ups for the user, rendered as warnings in the final
+   * summary block — e.g. the managed-speech cutover's "add an API key"
+   * reminders. Absent when the run has nothing to ask of the user.
+   */
+  nextSteps?: string[];
 }
 
 export const EXIT_CODES = {
