@@ -28,6 +28,7 @@ import {
   verifyDockerVolumeData,
 } from "./steps/migrate-docker-volumes.js";
 import { readLockfileAssistants } from "./discover.js";
+import { extractBundleStep } from "./steps/extract-bundle.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
 import { handleToInstanceName, DEFAULT_TARGET_CTX } from "./layout.js";
@@ -131,6 +132,21 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     if (options.verbose) console.error(`[vellum-migrate] ${msg}`);
   };
   const onItem = (step: string) => (item: StepItemEvent): void => options.onStepItem?.(step, item);
+
+  // --bundle: the bundle restores FIRST, as a real vellum assistant, so
+  // detect below sees it and every downstream flow (target resolution,
+  // plan-copy, verify) treats it exactly like any other assistant.
+  if (options.bundlePath) {
+    start("extract-bundle");
+    const extraction = await extractBundleStep(options);
+    done(extraction);
+    if (extraction.status === "failed") {
+      // The root is untouched (staging + atomic rename) — report the
+      // detected state honestly alongside the failure.
+      const failedDetect: DetectInfo = await detectStep(options, ops);
+      return finish(failedDetect, steps, "plan", startedAt, null, EXIT_CODES.migrationFailed);
+    }
+  }
 
   start("detect");
   const detect: DetectInfo = await detectStep(options, ops);
