@@ -100,6 +100,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--internal-lock":
         parsed.internalLock = requireValue(argv[++i], arg);
         break;
+      case "--bundle":
+        parsed.bundlePath = requireValue(argv[++i], arg);
+        break;
       case "--internal-vellum-root":
         parsed.vellumRoot = requireValue(argv[++i], arg);
         break;
@@ -161,6 +164,9 @@ Usage:
 
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
+  --bundle <path>          Restore a legacy .vbundle assistant backup into the vellum
+                           root first (as a new assistant), then migrate it like any
+                           other — additive, the root's own assistants are untouched
   --dry-run                Print the plan and touch nothing
   -y, --yes                Non-interactive; assume yes (skips the pre-migration
                            confirmation)
@@ -947,6 +953,32 @@ async function main(): Promise<number> {
         console.error((err as Error).stack);
       }
       return EXIT_CODES.uninstallFailed;
+    }
+  }
+
+  if (parsed.bundlePath && (parsed.repair || parsed.uninstall)) {
+    console.error(errorText("--bundle applies to migration runs only"));
+    return EXIT_CODES.migrationFailed;
+  }
+  if (parsed.bundlePath) {
+    let stat: Awaited<ReturnType<typeof fsPromises.stat>> | null = null;
+    try {
+      stat = await fsPromises.stat(parsed.bundlePath);
+    } catch {
+      stat = null;
+    }
+    if (!stat?.isFile()) {
+      console.error(errorText(`--bundle: no such file: ${parsed.bundlePath}`));
+      return EXIT_CODES.migrationFailed;
+    }
+    if (parsed.bundlePath.endsWith(".enc")) {
+      console.error(
+        errorText(
+          "--bundle: encrypted .vbundle.enc backups are not supported — the keys that " +
+            "encrypted them are gone with the old install; restore the unencrypted export",
+        ),
+      );
+      return EXIT_CODES.migrationFailed;
     }
   }
 

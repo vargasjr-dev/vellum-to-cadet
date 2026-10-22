@@ -27,7 +27,17 @@ one plausible root is found, the CLI asks which one to migrate.
 ```sh
 npx migrate-vellum-assistant-to-cadet --dry-run   # plan only, touches nothing
 npx migrate-vellum-assistant-to-cadet --json      # machine-readable report
+npx migrate-vellum-assistant-to-cadet --bundle ~/backups/my-assistant.vbundle
 ```
+
+`--bundle` first restores a legacy `.vbundle` assistant backup into the
+discovered vellum root — as a real assistant, with the markers discovery and
+detection look for — and then the migration proceeds exactly as it would for
+any other assistant in that root. The restore is additive (the root's own
+assistants are never touched) and idempotent (re-running the same bundle
+skips straight to the migration). Encrypted `.vbundle.enc` backups are
+refused — the keys that sealed them are gone with the old install — and so
+are staff debug profiles.
 
 The CLI starts a logged worker and runs detection and preflight before
 asking for confirmation. It lists the assistants it will put to sleep, the

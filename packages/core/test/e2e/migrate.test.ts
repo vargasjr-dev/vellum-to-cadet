@@ -13,6 +13,7 @@ import { stopAssistant } from "../../src/steps/stop-assistant.js";
 import { EXIT_CODES } from "../../src/types.js";
 import type { ProcessOps } from "../../src/types.js";
 import { expect } from "../helpers/expect.js";
+import { buildVBundleArchive } from "../helpers/vbundle-fixture.js";
 import {
   buildFullVellum0126,
   buildMinimal,
@@ -2132,5 +2133,113 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
     }
+  });
+});
+
+describe("e2e: vbundle restore", () => {
+  test("extracts the bundle as a vellum assistant, then migrates it like any other", async () => {
+    const { root, home } = await buildModernVellum();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+
+    // The bundle carries a real assistant.db with vellum-branded values, a
+    // workspace config with machine tokens, a skill doc, and a credential.
+    const bundleBuild = path.join(home, "bundle-build");
+    await fs.mkdir(path.join(bundleBuild, "workspace", "data", "db"), { recursive: true });
+    const db = new Database(path.join(bundleBuild, "workspace", "data", "db", "assistant.db"));
+    db.exec(`CREATE TABLE conversations (
+      id TEXT PRIMARY KEY, title TEXT, origin_channel TEXT, origin_interface TEXT, created_at INTEGER
+    )`);
+    db.exec(`CREATE TABLE messages (
+      id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER,
+      metadata TEXT, user_message_channel TEXT, assistant_message_channel TEXT
+    )`);
+    db.exec(`INSERT INTO conversations VALUES ('c1', 'From the bundle', 'vellum', 'text', 1)`);
+    db.exec(`INSERT INTO messages VALUES
+      ('m1', 'c1', 'user', 'Here it is: [report.md](vellum://workspace/report.md)', 1,
+       '{"channel":"vellum"}', 'vellum', 'vellum')`);
+    db.close();
+    const dbBytes = await fs.readFile(path.join(bundleBuild, "workspace", "data", "db", "assistant.db"));
+    const bundlePath = path.join(home, "backup.vbundle");
+    await fs.writeFile(
+      bundlePath,
+      buildVBundleArchive({
+        entries: [
+          { path: "workspace/data/db/assistant.db", data: dbBytes },
+          {
+            path: "workspace/config.json",
+            data: Buffer.from(JSON.stringify({ hooks: [{ name: "on-wake", command: `bash $VELLUM_WORKSPACE_DIR/hooks/on-wake.sh` }] })),
+          },
+          { path: "workspace/skills/greet/SKILL.md", data: Buffer.from("---\nmetadata:\n  vellum:\n    display-name: Greet\n---\nSay hi\n") },
+          { path: "credentials/anthropic", data: Buffer.from("sk-secret-value") },
+        ],
+      }),
+    );
+
+    const report = await migrate({ vellumRoot: root, bundlePath, processOps: noopOps });
+
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
+
+    // The extract step ran FIRST and restored the assistant.
+    const extract = report.steps.find((s) => s.step === "extract-bundle");
+    expect(extract?.status).toBe("completed");
+    expect(extract?.summary).toContain("restored");
+    expect(extract?.summary).toContain("test-bundle");
+    expect(extract?.issues?.some((i) => i.severity === "warning" && i.message.includes("anthropic"))).toBe(true);
+
+    // detect saw BOTH assistants — the pre-existing one and the restored one.
+    const detect = report.steps.find((s) => s.step === "detect");
+    expect(detect?.summary).toContain("migrating assistant velly");
+    expect(detect?.summary).toContain("migrating assistant test-bundle");
+
+    // The restored assistant migrated like any other: state dissolved into
+    // the instance dir, machine files rewritten, dbs value-migrated.
+    const cadetRoot = path.join(home, ".local", "share", "cadet");
+    const instance = path.join(cadetRoot, "assistants", "test-bundle");
+    const restoredConfig = await fs.readFile(path.join(instance, "workspace/config.json"), "utf8");
+    expect(restoredConfig).toContain("CADET_WORKSPACE_DIR");
+    expect(restoredConfig).not.toContain("VELLUM_");
+
+    const restoredDb = new Database(path.join(instance, "workspace/data/db/assistant.db"), { readOnly: true });
+    const channels = restoredDb.prepare(`SELECT user_message_channel AS c FROM messages`).all();
+    expect(channels).toEqual([{ c: "cadet" }]);
+    const content = restoredDb.prepare(`SELECT content AS c FROM messages`).get();
+    expect(String(content?.c)).toContain("cadet://");
+    restoredDb.close();
+
+    const skill = await fs.readFile(path.join(instance, "workspace/skills/greet/SKILL.md"), "utf8");
+    expect(skill).toContain("cadet:");
+    expect(skill).not.toContain("vellum:");
+
+    // Credentials were never written anywhere.
+    expect(await exists(path.join(instance, "credentials"))).toBe(false);
+
+    // The pre-existing assistant migrated untouched by the restore.
+    expect(await exists(path.join(cadetRoot, "assistants/velly/workspace/notes/README.md"))).toBe(true);
+    expect(await exists(path.join(root, "assistants/test-bundle"))).toBe(true); // source intact
+
+    // The bundle file itself is untouched — the original IS the backup.
+    const bundleStat = await fs.stat(bundlePath);
+    expect(bundleStat.isFile()).toBe(true);
+  });
+
+  test("re-running with the same bundle skips the restore and verifies", async () => {
+    const { root, home } = await buildModernVellum();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const bundlePath = path.join(home, "backup.vbundle");
+    await fs.writeFile(
+      bundlePath,
+      buildVBundleArchive({ entries: [{ path: "workspace/config.json", data: Buffer.from("{}") }] }),
+    );
+
+    const first = await migrate({ vellumRoot: root, bundlePath, processOps: noopOps });
+    expect(first.ok).toBe(true);
+
+    const second = await migrate({ vellumRoot: root, bundlePath, processOps: noopOps });
+    expect(second.ok).toBe(true);
+    expect(second.exitCode).toBe(0);
+    const extract = second.steps.find((s) => s.step === "extract-bundle");
+    expect(extract?.status).toBe("skipped");
+    expect(extract?.summary).toContain("already restored");
   });
 });

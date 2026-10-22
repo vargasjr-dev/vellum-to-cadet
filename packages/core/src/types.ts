@@ -106,6 +106,12 @@ export interface MigrateOptions {
   vellumRoot?: string;
   /** Override the default ~/.cadet target root. */
   cadetRoot?: string;
+  /**
+   * Restore a legacy .vbundle assistant backup into the discovered vellum
+   * root first (as a real assistant, with its discovery markers), then run
+   * the normal migration. Additive: the root's own assistants are untouched.
+   */
+  bundlePath?: string;
   /** True when cadetRoot came from an explicit --cadet-root flag. */
   cadetRootExplicit?: boolean;
   /** Print the plan and touch nothing. */
