@@ -479,6 +479,65 @@ async function promptConfirmMigration(info: ConfirmMigrationInfo): Promise<boole
 }
 
 /**
+ * The install-cadet sudo retry: report the permission wall, then ask
+ * (Vargas's followup on the error-surface PR — instead of telling the user to
+ * run the sudo install themselves, we offer to do it). Reachable only from a
+ * process with the user's terminal: sudo's password prompt needs the TTY, so
+ * the detached worker asks its attached launcher over IPC and the LAUNCHER
+ * (or a foreground run, same process) spawns the sudo install.
+ */
+function renderSudoRetryPrompt(info: { npmRoot: string | null }): string {
+  const lines = [
+    "",
+    warnText("⚠ the cadet CLI install hit a permission wall"),
+    `    ${detail("·")} npm could not install mycadet into its global directory${info.npmRoot ? ` (${info.npmRoot})` : ""} — permission denied.`,
+    `    ${detail("·")} Your assistants are migrated; they just need the cadet CLI to start.`,
+    "",
+    `  Would you like us to try installing ${command("\`mycadet\`")} again as sudo? (You may be asked for your password.)`,
+    `  ${command("Enter")} = yes · ${command("n")} = no (the manual fix prints with the results)`,
+    "",
+  ];
+  return lines.join("\n");
+}
+
+async function promptSudoRetry(info: { npmRoot: string | null }): Promise<{ ok: boolean; detail?: string }> {
+  process.stderr.write(renderSudoRetryPrompt(info));
+  if (!process.stdin.readable) {
+    return { ok: false, detail: "no terminal to answer the retry prompt" };
+  }
+  const answer = await new Promise<string>((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let settled = false;
+    const settle = (value: string) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(value);
+    };
+    rl.on("close", () => settle("n"));
+    rl.question("")
+      .then((a) => settle(a.trim().toLowerCase()))
+      .catch(() => settle("n"));
+  });
+  if (answer.startsWith("n")) return { ok: false, detail: "you declined the sudo retry" };
+  return runSudoInstall();
+}
+
+function runSudoInstall(): Promise<{ ok: boolean; detail?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("sudo", ["npm", "install", "-g", "mycadet"], { stdio: "inherit" });
+    child.on("error", (err) => resolve({ ok: false, detail: `sudo could not start: ${err.message}` }));
+    child.on("close", (code) =>
+      resolve(
+        code === 0
+          ? { ok: true }
+          : { ok: false, detail: `sudo npm install -g mycadet exited ${code ?? "without a code"}` },
+      ),
+    );
+  });
+}
+
+/**
  * The default `migrate` flow (v0.0.12 run feedback: the SSH session died
  * mid fetch-docker-volumes and took the migration with it). The heavy work
  * runs in a DETACHED child that survives disconnects; this process
@@ -571,12 +630,22 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
  * drain after the child closes.
  */
 async function relayChild(logPath: string, child: ChildProcess): Promise<number> {
-  child.on("message", async (message: { type?: string; info?: ConfirmMigrationInfo }) => {
-    if (message.type !== "confirm" || !message.info) return;
-    await drainLog();
-    const confirmed = await promptConfirmMigration(message.info);
-    if (child.connected) child.send({ type: "confirmed", confirmed });
-  });
+  child.on(
+    "message",
+    async (message: { type?: string; info?: ConfirmMigrationInfo & { npmRoot?: string | null } }) => {
+      if (message.type === "confirm" && message.info) {
+        await drainLog();
+        const confirmed = await promptConfirmMigration(message.info);
+        if (child.connected) child.send({ type: "confirmed", confirmed });
+        return;
+      }
+      if (message.type === "ask-sudo" && message.info) {
+        await drainLog();
+        const outcome = await promptSudoRetry({ npmRoot: message.info.npmRoot ?? null });
+        if (child.connected) child.send({ type: "sudo-result", ok: outcome.ok, detail: outcome.detail });
+      }
+    },
+  );
   // The relayed bytes are the child's terminal stream (cursor math + color,
   // see createLiveProgress). A real terminal renders them as if the
   // migration ran in-process; when THIS process's stdout is not a terminal
@@ -1089,12 +1158,32 @@ async function main(): Promise<number> {
               process.once("message", (message: { type?: string; confirmed?: boolean }) => {
                 process.removeListener("disconnect", disconnect);
                 resolve(message.type === "confirmed" && message.confirmed === true);
-                process.disconnect?.();
               });
               process.send!({ type: "confirm", info });
             })
           : !parsed.json && !parsed.yes && Boolean(process.stdin.isTTY)
             ? (info) => promptConfirmMigration(info)
+            : undefined,
+      // Same relay for the install-cadet sudo retry (the launcher owns the
+      // TTY sudo's password prompt needs). A declined/no-terminal answer
+      // resolves not-ok and the step warning keeps the manual fix.
+      retryInstallAsSudo:
+        parsed.internalRun && !parsed.yes && process.send
+          ? (info) => new Promise<{ ok: boolean; detail?: string }>((resolve) => {
+              const disconnect = () => resolve({ ok: false, detail: "the launcher went away before the answer" });
+              process.once("disconnect", disconnect);
+              process.once("message", (message: { type?: string; ok?: boolean; detail?: string }) => {
+                process.removeListener("disconnect", disconnect);
+                resolve(
+                  message.type === "sudo-result" && message.ok === true
+                    ? { ok: true }
+                    : { ok: false, detail: message.detail ?? "the retry did not succeed" },
+                );
+              });
+              process.send!({ type: "ask-sudo", info });
+            })
+          : !parsed.json && !parsed.yes && Boolean(process.stdin.isTTY)
+            ? (info) => promptSudoRetry(info)
             : undefined,
       onStepStart: live ? progress.onStepStart : undefined,
       onStepDone: live ? progress.onStepDone : undefined,
@@ -1114,6 +1203,12 @@ async function main(): Promise<number> {
       console.error((err as Error).stack);
     }
     return EXIT_CODES.migrationFailed;
+  } finally {
+    // The IPC channel stays open through the run so mid-run prompts (the
+    // pre-migration confirm, the install-cadet sudo retry) can reach the
+    // attached launcher; the run is over — close it or the process never
+    // exits.
+    if (parsed.internalRun && process.connected) process.disconnect?.();
   }
 }
 
