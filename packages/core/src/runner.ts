@@ -351,7 +351,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     let reVersionReason: string | undefined;
     if (!reBinAvailable) {
       start("install-cadet");
-      const reInstall = await installCadetCli(ops, 1);
+      const reInstall = await installCadetCli(ops, 1, { retryAsSudo: options.retryInstallAsSudo });
       done(reInstall);
       reBinAvailable = reInstall.data?.["binAvailable"] === true;
     }
@@ -561,7 +561,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //    before). Its version is captured right after the install.
   const assistantCount = (await readLockfileAssistants()).length;
   start("install-cadet");
-  const install = await installCadetCli(ops, assistantCount);
+  const install = await installCadetCli(ops, assistantCount, { retryAsSudo: options.retryInstallAsSudo });
   done(install);
   const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
   const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;

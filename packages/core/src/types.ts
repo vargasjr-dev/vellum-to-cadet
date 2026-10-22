@@ -141,6 +141,13 @@ export interface MigrateOptions {
   confirm?: (info: ConfirmMigrationInfo) => Promise<boolean>;
   /** Test seam: override process discovery and the stop command. */
   processOps?: ProcessOps;
+  /**
+   * Interactive hook: offered when the post-migration cadet CLI install dies
+   * on npm permissions. Implemented by the launcher (IPC relay in detached
+   * runs, direct prompt in foreground); absent in non-interactive runs, where
+   * the failure warning keeps the manual fix instead.
+   */
+  retryInstallAsSudo?: SudoRetryAsk;
   /** Test seam: skip filesystem checks that need privileged statfs. */
   skipDiskSpaceCheck?: boolean;
   /** Test seam: grace period after `vellum sleep` before re-discovery. */
@@ -163,6 +170,14 @@ export interface MigrateOptions {
   /** Test seam: override the npm global-root probes preflight's install heads-up reads. */
   npmOps?: Pick<ProcessOps, "npmGlobalRoot" | "npmGlobalRootWritable">;
 }
+
+/**
+ * The install-cadet sudo retry: the step reports the permission wall and
+ * asks; the asker (the attached launcher, via IPC) collects the answer and,
+ * on acceptance, runs the sudo install on the user's own terminal — sudo's
+ * password prompt needs the TTY the detached worker doesn't have.
+ */
+export type SudoRetryAsk = (info: { npmRoot: string | null }) => Promise<{ ok: boolean; detail?: string }>;
 
 /**
  * How the runner talks to the outside world about vellum processes. The

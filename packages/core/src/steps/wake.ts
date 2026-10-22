@@ -1,4 +1,4 @@
-import type { ProcessOps, StepResult } from "../types.js";
+import type { ProcessOps, StepResult, SudoRetryAsk } from "../types.js";
 
 /**
  * Post-migration setup: the migration moved the user's assistants to the
@@ -19,7 +19,11 @@ export function cadetInstallFixCommands(): string {
     : "`sudo npm install -g mycadet` (or switch npm to a version manager like nvm, which never needs sudo)";
 }
 
-export async function installCadetCli(ops: ProcessOps, assistantCount: number): Promise<StepResult> {
+export async function installCadetCli(
+  ops: ProcessOps,
+  assistantCount: number,
+  opts?: { retryAsSudo?: SudoRetryAsk },
+): Promise<StepResult> {
   if (assistantCount === 0) {
     return {
       step: "install-cadet",
@@ -80,8 +84,60 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
       .filter((line) => line.trim().length > 0 && !line.startsWith("Command failed:"))
       .join(" — ");
     const npmRoot = await ops.npmGlobalRoot();
+    const permission = /EACCES|EPERM|permission denied/i.test(haystack);
+
+    // The permission wall is the one failure we can offer to fix: the ask
+    // reports the wall itself, and an accepted retry runs the sudo install on
+    // the user's own terminal — the detached worker has no TTY for sudo's
+    // password prompt, so the launcher (which does) runs it.
+    if (permission && opts?.retryAsSudo) {
+      const outcome = await opts.retryAsSudo({ npmRoot });
+      if (outcome.ok) {
+        const binAvailable = await ops.cadetBinAvailable();
+        if (!binAvailable) {
+          return {
+            step: "install-cadet",
+            status: "completed",
+            summary: "mycadet installed via sudo — no `cadet` binary on PATH yet, wake skipped (see ⚠)",
+            issues: [
+              {
+                severity: "warning",
+                message:
+                  "the mycadet package is installed (`npm ls -g mycadet` shows it) but it ships no `cadet` bin yet — wake the assistants manually once the cadet CLI ships a binary",
+              },
+            ],
+            data: { installed: true, binAvailable: false },
+          };
+        }
+        const { version, detail: versionDetail } = await ops.cadetVersion();
+        return {
+          step: "install-cadet",
+          status: "completed",
+          summary: `cadet installed globally via sudo${version ? ` (${version})` : ""}`,
+          data: {
+            installed: true,
+            binAvailable: true,
+            version,
+            ...(version === null && versionDetail ? { versionUnavailableReason: versionDetail } : {}),
+          },
+        };
+      }
+      return {
+        step: "install-cadet",
+        status: "completed",
+        summary: "cadet CLI install failed — wake skipped (see ⚠)",
+        issues: [
+          {
+            severity: "warning",
+            message: `npm could not install mycadet into its global directory${npmRoot ? ` (${npmRoot})` : ""} — permission denied (${outcome.detail ?? "retry declined"}). The manual fix: ${cadetInstallFixCommands()}, then \`cadet wake --all\`.`,
+          },
+        ],
+        data: { installed: false },
+      };
+    }
+
     let message: string;
-    if (/EACCES|EPERM|permission denied/i.test(haystack)) {
+    if (permission) {
       message = `npm could not install mycadet into its global directory${npmRoot ? ` (${npmRoot})` : ""} — permission denied. Your assistants are migrated; finish the setup manually: ${cadetInstallFixCommands()}, then run \`cadet wake --all\` to start them.`;
     } else if (execErr.code === "ENOENT" || /spawn .*ENOENT/i.test(execErr.message)) {
       message = "npm was not found on PATH — install Node.js/npm, then run `npm install -g mycadet` and `cadet wake --all` to start your migrated assistants.";
