@@ -9,6 +9,7 @@ import { promises as fs } from "node:fs";
 import { pathExists } from "./detect.js";
 import { vellumVolumeNames } from "./migrate-docker-volumes.js";
 import { formatBytes } from "../fs-utils.js";
+import { cadetInstallFixCommands } from "./wake.js";
 import type { DetectInfo, ProcessOps, StepIssue, StepResult } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +41,7 @@ export async function preflight(
     skipDiskSpaceCheck?: boolean;
     dryRun?: boolean;
     dockerOps?: Pick<ProcessOps, "dockerAvailable" | "dockerVolumeSize" | "dockerDiskFree">;
+    npmOps?: Pick<ProcessOps, "npmGlobalRoot" | "npmGlobalRootWritable">;
   },
 ): Promise<StepResult> {
   const issues: StepIssue[] = [];
@@ -184,6 +186,21 @@ export async function preflight(
       severity: "error",
       message: `cannot write to ${probe}`,
     });
+  }
+
+  // Early heads-up for the post-migration convenience install (field report:
+  // an Ubuntu user met npm's root-owned global prefix only at the very end of
+  // a long migration). The migration itself never needs a global install, so
+  // this warns — it does not fail.
+  if (detect.assistantHandles.length > 0) {
+    const npmRoot = (await opts?.npmOps?.npmGlobalRoot?.()) ?? null;
+    const npmWritable = (await opts?.npmOps?.npmGlobalRootWritable?.()) ?? null;
+    if (npmRoot !== null && npmWritable === false) {
+      issues.push({
+        severity: "warning",
+        message: `npm cannot write its global directory (${npmRoot}) — the post-migration \`cadet\` CLI install will fail. Afterwards run ${cadetInstallFixCommands()}, then \`cadet wake --all\`.`,
+      });
+    }
   }
 
   const errors = issues.filter((i) => i.severity === "error");

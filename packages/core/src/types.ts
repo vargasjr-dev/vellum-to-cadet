@@ -160,6 +160,8 @@ export interface MigrateOptions {
     ProcessOps,
     "dockerVolumeToDir" | "dockerDirToVolume" | "dockerAvailable" | "dockerVolumeSize" | "dockerDiskFree"
   >;
+  /** Test seam: override the npm global-root probes preflight's install heads-up reads. */
+  npmOps?: Pick<ProcessOps, "npmGlobalRoot" | "npmGlobalRootWritable">;
 }
 
 /**
@@ -184,7 +186,7 @@ export interface ProcessOps {
    * about — a cadet root can have several running at once.
    */
   cadetSleep(): Promise<void>;
-  /** Install the cadet CLI globally (`npm install -g cadet`). */
+  /** Install the cadet CLI globally (`npm install -g mycadet` — the package is `mycadet`; `cadet` is its bin, and an unrelated npm squatter). */
   installCadet(): Promise<void>;
   /** Wake every cadet assistant (`cadet wake --all`). */
   cadetWakeAll(): Promise<void>;
@@ -262,6 +264,14 @@ export interface ProcessOps {
   dockerDiskFree?(image?: string): Promise<number | undefined>;
   /** The npm global node_modules dir (`npm root -g`), or null when npm is unavailable. */
   npmGlobalRoot(): Promise<string | null>;
+  /**
+   * Whether npm's global install destination is writable by the current user,
+   * or null when that cannot be determined (npm absent). Lets preflight warn
+   * about a root-owned system-npm prefix BEFORE the migration instead of a
+   * dead-end failure warning at the very end (field report: an Ubuntu user
+   * met the permission wall only after a full run).
+   */
+  npmGlobalRootWritable?(): Promise<boolean | null>;
 }
 
 /**

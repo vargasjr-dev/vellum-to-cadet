@@ -242,6 +242,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     skipDiskSpaceCheck: options.skipDiskSpaceCheck,
     dryRun: options.dryRun,
     dockerOps: options.dockerOps ?? ops,
+    npmOps: options.npmOps ?? ops,
   });
   done(pre);
   if (pre.status === "failed") {

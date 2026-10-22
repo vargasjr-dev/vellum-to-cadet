@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fsPromises } from "node:fs";
+import * as path from "node:path";
 import { Transform } from "node:stream";
 import { promisify } from "node:util";
 
@@ -267,6 +268,17 @@ export function volumeTarExtractArgs(image: string, owner?: { uid: number; gid: 
  * able to run from a directory whose path merely contains "vellum" (a dev
  * checkout, a tmpdir) without counting the shell or editor that launched it.
  */
+/** `npm root -g`, or null when npm is unavailable (shared by the ops seam and the writability probe). */
+async function npmRootG(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("npm", ["root", "-g"]);
+    const root = stdout.trim();
+    return root.length > 0 ? root : null;
+  } catch {
+    return null;
+  }
+}
+
 export const defaultProcessOps: ProcessOps = {
   async find(patterns) {
     return defaultFind(patterns);
@@ -478,12 +490,28 @@ export const defaultProcessOps: ProcessOps = {
   },
 
   async npmGlobalRoot() {
-    try {
-      const { stdout } = await execFileAsync("npm", ["root", "-g"]);
-      const root = stdout.trim();
-      return root.length > 0 ? root : null;
-    } catch {
-      return null;
+    return npmRootG();
+  },
+
+  async npmGlobalRootWritable() {
+    // `npm root -g` may name a directory that does not exist yet (npm
+    // creates it on first global install), so the probe climbs to the
+    // nearest existing ancestor — the directory that would receive the
+    // mkdir, and where npm's EACCES actually fires.
+    const root = await npmRootG();
+    if (!root) return null;
+    let dir = root;
+    for (;;) {
+      try {
+        await fsPromises.access(dir, fsPromises.constants.W_OK);
+        return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT" && dir !== path.dirname(dir)) {
+          dir = path.dirname(dir);
+          continue;
+        }
+        return false;
+      }
     }
   },
 };

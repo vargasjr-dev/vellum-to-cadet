@@ -8,6 +8,17 @@ import type { ProcessOps, StepResult } from "../types.js";
  * fails the completed migration.
  */
 
+/**
+ * The actionable fix fragment for an npm global install blocked by
+ * permissions — shared by the preflight heads-up (before the migration)
+ * and the install-cadet failure warning (at the end of one).
+ */
+export function cadetInstallFixCommands(): string {
+  return process.platform === "win32"
+    ? "`npm install -g mycadet` from an elevated terminal"
+    : "`sudo npm install -g mycadet` (or switch npm to a version manager like nvm, which never needs sudo)";
+}
+
 export async function installCadetCli(ops: ProcessOps, assistantCount: number): Promise<StepResult> {
   if (assistantCount === 0) {
     return {
@@ -54,16 +65,34 @@ export async function installCadetCli(ops: ProcessOps, assistantCount: number): 
       },
     };
   } catch (err) {
+    // The node exec error's message is "Command failed: npm install -g
+    // mycadet" (with the stderr appended) — npm's actual diagnosis lives on
+    // err.stderr. Surface the REASON and the fix, not the command echo
+    // (field report: an Ubuntu user got the bare command line and no idea
+    // the migration itself had succeeded).
+    const execErr = err as Error & { stderr?: string | Buffer; code?: string | number };
+    const stderr = typeof execErr.stderr === "string" ? execErr.stderr : execErr.stderr?.toString();
+    const haystack = `${stderr ?? ""} ${execErr.message}`;
+    const detail = [stderr, execErr.message]
+      .find((s) => s && s.trim().length > 0)
+      ?.trim()
+      .split("\n")
+      .filter((line) => line.trim().length > 0 && !line.startsWith("Command failed:"))
+      .join(" — ");
+    const npmRoot = await ops.npmGlobalRoot();
+    let message: string;
+    if (/EACCES|EPERM|permission denied/i.test(haystack)) {
+      message = `npm could not install mycadet into its global directory${npmRoot ? ` (${npmRoot})` : ""} — permission denied. Your assistants are migrated; finish the setup manually: ${cadetInstallFixCommands()}, then run \`cadet wake --all\` to start them.`;
+    } else if (execErr.code === "ENOENT" || /spawn .*ENOENT/i.test(execErr.message)) {
+      message = "npm was not found on PATH — install Node.js/npm, then run `npm install -g mycadet` and `cadet wake --all` to start your migrated assistants.";
+    } else {
+      message = `npm install -g mycadet failed: ${detail ?? "unknown reason (re-run with --verbose)"}`;
+    }
     return {
       step: "install-cadet",
       status: "completed",
       summary: "cadet CLI install failed — wake skipped (see ⚠)",
-      issues: [
-        {
-          severity: "warning",
-          message: `npm install -g mycadet failed: ${(err as Error).message.split("\n")[0]}`,
-        },
-      ],
+      issues: [{ severity: "warning", message }],
       data: { installed: false },
     };
   }
