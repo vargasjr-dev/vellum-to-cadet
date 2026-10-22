@@ -126,6 +126,146 @@ describe("wake steps: install-cadet / wake-assistants", () => {
     expect(woken).toBe(0);
   });
 
+  test("an EACCES from a root-owned npm prefix warns with the sudo fix, not the command echo", async () => {
+    // Field report (Ubuntu): `npm install -g mycadet` failed writing the
+    // root-owned /usr/local/lib/node_modules; the old catch printed
+    // "npm install -g mycadet failed: Command failed: npm install -g
+    // mycadet" — no reason, no next step.
+    const ops = baseOps({
+      async installCadet() {
+        const err = new Error("Command failed: npm install -g mycadet") as Error & { stderr?: string };
+        err.stderr = [
+          "npm error code EACCES",
+          "npm error syscall mkdir",
+          "npm error path /usr/local/lib/node_modules",
+          "npm error errno -13",
+          "npm error",
+          "npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules'",
+        ].join("\n");
+        throw err;
+      },
+      async npmGlobalRoot() {
+        return "/usr/local/lib/node_modules";
+      },
+    });
+
+    const install = await installCadetCli(ops, 2);
+    expect(install.status).toBe("completed");
+    expect(install.data?.["installed"]).toBe(false);
+    const warning = install.issues?.[0];
+    expect(warning?.severity).toBe("warning");
+    expect(warning?.message).toContain("(/usr/local/lib/node_modules)");
+    expect(warning?.message).toContain("permission denied");
+    expect(warning?.message).toContain("sudo npm install -g mycadet");
+    expect(warning?.message).toContain("cadet wake --all");
+    expect(warning?.message).not.toContain("Command failed:");
+  });
+
+  test("a missing npm binary gets its own actionable message", async () => {
+    const ops = baseOps({
+      installCadet() {
+        const err = new Error("spawn npm ENOENT") as Error & { code?: string };
+        err.code = "ENOENT";
+        throw err;
+      },
+    });
+
+    const install = await installCadetCli(ops, 1);
+    const warning = install.issues?.[0];
+    expect(warning?.severity).toBe("warning");
+    expect(warning?.message).toContain("npm was not found on PATH");
+    expect(warning?.message).toContain("cadet wake --all");
+  });
+
+  test("a generic npm failure surfaces the registry's stderr detail instead of the command echo", async () => {
+    const ops = baseOps({
+      async installCadet() {
+        const err = new Error("Command failed: npm install -g mycadet") as Error & { stderr?: string };
+        err.stderr = [
+          "npm error code ENOTFOUND",
+          "npm error network request to https://registry.npmjs.org/mycadet failed",
+        ].join("\n");
+        throw err;
+      },
+    });
+
+    const install = await installCadetCli(ops, 1);
+    const warning = install.issues?.[0];
+    expect(warning?.message).toContain("npm install -g mycadet failed:");
+    expect(warning?.message).toContain("ENOTFOUND");
+    expect(warning?.message).not.toContain("Command failed:");
+  });
+
+  test("an EACCES from a root-owned npm prefix warns with the sudo fix, not the command echo", async () => {
+    // Field report (Ubuntu): `npm install -g mycadet` failed writing the
+    // root-owned /usr/local/lib/node_modules; the old catch printed
+    // "npm install -g mycadet failed: Command failed: npm install -g
+    // mycadet" — no reason, no next step.
+    const ops = baseOps({
+      async installCadet() {
+        const err = new Error("Command failed: npm install -g mycadet") as Error & { stderr?: string };
+        err.stderr = [
+          "npm error code EACCES",
+          "npm error syscall mkdir",
+          "npm error path /usr/local/lib/node_modules",
+          "npm error errno -13",
+          "npm error",
+          "npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules'",
+        ].join("\n");
+        throw err;
+      },
+      async npmGlobalRoot() {
+        return "/usr/local/lib/node_modules";
+      },
+    });
+
+    const install = await installCadetCli(ops, 2);
+    expect(install.status).toBe("completed");
+    expect(install.data?.["installed"]).toBe(false);
+    const warning = install.issues?.[0];
+    expect(warning?.severity).toBe("warning");
+    expect(warning?.message).toContain("(/usr/local/lib/node_modules)");
+    expect(warning?.message).toContain("permission denied");
+    expect(warning?.message).toContain("sudo npm install -g mycadet");
+    expect(warning?.message).toContain("cadet wake --all");
+    expect(warning?.message).not.toContain("Command failed:");
+  });
+
+  test("a missing npm binary gets its own actionable message", async () => {
+    const ops = baseOps({
+      installCadet() {
+        const err = new Error("spawn npm ENOENT") as Error & { code?: string };
+        err.code = "ENOENT";
+        throw err;
+      },
+    });
+
+    const install = await installCadetCli(ops, 1);
+    const warning = install.issues?.[0];
+    expect(warning?.severity).toBe("warning");
+    expect(warning?.message).toContain("npm was not found on PATH");
+    expect(warning?.message).toContain("cadet wake --all");
+  });
+
+  test("a generic npm failure surfaces the registry's stderr detail instead of the command echo", async () => {
+    const ops = baseOps({
+      async installCadet() {
+        const err = new Error("Command failed: npm install -g mycadet") as Error & { stderr?: string };
+        err.stderr = [
+          "npm error code ENOTFOUND",
+          "npm error network request to https://registry.npmjs.org/mycadet failed",
+        ].join("\n");
+        throw err;
+      },
+    });
+
+    const install = await installCadetCli(ops, 1);
+    const warning = install.issues?.[0];
+    expect(warning?.message).toContain("npm install -g mycadet failed:");
+    expect(warning?.message).toContain("ENOTFOUND");
+    expect(warning?.message).not.toContain("Command failed:");
+  });
+
   test("a failed wake warns and points at the manual command", async () => {
     const ops = baseOps({
       async cadetWakeAll() {
