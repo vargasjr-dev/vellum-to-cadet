@@ -22,6 +22,11 @@ import { migrateLockfile } from "./steps/migrate-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
 import {
+  cloudEmailFindings,
+  detectCloudEmailStep,
+  provisionCloudDomainsStep,
+} from "./steps/cloud-email.js";
+import {
   fetchDockerVolumes,
   loadDockerVolumes,
   vellumVolumeNames,
@@ -321,6 +326,15 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     done(await migrateAssistantDb(reValueRoots));
     start("migrate-gateway-db");
     done(await migrateGatewayDb(reValueRoots));
+    // Offline cloud-email detection (no vellum daemon): decrypt the CES
+    // store directly for the assistant api key, then look up the managed
+    // domain + email address on the vellum platform — before the scrub
+    // deletes the key from the working copy (the original vellum root
+    // keeps its own copy either way, so a re-run re-detects).
+    start("detect-cloud-email");
+    const reCloudEmail = done(
+      await detectCloudEmailStep({ roots: reValueRoots, vellumRoot: detect.vellumRoot }),
+    );
     start("migrate-credentials");
     const reCredentials = await migrateCredentialsStep(reValueRoots);
     done(reCredentials);
@@ -417,6 +431,18 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     const reAssistantCount = (await readLockfileAssistants()).length;
     start("wake-assistants");
     done(await wakeAssistants(ops, reAssistantCount, reBinAvailable));
+    // Provision the detected vellum domain + email on the cadet cloud —
+    // only once a cadet account exists (`cadet login` above) and the
+    // migrated assistants have registered with it (the wake). No account
+    // → the step reports pending and the final summary carries the
+    // follow-up.
+    start("provision-cloud-domains");
+    done(
+      await provisionCloudDomainsStep({
+        findings: cloudEmailFindings(reCloudEmail),
+        envSuffix: envSuffixFor(detect.vellumRoot),
+      }),
+    );
     return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
   }
 
@@ -523,6 +549,17 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //     request/delivery channel columns).
   start("migrate-gateway-db");
   done(await migrateGatewayDb(valueRoots));
+
+  // 3.8.5 Offline cloud-email detection (no vellum daemon): decrypt the
+  //     CES store directly (the CES token = store.key, the CES file =
+  //     keys.enc) for the assistant api key, then look the managed domain
+  //     + email address up on the vellum platform — the last read before
+  //     the scrub deletes the key from the working copy (the original
+  //     vellum root keeps its own copy, so a re-run re-detects).
+  start("detect-cloud-email");
+  const cloudEmail = done(
+    await detectCloudEmailStep({ roots: valueRoots, vellumRoot: detect.vellumRoot }),
+  );
 
   // 3.9 Remove the legacy vellum platform credentials from every working
   //     root — the cloud api key and webhook secret can't be kept; `cadet
@@ -648,6 +685,19 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   start("wake-assistants");
   done(await wakeAssistants(ops, assistantCount, install.data?.["binAvailable"] === true));
 
+  // Provision the detected vellum domain + email on the cadet cloud — if
+  // and only after they create a cadet account (`cadet login` above) and
+  // the migrated assistants have registered with it (the wake). No
+  // account → the step reports pending and the final summary carries the
+  // follow-up.
+  start("provision-cloud-domains");
+  done(
+    await provisionCloudDomainsStep({
+      findings: cloudEmailFindings(cloudEmail),
+      envSuffix: envSuffixFor(detect.vellumRoot),
+    }),
+  );
+
   return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.ok);
 }
 
@@ -711,6 +761,18 @@ function cutoverNextSteps(steps: StepResult[]): string[] | undefined {
   return warnings;
 }
 
+/** The provision-cloud-domains pending note — no cadet account at run end. */
+function provisionPendingNextSteps(steps: StepResult[]): string[] {
+  const pending = steps.some(
+    (s) => s.step === "provision-cloud-domains" && s.data?.["pending"] === true,
+  );
+  return pending
+    ? [
+        "No Cadet account yet: run `cadet login`, then re-run the migrator — it registers your vellum domain and email address on Cadet.",
+      ]
+    : [];
+}
+
 function finish(
   detect: DetectInfo,
   steps: StepResult[],
@@ -720,6 +782,7 @@ function finish(
   exitCode: MigrationReport["exitCode"],
 ): MigrationReport {
   const finishedAt = new Date().toISOString();
+  const nextSteps = [...(cutoverNextSteps(steps) ?? []), ...provisionPendingNextSteps(steps)];
   return {
     ok: exitCode === EXIT_CODES.ok,
     exitCode,
@@ -730,7 +793,7 @@ function finish(
     startedAt,
     finishedAt,
     durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-    nextSteps: cutoverNextSteps(steps),
+    nextSteps: nextSteps.length > 0 ? nextSteps : undefined,
   };
 }
 
