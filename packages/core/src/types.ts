@@ -203,6 +203,17 @@ export interface ProcessOps {
   cadetSleep(): Promise<void>;
   /** Install the cadet CLI globally (`npm install -g mycadet` — the package is `mycadet`; `cadet` is its bin, and an unrelated npm squatter). */
   installCadet(): Promise<void>;
+  /**
+   * bun resolves on PATH? Optional — when absent, the install-cadet step
+   * treats bun as absent and uses the npm arm. The real ops probe
+   * `bun --version`.
+   */
+  bunAvailable?(): Promise<boolean>;
+  /**
+   * The bun arm of the global cadet install (`bun install -g mycadet`):
+   * bun's global dir is user-owned, so it never needs sudo.
+   */
+  bunInstallCadet?(): Promise<void>;
   /** Wake every cadet assistant (`cadet wake --all`). */
   cadetWakeAll(): Promise<void>;
   /**

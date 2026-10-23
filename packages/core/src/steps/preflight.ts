@@ -198,7 +198,7 @@ export async function preflight(
     if (npmRoot !== null && npmWritable === false) {
       issues.push({
         severity: "warning",
-        message: `npm cannot write its global directory (${npmRoot}) — the post-migration \`cadet\` CLI install will fail. Afterwards run ${cadetInstallFixCommands()}, then \`cadet wake --all\`.`,
+        message: `npm cannot write its global directory (${npmRoot}) — the post-migration \`cadet\` CLI install may fail (bun installs are unaffected). Afterwards run ${cadetInstallFixCommands()}, then \`cadet wake --all\`.`,
       });
     }
   }

@@ -321,6 +321,23 @@ export const defaultProcessOps: ProcessOps = {
     await execFileAsync("npm", ["install", "-g", "mycadet"]);
   },
 
+  async bunAvailable() {
+    try {
+      await execFileAsync("bun", ["--version"]);
+      return true;
+    } catch {
+      // No bun on PATH (or it would not run) — the npm arm is the fallback.
+      return false;
+    }
+  },
+
+  async bunInstallCadet() {
+    // bun's global dir is user-owned (~/.bun) — never needs sudo, unlike
+    // `sudo npm install -g`, which installs into root's prefix where a
+    // bun-managed user's profile has no bun.
+    await execFileAsync("bun", ["install", "-g", "mycadet"]);
+  },
+
   async cadetWakeAll() {
     await execFileAsync("cadet", ["wake", "--all"]);
   },

@@ -15,8 +15,8 @@ import type { ProcessOps, StepResult, SudoRetryAsk } from "../types.js";
  */
 export function cadetInstallFixCommands(): string {
   return process.platform === "win32"
-    ? "`npm install -g mycadet` from an elevated terminal"
-    : "`sudo npm install -g mycadet` (or switch npm to a version manager like nvm, which never needs sudo)";
+    ? "`bun install -g mycadet` (if you use bun), or `npm install -g mycadet` from an elevated terminal"
+    : "`bun install -g mycadet` (bun users: no sudo needed), or `sudo npm install -g mycadet`, or switch npm to a version manager like nvm (never needs sudo)";
 }
 
 export async function installCadetCli(
@@ -32,7 +32,21 @@ export async function installCadetCli(
     };
   }
   try {
-    await ops.installCadet();
+    // bun first when it resolves: its global dir is user-owned (~/.bun), so
+    // bun-managed machines never reach npm's permission wall, and the sudo
+    // retry is useless there (root's profile has no bun — field report:
+    // `bun install -g mycadet` was the path that worked). A bun failure
+    // falls back to the npm arm, which keeps the EACCES classify + sudo
+    // retry below.
+    if (await ops.bunAvailable?.()) {
+      try {
+        await ops.bunInstallCadet?.();
+      } catch {
+        await ops.installCadet();
+      }
+    } else {
+      await ops.installCadet();
+    }
     // The install command exiting 0 is not the claim — the binary being
     // resolvable is. v0.0.9 "installed" an unrelated npm package that
     // happened to own the `cadet` name and reported success while
@@ -140,7 +154,7 @@ export async function installCadetCli(
     if (permission) {
       message = `npm could not install mycadet into its global directory${npmRoot ? ` (${npmRoot})` : ""} — permission denied. Your assistants are migrated; finish the setup manually: ${cadetInstallFixCommands()}, then run \`cadet wake --all\` to start them.`;
     } else if (execErr.code === "ENOENT" || /spawn .*ENOENT/i.test(execErr.message)) {
-      message = "npm was not found on PATH — install Node.js/npm, then run `npm install -g mycadet` and `cadet wake --all` to start your migrated assistants.";
+      message = "npm was not found on PATH (and bun is absent too) — install bun or Node.js, then run `bun install -g mycadet` (or `npm install -g mycadet`) and `cadet wake --all` to start your migrated assistants.";
     } else {
       message = `npm install -g mycadet failed: ${detail ?? "unknown reason (re-run with --verbose)"}`;
     }
