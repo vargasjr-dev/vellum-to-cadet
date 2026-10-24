@@ -1821,7 +1821,16 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       expect(entry.assistantId).toBe("grand-ram");
       expect(entry.name).toBe("grand-ram");
       expect("species" in entry).toBe(false);
-      expect(entry.runtimeUrl).toBe("http://127.0.0.1:7830");
+      // The de-clash: fresh ports, never the vellum ones the running vellum
+      // install still holds — and the runtime url follows the gateway port.
+      expect(entry.resources.gatewayPort).not.toBe(7830);
+      expect(entry.resources.daemonPort).not.toBe(7821);
+      expect(entry.runtimeUrl).toBe(`http://127.0.0.1:${entry.resources.gatewayPort}`);
+      const declashIssue = lockStep?.issues?.find((i) =>
+        i.message.includes("allocated fresh ports"),
+      );
+      expect(declashIssue?.severity).toBe("info");
+      expect(lockStep?.summary).toContain("allocated fresh ports");
       expect(entry.resources.instanceDir).toBe(path.join(cadetRoot, "assistants", "grand-ram"));
       expect(entry.baseDataDir).toBe(path.join(cadetRoot, "assistants", "grand-ram"));
       expect("organizationId" in entry).toBe(false);
@@ -1882,6 +1891,80 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       expect(logins).toBe(1);
       const loginStep = report.steps.find((s) => s.step === "cadet-login");
       expect(loginStep?.status).toBe("completed");
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdgDataHome;
+      if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+    }
+  });
+
+  test("the port de-clash: fresh ports on migrate, adopted on re-run", async () => {
+    const { root, home } = await buildMinimal();
+    const prevHome = process.env.HOME;
+    const prevXdgDataHome = process.env.XDG_DATA_HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    try {
+      await fs.writeFile(
+        path.join(home, ".vellum.lock.json"),
+        JSON.stringify(
+          {
+            assistants: [
+              {
+                assistantId: "velly",
+                cloud: "local",
+                runtimeUrl: "http://MacBook-Pro-8.local:7830",
+                resources: {
+                  instanceDir: path.join(root),
+                  gatewayPort: 7830,
+                  daemonPort: 7821,
+                },
+              },
+            ],
+            activeAssistant: "velly",
+          },
+          null,
+          2,
+        ),
+      );
+
+      const first = await migrate({ vellumRoot: root, processOps: noopOps });
+      expect(first.ok).toBe(true);
+      const lockPath = path.join(home, ".config", "cadet", "lockfile.json");
+      const firstRaw = JSON.parse(await fs.readFile(lockPath, "utf8"));
+      const firstEntry = firstRaw.assistants[0];
+      // Fresh ports: the vellum install (possibly still running) keeps its
+      // port space, and the runtime url follows the gateway port.
+      expect(firstEntry.resources.gatewayPort).not.toBe(7830);
+      expect(firstEntry.resources.daemonPort).not.toBe(7821);
+      expect(firstEntry.runtimeUrl).toBe(
+        `http://127.0.0.1:${firstEntry.resources.gatewayPort}`,
+      );
+      const lockStep = first.steps.find((s) => s.step === "migrate-lockfile");
+      expect(lockStep?.summary).toContain("allocated fresh ports");
+      expect(
+        lockStep?.issues?.some(
+          (i: { severity: string; message: string }) =>
+            i.severity === "info" && i.message.includes("velly: allocated fresh ports"),
+        ),
+      ).toBe(true);
+
+      const second = await migrate({ vellumRoot: root, processOps: noopOps });
+      expect(second.ok).toBe(true);
+      // The re-run adopts the first run's ports — healing the lockfile never
+      // churns the ports of an already-migrated (possibly awake) assistant.
+      const secondRaw = JSON.parse(await fs.readFile(lockPath, "utf8"));
+      const secondEntry = secondRaw.assistants[0];
+      expect(secondEntry.resources.gatewayPort).toBe(firstEntry.resources.gatewayPort);
+      expect(secondEntry.resources.daemonPort).toBe(firstEntry.resources.daemonPort);
+      expect(secondEntry.runtimeUrl).toBe(firstEntry.runtimeUrl);
+      const secondLockStep = second.steps.find((s) => s.step === "migrate-lockfile");
+      expect(secondLockStep?.summary).toContain("kept existing ports");
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
