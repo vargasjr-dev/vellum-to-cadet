@@ -7,6 +7,11 @@ import {
   transformAssistantEntry,
 } from "../entry-transform.js";
 import { readRawVellumLockfile } from "../discover.js";
+import {
+  adoptExistingPorts,
+  declashEntryPorts,
+  rewriteRuntimeUrlPort,
+} from "../port-declash.js";
 import type { StepIssue, StepResult } from "../types.js";
 
 /**
@@ -17,6 +22,15 @@ import type { StepIssue, StepResult } from "../types.js";
  * species removed, runtime urls loopback, data dirs repointed, vellum cloud
  * identity stripped). Without this the migrated install has no lockfile at
  * all: `cadet ps`/`wake --all` see nothing (v0.0.9 run feedback).
+ *
+ * Ports are the one raw-preserving ride-through the migration UNDONE: a
+ * vellum entry's recorded ports were the ones the vellum assistant bound,
+ * and a user keeping the vellum install (running it alongside cadet, or
+ * letting it auto-start after a reboot) had two assistants competing for
+ * the same gateway/daemon ports. Every converted assistant therefore gets
+ * FRESH ports (port-declash.ts) — the vellum port space is left to vellum.
+ * Re-runs adopt an existing same-id entry's ports instead, so healing the
+ * lockfile never churns the ports of an already-migrated assistant.
  *
  * Legacy home-level cadet lockfile names cadet itself no longer reads are
  * also moved into the canonical config-dir location so an install that
@@ -69,6 +83,12 @@ export interface MigrateLockfileOptions {
    * a version the old parser couldn't read, with no reason shown).
    */
   cadetVersionUnavailableReason?: string;
+  /**
+   * Bind probe for the port de-clash; a port is allocatable when this
+   * resolves true. Tests inject a deterministic probe — production uses
+   * the real 0.0.0.0 bind (port-declash.ts).
+   */
+  isPortFree?: (port: number) => Promise<boolean>;
 }
 
 /**
@@ -112,12 +132,28 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
             .map((e) => e.assistantId)
             .filter((id): id is string => typeof id === "string" && id.length > 0),
         );
-        const merged = [
-          ...destAssistants.filter(
-            (e) => !(typeof e.assistantId === "string" && convertedIds.has(e.assistantId)),
+        const survivors = destAssistants.filter(
+          (e) => !(
+            typeof e.assistantId === "string" && convertedIds.has(e.assistantId)
           ),
-          ...converted.assistants,
-        ];
+        );
+        const existingById = new Map(
+          destAssistants
+            .filter(
+              (e): e is Record<string, unknown> & { assistantId: string } =>
+                typeof e.assistantId === "string" && convertedIds.has(e.assistantId),
+            )
+            .map((e) => [e.assistantId, e]),
+        );
+        const declashSummary = await declashConvertedAssistants(
+          converted.assistants,
+          survivors,
+          existingById,
+          opts,
+          issues,
+        );
+        if (declashSummary) parts.push(declashSummary);
+        const merged = [...survivors, ...converted.assistants];
         const lockfile: Record<string, unknown> = { ...destRaw, assistants: merged };
         // Active assistant: the cadet lockfile's choice stands; only a
         // lockfile without one inherits the vellum pick (brand prefix
@@ -156,6 +192,14 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
     if (converted.assistantCount === 0) {
       parts.push(`${source.path} records no assistants — nothing to convert`);
     } else {
+      const declashSummary = await declashConvertedAssistants(
+        converted.assistants,
+        [],
+        null,
+        opts,
+        issues,
+      );
+      if (declashSummary) parts.push(declashSummary);
       try {
         await fs.mkdir(destDir, { recursive: true });
         await fs.writeFile(
@@ -199,6 +243,130 @@ export async function migrateLockfile(opts: MigrateLockfileOptions): Promise<Ste
 
   const summary = parts.filter((p) => p.length > 0).join("; ");
   return { step: "migrate-lockfile", status: "completed", summary, issues, data };
+}
+
+/** The `resources` port fields the port de-clash reasons about. */
+const RESOURCE_PORT_FIELDS = [
+  "daemonPort",
+  "gatewayPort",
+  "qdrantPort",
+  "cesPort",
+] as const;
+
+/** The numeric resource ports an entry records — the de-clash's claim book. */
+function recordedResourcePorts(entry: Record<string, unknown>): number[] {
+  const resources = entry.resources;
+  if (typeof resources !== "object" || resources === null || Array.isArray(resources)) {
+    return [];
+  }
+  const ports: number[] = [];
+  for (const field of RESOURCE_PORT_FIELDS) {
+    const value = (resources as Record<string, unknown>)[field];
+    if (typeof value === "number") ports.push(value);
+  }
+  return ports;
+}
+
+function describePortMoves(moves: { field: string; from: number; to: number }[]): string {
+  return moves
+    .map((m) => `${m.field.replace(/Port$/, "")} ${m.from} → ${m.to}`)
+    .join(", ");
+}
+
+/**
+ * The port de-clash pass over the converted entries: every entry new to the
+ * cadet lockfile gets FRESH ports (the vellum port space is left to vellum —
+ * a user keeping the vellum install running alongside cadet must not have
+ * the two competing for the same gateway/daemon ports), while an entry the
+ * cadet lockfile already records (a re-run healing the lockfile) ADOPTS its
+ * existing ports — an already-migrated assistant, possibly awake, never has
+ * its ports churned out from under it. Mutates the entries in place; the
+ * callers write them right after. A port-walk exhaustion (100-port window
+ * gone) warns and leaves that entry's remaining ports as recorded — cadet's
+ * wake reports the conflict when it actually binds.
+ */
+async function declashConvertedAssistants(
+  assistants: Record<string, unknown>[],
+  survivors: Record<string, unknown>[],
+  existingById: Map<string, Record<string, unknown>> | null,
+  opts: MigrateLockfileOptions,
+  issues: StepIssue[],
+): Promise<string> {
+  const claimed = new Set<number>();
+  for (const survivor of survivors) {
+    for (const port of recordedResourcePorts(survivor)) claimed.add(port);
+  }
+
+  let movedAssistants = 0;
+  let adoptedAssistants = 0;
+  for (const entry of assistants) {
+    const id = typeof entry.assistantId === "string" ? entry.assistantId : null;
+    const existing =
+      id !== null && existingById !== null ? (existingById.get(id) ?? null) : null;
+
+    if (existing) {
+      const adopted = adoptExistingPorts(entry, existing);
+      if (adopted !== null) {
+        adoptedAssistants += 1;
+        for (const port of recordedResourcePorts(entry)) claimed.add(port);
+        if (adopted.gatewayPort !== null && typeof entry.runtimeUrl === "string") {
+          entry.runtimeUrl = rewriteRuntimeUrlPort(entry.runtimeUrl, adopted.gatewayPort);
+        }
+        try {
+          const result = await declashEntryPorts(entry, {
+            envSuffix: opts.envSuffix,
+            claimed,
+            isPortFree: opts.isPortFree,
+            keepFields: new Set(adopted.fields),
+          });
+          if (result && result.moves.length > 0) {
+            movedAssistants += 1;
+            issues.push({
+              severity: "info",
+              message: `${entry.assistantId}: kept its existing cadet ports, allocated fresh ones for the rest (${describePortMoves(result.moves)})`,
+            });
+          }
+        } catch (err) {
+          issues.push({
+            severity: "warning",
+            message: `${entry.assistantId}: could not finish the port de-clash (${(err as Error).message}) — its remaining recorded ports ride through unchanged, and \`cadet wake\` reports any conflict when it binds`,
+          });
+        }
+        for (const port of recordedResourcePorts(entry)) claimed.add(port);
+        continue;
+      }
+    }
+
+    try {
+      const result = await declashEntryPorts(entry, {
+        envSuffix: opts.envSuffix,
+        claimed,
+        isPortFree: opts.isPortFree,
+      });
+      if (result && result.moves.length > 0) {
+        movedAssistants += 1;
+        issues.push({
+          severity: "info",
+          message: `${entry.assistantId}: allocated fresh ports (${describePortMoves(result.moves)}) — the vellum install keeps its port space`,
+        });
+      }
+    } catch (err) {
+      issues.push({
+        severity: "warning",
+        message: `${entry.assistantId}: could not allocate fresh ports (${(err as Error).message}) — its recorded ports ride through unchanged, and \`cadet wake\` reports any conflict when it binds`,
+      });
+    }
+    for (const port of recordedResourcePorts(entry)) claimed.add(port);
+  }
+
+  const parts: string[] = [];
+  if (movedAssistants > 0) {
+    parts.push(`allocated fresh ports for ${movedAssistants} assistant(s)`);
+  }
+  if (adoptedAssistants > 0) {
+    parts.push(`kept existing ports for ${adoptedAssistants} already-migrated assistant(s)`);
+  }
+  return parts.join("; ");
 }
 
 /**
