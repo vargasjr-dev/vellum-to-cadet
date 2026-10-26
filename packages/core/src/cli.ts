@@ -164,9 +164,11 @@ Usage:
 
 Flags:
   --cadet-root <path>      Target root (default: ~/.cadet)
-  --bundle <path>          Restore a legacy .vbundle assistant backup into the vellum
-                           root first (as a new assistant), then migrate it like any
-                           other — additive, the root's own assistants are untouched
+  --bundle <path>          Restore an assistant backup into the vellum root first (as a
+                           new assistant), then migrate it like any other — a legacy
+                           .vbundle or a vellum.ai/export tar (its three volumes at the
+                           archive's top level); additive, the root's own assistants
+                           are untouched
   --dry-run                Print the plan and touch nothing
   -y, --yes                Non-interactive; assume yes (skips the pre-migration
                            confirmation)

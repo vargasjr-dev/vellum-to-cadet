@@ -173,7 +173,7 @@ async function countRetiredArchives(vellumRoot: string): Promise<number> {
   }
 }
 
-async function detectVersion(vellumRoot: string): Promise<string | null> {
+export async function detectVersion(vellumRoot: string): Promise<string | null> {
   // 0.12.x recorded its version in the desktop marker; best-effort read.
   // Modern layout: the marker lives inside each assistant's state dir.
   const candidates = [

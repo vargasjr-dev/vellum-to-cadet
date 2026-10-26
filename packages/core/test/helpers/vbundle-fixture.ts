@@ -162,3 +162,25 @@ export function fixtureManifest(contents: VBundleManifest["contents"]): VBundleM
 export function tarEntryBytes(name: string, data: Buffer, linkTarget?: string): Buffer {
   return tarEntry(name, data, linkTarget);
 }
+
+export interface ExportTarEntry {
+  path: string;
+  data?: Buffer;
+  linkTarget?: string;
+}
+
+/**
+ * Build a `vellum.ai/export` archive from top-level volume entries — no
+ * manifest, optionally gzipped (the real endpoint serves plain tars; the
+ * reader sniffs either). Dir entries materialize implicitly via parents.
+ */
+export function buildExportTar(options: {
+  entries: ExportTarEntry[];
+  gzip?: boolean;
+}): Buffer {
+  const tar = Buffer.concat([
+    ...options.entries.map((f) => tarEntry(f.path, f.data ?? Buffer.alloc(0), f.linkTarget)),
+    Buffer.alloc(BLOCK * 2),
+  ]);
+  return options.gzip ? gzipSync(tar) : tar;
+}

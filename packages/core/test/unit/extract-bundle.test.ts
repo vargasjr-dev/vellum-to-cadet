@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { expect } from "../helpers/expect.js";
-import { buildVBundleArchive } from "../helpers/vbundle-fixture.js";
+import { buildExportTar, buildVBundleArchive } from "../helpers/vbundle-fixture.js";
 import { extractBundleStep, sanitizeAssistantDirName } from "../../src/steps/extract-bundle.js";
 import { discoverVellumRoots } from "../../src/discover.js";
 import type { MigrateOptions } from "../../src/types.js";
@@ -180,6 +180,159 @@ describe("extract-bundle: restore", () => {
     expect(after).toEqual(["test-bundle"]);
   });
 });
+
+describe("extract-bundle: vellum.ai/export tars", () => {
+  const EXPORT_ENTRIES = [
+    { path: "vellum-velly-workspace/config.json", data: Buffer.from('{"name":"velly"}') },
+    { path: "vellum-velly-workspace/data/db/assistant.db", data: Buffer.from("sqlite") },
+    { path: "vellum-velly-gateway-sec/gateway.sqlite", data: Buffer.from("gateway") },
+    { path: "vellum-velly-ces-sec/keys.bin", data: Buffer.from("keys") },
+  ];
+
+  test("names the assistant from the volume instance id and lands all three volumes in a modern root", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".local", "share", "vellum");
+    // A DIFFERENT assistant already in the root (fixture name ≠ the export's
+    // derived "velly") — a restore never touches existing assistants.
+    await fs.mkdir(path.join(root, "assistants", "existing", ".vellum", ".vellum-assistant"), { recursive: true });
+    await fs.writeFile(path.join(root, "assistants", "existing", ".vellum", ".vellum-assistant", "version"), "0.12.6\n");
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+
+    expect(result.status).toBe("completed");
+    // The instance id `vellum-velly` strips its brand prefix — the dir is
+    // named for the handle alone, same rule the layout step applies.
+    const restored = path.join(root, "assistants", "velly");
+    expect(await fs.readFile(path.join(restored, ".vellum/workspace/config.json"), "utf8")).toBe('{"name":"velly"}');
+    expect(await fs.readFile(path.join(restored, ".vellum/gateway-security/gateway.sqlite"), "utf8")).toBe("gateway");
+    expect(await fs.readFile(path.join(restored, ".vellum/ces-security/keys.bin"), "utf8")).toBe("keys");
+    // Discovery markers landed; the version file mirrors the root's own
+    // version (the export tar carries no runtime version of its own).
+    expect(await fs.stat(path.join(restored, ".vellum", ".vellum-assistant", "vtc-bundle-restore.json"))).toBeTruthy();
+    expect(await fs.readFile(path.join(restored, ".vellum", ".vellum-assistant", "version"), "utf8")).toContain("0.12.6");
+    const after = await fs.readdir(path.join(root, "assistants"));
+    expect(after.sort()).toEqual(["existing", "velly"]);
+  });
+
+  test("re-running the same export is a skipped no-op; a changed export refuses", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".local", "share", "vellum");
+    await fs.mkdir(path.join(root, "assistants"), { recursive: true });
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const first = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+    expect(first.status).toBe("completed");
+
+    const second = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+    expect(second.status).toBe("skipped");
+    expect(second.summary).toContain("already restored");
+
+    // A DIFFERENT export (different content fingerprint) with the same
+    // derived name must never overwrite the restored one.
+    const changed = path.join(home, "changed.tar");
+    await fs.writeFile(
+      changed,
+      buildExportTar({
+        entries: [...EXPORT_ENTRIES.slice(0, 1), { path: "vellum-velly-workspace/extra.txt", data: Buffer.from("x") }],
+      }),
+    );
+    const third = await extractBundleStep(opts({ vellumRoot: root, bundlePath: changed }));
+    expect(third.status).toBe("failed");
+    expect(third.summary).toContain("already exists");
+  });
+
+  test("legacy roots take the three volumes at the root itself", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, "vellum-root");
+    await fs.mkdir(path.join(root, ".vellum-assistant"), { recursive: true });
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(
+      bundle,
+      buildExportTar({
+        entries: [
+          { path: "workspace/config.json", data: Buffer.from("{}") },
+          { path: "gateway-security/gateway.sqlite", data: Buffer.from("db") },
+        ],
+      }),
+    );
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+
+    expect(result.status).toBe("completed");
+    expect(await fs.readFile(path.join(root, "workspace/config.json"), "utf8")).toBe("{}");
+    expect(await fs.readFile(path.join(root, "gateway-security/gateway.sqlite"), "utf8")).toBe("db");
+    expect(await fs.stat(path.join(root, ".vellum-assistant", "vtc-bundle-restore.json"))).toBeTruthy();
+  });
+
+  test("dry run plans the volume restore and writes nothing", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".local", "share", "vellum");
+    await fs.mkdir(path.join(root, "assistants"), { recursive: true });
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle, dryRun: true }));
+
+    expect(result.status).toBe("planned");
+    expect(result.summary).toContain("dry run");
+    expect(result.summary).toContain("velly");
+    expect(result.issues?.some((i) => i.message.includes("not in any vellum lockfile"))).toBe(true);
+    const after = await fs.readdir(path.join(root, "assistants"));
+    expect(after).toEqual([]);
+  });
+
+  test("missing security volumes restore with a loud warning; unexpected top-level entries are reported", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".local", "share", "vellum");
+    await fs.mkdir(path.join(root, "assistants"), { recursive: true });
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(
+      bundle,
+      buildExportTar({
+        entries: [
+          { path: "workspace/config.json", data: Buffer.from("{}") },
+          { path: "stray-dir/file.txt", data: Buffer.from("x") },
+        ],
+      }),
+    );
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+
+    expect(result.status).toBe("completed");
+    expect(result.issues?.some((i) => i.message.includes("no gateway-security volume"))).toBe(true);
+    expect(result.issues?.some((i) => i.message.includes("no ces-security volume"))).toBe(true);
+    expect(result.issues?.some((i) => i.message.includes('"stray-dir"'))).toBe(true);
+    // The stray top-level dir was NOT restored anywhere.
+    const restored = path.join(root, "assistants", "export");
+    expect(await fs.stat(path.join(restored, ".vellum/workspace/config.json"))).toBeTruthy();
+    expect(await pathExistsIn(path.join(restored, ".vellum/stray-dir"))).toBe(false);
+  });
+
+  test("a non-tar --bundle fails with a format message", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".local", "share", "vellum");
+    await fs.mkdir(root, { recursive: true });
+    const bundle = path.join(home, "garbage.bin");
+    await fs.writeFile(bundle, Buffer.from("definitely not a tar"));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle }));
+
+    expect(result.status).toBe("failed");
+    expect(result.summary).toContain("unrecognized archive");
+  });
+});
+
+async function pathExistsIn(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("extract-bundle: assistant name sanitization", () => {
   test("strips path-hostile characters and falls back when empty", () => {
