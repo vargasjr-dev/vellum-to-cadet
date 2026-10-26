@@ -2,14 +2,22 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { DEFAULT_VELLUM_ROOT } from "./detect.js";
+import { DEFAULT_VELLUM_ROOT, detectVersion } from "./detect.js";
 import { formatBytes } from "../fs-utils.js";
+import { handleToInstanceName } from "../layout.js";
 import {
   extractVBundle,
   readVBundleManifest,
   VBundleError,
   type VBundleManifest,
 } from "../vbundle.js";
+import {
+  extractExportTar,
+  inspectExportTar,
+  sniffBundleKind,
+  ExportTarError,
+  type ExportTarInfo,
+} from "../export-tar.js";
 import type { MigrateOptions, StepIssue, StepResult } from "../types.js";
 
 /**
@@ -35,6 +43,8 @@ const STAGING_PREFIX = ".vtc-extract-";
 const RESTORE_MARKER = "vtc-bundle-restore.json";
 const FALLBACK_ASSISTANT_NAME = "restored-assistant";
 const MAX_DIR_NAME_LENGTH = 80;
+/** Legacy landing order for the three volume dirs (workspace first — the collision guard). */
+const VOLUME_LANDING_ORDER = ["workspace", "gateway-security", "ces-security"] as const;
 
 /** The bundle's assistant name, made safe as a directory name. */
 export function sanitizeAssistantDirName(raw: string): string {
@@ -119,8 +129,11 @@ const NOT_IN_LOCKFILE_NOTE: StepIssue = {
 };
 
 /**
- * The `extract-bundle` step: validate the bundle, stage the restore, land it.
- * Only mutates the vellum root ADDITIVELY (one new assistant dir per bundle).
+ * The `extract-bundle` step: sniff the bundle's format (a legacy `.vbundle`
+ * backup or a `vellum.ai/export` tar — content-sniffed, extension aside),
+ * then dispatch to the matching restore. Both restores validate, stage, and
+ * land the bundle as a real vellum assistant. Only mutates the vellum root
+ * ADDITIVELY (one new assistant dir per bundle).
  */
 export async function extractBundleStep(options: MigrateOptions): Promise<StepResult> {
   const step = "extract-bundle";
@@ -153,6 +166,26 @@ export async function extractBundleStep(options: MigrateOptions): Promise<StepRe
       `--bundle: no vellum root at ${vellumRoot} — a bundle restores into an existing vellum installation`,
     );
   }
+
+  const format = await sniffBundleKind(bundlePath);
+  if (format === "vbundle") return restoreVBundle(options, issues);
+  if (format === "export-tar") return restoreExportTar(options, issues);
+  return fail(
+    "--bundle: unrecognized archive — expected a .vbundle assistant backup or a vellum.ai/export tar " +
+      "(the archive's contents don't parse as a tar)",
+  );
+}
+
+async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Promise<StepResult> {
+  const step = "extract-bundle";
+  const bundlePath = options.bundlePath!;
+  const vellumRoot = options.vellumRoot ?? DEFAULT_VELLUM_ROOT;
+  const fail = (message: string): StepResult => ({
+    step,
+    status: "failed",
+    summary: message,
+    issues,
+  });
 
   // Pass 1: the manifest alone (the bundle's first entry) — validates shape,
   // self-checksum, and the migration-relevant options before any byte lands.
@@ -327,6 +360,214 @@ export async function extractBundleStep(options: MigrateOptions): Promise<StepRe
   } catch (err) {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     const reason = err instanceof VBundleError ? (err as Error).message : `could not extract the bundle: ${(err as Error).message}`;
+    return fail(`--bundle: ${reason}`);
+  }
+}
+
+/** The marker's bundle id shape for vellum.ai/export tars: content-addressed. */
+function exportBundleId(info: ExportTarInfo): string {
+  return `vellum-export-${info.fingerprint.slice(0, 12)}`;
+}
+
+/**
+ * The `vellum.ai/export` restore: map the archive's top-level volumes, name
+ * the assistant from the volume names' instance id (falling back to the
+ * archive's filename), then stage and land the three volume trees exactly
+ * like a `.vbundle` restore would land its workspace. No manifest exists —
+ * the archive's decompressed sha256 is the identity the restore marker
+ * records, so re-running the same export skips instead of colliding.
+ */
+async function restoreExportTar(options: MigrateOptions, issues: StepIssue[]): Promise<StepResult> {
+  const step = "extract-bundle";
+  const bundlePath = options.bundlePath!;
+  const vellumRoot = options.vellumRoot ?? DEFAULT_VELLUM_ROOT;
+  const fail = (message: string): StepResult => ({
+    step,
+    status: "failed",
+    summary: message,
+    issues,
+  });
+
+  let info: ExportTarInfo;
+  try {
+    info = await inspectExportTar(bundlePath);
+  } catch (err) {
+    return fail(`--bundle: ${(err as Error).message}`);
+  }
+  for (const entry of info.unexpected) {
+    issues.push({
+      severity: "warning",
+      message:
+        `the export archive carries an unexpected top-level ${entry.kind} ${JSON.stringify(entry.name)} — ` +
+        "not one of the three vellum volumes; it is not restored",
+    });
+  }
+  if (!info.volumes.gatewaySecurity) {
+    issues.push({
+      severity: "warning",
+      message:
+        "the export carries no gateway-security volume — the gateway db, guardian trust, and channel " +
+        "registrations are absent; the migrated assistant re-inits guardian from scratch",
+    });
+  }
+  if (!info.volumes.cesSecurity) {
+    issues.push({
+      severity: "warning",
+      message:
+        "the export carries no ces-security volume — encrypted credential keys are absent; " +
+        "re-add credentials in the migrated assistant's settings",
+    });
+  }
+
+  // The volume names' shared instance id (`vellum-velly`) is the assistant's
+  // real identity — the brand prefix strips for the dir name, same rule the
+  // layout step applies to modern assistant dirs. Without it, the archive's
+  // filename speaks for the assistant.
+  const rawName =
+    info.instanceId && info.instanceId.length > 0
+      ? handleToInstanceName(info.instanceId)
+      : path.basename(bundlePath).replace(/\.(tar|tar\.gz|tgz)$/i, "");
+  const assistantName = sanitizeAssistantDirName(rawName);
+  const bundleId = exportBundleId(info);
+  const { layout, assistantsDir } = await resolveLayout(vellumRoot);
+  const targetDir = layout === "modern" ? path.join(assistantsDir, assistantName) : vellumRoot;
+  const displayTarget =
+    layout === "modern"
+      ? path.join(vellumRoot, `assistants/${assistantName}`)
+      : `${vellumRoot} (the legacy root itself)`;
+  const volumeNames = Object.values(info.volumes).filter((v): v is string => typeof v === "string");
+  const summaryCore = `"${assistantName}" (${info.entries} entries, ${formatBytes(info.totalBytes)}, volumes: ${volumeNames.join(", ")})`;
+
+  // Collision / idempotency, same discipline as the .vbundle flow: a
+  // same-named dir is refused unless THIS archive already restored into it.
+  const versionDir =
+    layout === "modern"
+      ? path.join(targetDir, ".vellum", ".vellum-assistant")
+      : path.join(targetDir, ".vellum-assistant");
+  if (await pathExists(layout === "modern" ? targetDir : path.join(vellumRoot, "workspace"))) {
+    const marker = await readRestoreMarker(path.join(versionDir, RESTORE_MARKER));
+    if (marker === bundleId) {
+      return {
+        step,
+        status: "skipped",
+        summary:
+          layout === "modern"
+            ? `export already restored as ${displayTarget} — nothing to do`
+            : `export already restored into the root at ${vellumRoot} — nothing to do`,
+        issues,
+        data: { assistantName, bundleId, alreadyRestored: true, layout },
+      };
+    }
+    if (layout === "modern") {
+      return fail(
+        `--bundle: assistants/${assistantName} already exists — refusing to overwrite a real assistant; ` +
+          "remove or rename it first",
+      );
+    }
+    return fail(
+      `--bundle: the root at ${vellumRoot} already carries an assistant workspace (legacy single-root layout) — ` +
+        "a bundle cannot restore over it",
+    );
+  }
+
+  if (options.dryRun) {
+    return {
+      step,
+      status: "planned",
+      summary: `dry run: would restore ${summaryCore} into ${displayTarget}`,
+      issues: [...issues, NOT_IN_LOCKFILE_NOTE],
+      data: {
+        assistantName,
+        bundleId,
+        entries: info.entries,
+        bytes: info.totalBytes,
+        volumes: volumeNames,
+        layout,
+      },
+    };
+  }
+
+  // Real run: staging → extract → land. Modern lands by one atomic rename of
+  // the whole assistant dir; legacy merges the three fresh volume dirs and
+  // the marker dir into the existing root — all renames land or roll back.
+  const stagingParent = layout === "modern" ? assistantsDir : vellumRoot;
+  await sweepStaleStaging(stagingParent, issues);
+  const stagingDir = path.join(stagingParent, `${STAGING_PREFIX}${randomHex(6)}`);
+  await fs.mkdir(stagingDir, { recursive: true });
+  try {
+    const extracted = await extractExportTar(bundlePath, stagingDir, {
+      stateDir: layout === "modern" ? ".vellum" : ".",
+      volumes: info.volumes,
+    });
+    for (const skip of extracted.skipped) {
+      issues.push({ severity: "warning", message: `${skip.path}: ${skip.reason}` });
+    }
+
+    // The marker dir doubles as the discovery/detect marker. The archive
+    // carries no runtime version, so the restoring root's own detected
+    // version fills the `version` file (omitted when the root has none).
+    const writeVersionDir =
+      layout === "modern"
+        ? path.join(stagingDir, ".vellum", ".vellum-assistant")
+        : path.join(stagingDir, ".vellum-assistant");
+    await fs.mkdir(writeVersionDir, { recursive: true });
+    const version = await detectVersion(vellumRoot);
+    if (version) {
+      await fs.writeFile(path.join(writeVersionDir, "version"), `${version}\n`, "utf8");
+    }
+    await fs.writeFile(
+      path.join(writeVersionDir, RESTORE_MARKER),
+      `${JSON.stringify(
+        { bundle_id: bundleId, fingerprint: info.fingerprint, kind: "vellum-export", restored_at: new Date().toISOString() },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    if (layout === "modern") {
+      await fs.rename(stagingDir, targetDir);
+    } else {
+      const landed: string[] = [];
+      try {
+        for (const stateName of VOLUME_LANDING_ORDER) {
+          const src = path.join(stagingDir, stateName);
+          if (!(await pathExists(src))) continue;
+          const dest = path.join(vellumRoot, stateName);
+          await fs.rename(src, dest);
+          landed.push(dest);
+        }
+        const landedMarkerDir = path.join(vellumRoot, ".vellum-assistant");
+        await fs.rename(writeVersionDir, landedMarkerDir);
+        landed.push(landedMarkerDir);
+      } catch (err) {
+        for (const p of landed) {
+          await fs.rm(p, { recursive: true, force: true }).catch(() => undefined);
+        }
+        throw err;
+      }
+    }
+
+    issues.push(NOT_IN_LOCKFILE_NOTE);
+    return {
+      step,
+      status: "completed",
+      summary: `restored ${summaryCore} into ${displayTarget}`,
+      issues,
+      data: {
+        assistantName,
+        bundleId,
+        files: extracted.fileCount,
+        bytes: extracted.totalBytes,
+        symlinks: extracted.symlinkCount,
+        skippedEntries: extracted.skipped.length,
+        volumes: volumeNames,
+        layout,
+      },
+    };
+  } catch (err) {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    const reason = err instanceof ExportTarError ? (err as Error).message : `could not extract the bundle: ${(err as Error).message}`;
     return fail(`--bundle: ${reason}`);
   }
 }
