@@ -61,7 +61,14 @@ export function sanitizeAssistantDirName(raw: string): string {
 /** A modern root keeps assistants under `assistants/`; a legacy root IS one assistant. */
 async function resolveLayout(
   vellumRoot: string,
+  freshRoot = false,
 ): Promise<{ layout: "modern" | "legacy"; assistantsDir: string }> {
+  // A bootstrap root is modern BY CONSTRUCTION: the fresh root is created
+  // (or, if an empty/markerless dir already exists at the path, populated)
+  // with assistants/, never the legacy single-assistant-at-the-root shape —
+  // landing legacy would make the root itself the assistant and refuse any
+  // future restore into it.
+  if (freshRoot) return { layout: "modern", assistantsDir: path.join(vellumRoot, "assistants") };
   const assistantsDir = path.join(vellumRoot, "assistants");
   try {
     const stat = await fs.stat(assistantsDir);
@@ -161,9 +168,10 @@ export async function extractBundleStep(options: MigrateOptions): Promise<StepRe
   }
   if (!bundleStat.isFile()) return fail(`--bundle: not a file: ${bundlePath}`);
 
-  if (!(await pathExists(vellumRoot))) {
+  if (!(await pathExists(vellumRoot)) && options.freshRoot !== true) {
     return fail(
-      `--bundle: no vellum root at ${vellumRoot} — a bundle restores into an existing vellum installation`,
+      `--bundle: no vellum root at ${vellumRoot} — a bundle restores into an existing vellum installation ` +
+        "(discovery found none here; the CLI bootstraps a fresh root from the bundle only when it resolved one itself)",
     );
   }
 
@@ -210,7 +218,7 @@ async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Pro
   ).length;
 
   const assistantName = sanitizeAssistantDirName(manifest.assistant.name);
-  const { layout, assistantsDir } = await resolveLayout(vellumRoot);
+  const { layout, assistantsDir } = await resolveLayout(vellumRoot, options.freshRoot === true);
   // Modern: the bundle becomes a NEW assistant dir. Legacy: the root itself IS
   // the assistant — the workspace tree lands at the root (the marker dir too).
   const targetDir = layout === "modern" ? path.join(assistantsDir, assistantName) : vellumRoot;
@@ -429,7 +437,7 @@ async function restoreExportTar(options: MigrateOptions, issues: StepIssue[]): P
       : path.basename(bundlePath).replace(/\.(tar|tar\.gz|tgz)$/i, "");
   const assistantName = sanitizeAssistantDirName(rawName);
   const bundleId = exportBundleId(info);
-  const { layout, assistantsDir } = await resolveLayout(vellumRoot);
+  const { layout, assistantsDir } = await resolveLayout(vellumRoot, options.freshRoot === true);
   const targetDir = layout === "modern" ? path.join(assistantsDir, assistantName) : vellumRoot;
   const displayTarget =
     layout === "modern"

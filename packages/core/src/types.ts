@@ -114,6 +114,15 @@ export interface MigrateOptions {
    * top level). Additive: the root's own assistants are untouched.
    */
   bundlePath?: string;
+  /**
+   * The root was resolved as a FRESH BOOTSTRAP: no vellum installation was
+   * found, and --bundle names the archive that becomes one — a modern root
+   * (created if missing, populated if an empty dir already exists) receives
+   * the bundle as its first assistant. Tells extract-bundle to force the
+   * modern layout and tolerate a not-yet-existing root dir. Never set when
+   * a real root was discovered.
+   */
+  freshRoot?: boolean;
   /** True when cadetRoot came from an explicit --cadet-root flag. */
   cadetRootExplicit?: boolean;
   /** Print the plan and touch nothing. */

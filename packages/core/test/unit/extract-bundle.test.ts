@@ -334,6 +334,85 @@ async function pathExistsIn(p: string): Promise<boolean> {
   }
 }
 
+describe("extract-bundle: fresh-root bootstrap (--bundle with no installation)", () => {
+  const EXPORT_ENTRIES = [
+    { path: "vellum-velly-workspace/config.json", data: Buffer.from('{"name":"velly"}') },
+    { path: "vellum-velly-workspace/data/db/assistant.db", data: Buffer.from("sqlite") },
+    { path: "vellum-velly-gateway-sec/gateway.sqlite", data: Buffer.from("gateway") },
+    { path: "vellum-velly-ces-sec/keys.bin", data: Buffer.from("keys") },
+  ];
+
+  test("a missing root is created modern: the volumes land under assistants/<name>/.vellum/", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".vellum"); // does not exist
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle, freshRoot: true }));
+
+    expect(result.status).toBe("completed");
+    expect(String(result.data?.["layout"])).toBe("modern");
+    const restored = path.join(root, "assistants", "velly");
+    expect(await fs.readFile(path.join(restored, ".vellum/workspace/config.json"), "utf8")).toBe('{"name":"velly"}');
+    expect(await fs.readFile(path.join(restored, ".vellum/gateway-security/gateway.sqlite"), "utf8")).toBe("gateway");
+    expect(await fs.readFile(path.join(restored, ".vellum/ces-security/keys.bin"), "utf8")).toBe("keys");
+    expect(await fs.stat(path.join(restored, ".vellum", ".vellum-assistant", "vtc-bundle-restore.json"))).toBeTruthy();
+  });
+
+  test("an existing-but-markerless root (a vellum dir with no assistants) is populated modern, not legacy", async () => {
+    // The user run that motivated bootstrap: ~/.vellum exists EMPTY, so
+    // discovery finds nothing — the legacy-layout read of it would make the
+    // root itself the assistant. freshRoot forces the modern shape instead.
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".vellum");
+    await fs.mkdir(root, { recursive: true });
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle, freshRoot: true }));
+
+    expect(result.status).toBe("completed");
+    expect(String(result.data?.["layout"])).toBe("modern");
+    expect(
+      await fs.readFile(path.join(root, "assistants", "velly", ".vellum/workspace/config.json"), "utf8"),
+    ).toBe('{"name":"velly"}');
+  });
+
+  test("dry run plans the modern landing and creates nothing", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".vellum");
+    const bundle = path.join(home, "export.tar");
+    await fs.writeFile(bundle, buildExportTar({ entries: EXPORT_ENTRIES }));
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle, freshRoot: true, dryRun: true }));
+
+    expect(result.status).toBe("planned");
+    expect(result.summary).toContain(path.join(root, "assistants/velly"));
+    // Nothing created: the fresh root only appears on a real run.
+    expect((await fs.readdir(home)).sort()).toEqual(["export.tar"]);
+  });
+
+  test("a .vbundle bootstraps modern too", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-extract-"));
+    const root = path.join(home, ".vellum");
+    const bundle = path.join(home, "backup.vbundle");
+    await fs.writeFile(
+      bundle,
+      buildVBundleArchive({ entries: [{ path: "workspace/config.json", data: Buffer.from("{}") }] }),
+    );
+
+    const result = await extractBundleStep(opts({ vellumRoot: root, bundlePath: bundle, freshRoot: true }));
+
+    expect(result.status).toBe("completed");
+    expect(String(result.data?.["layout"])).toBe("modern");
+    const landed = await fs.readdir(path.join(root, "assistants"));
+    expect(landed.length).toBe(1);
+    expect(
+      await fs.stat(path.join(root, "assistants", landed[0]!, ".vellum", ".vellum-assistant", "vtc-bundle-restore.json")),
+    ).toBeTruthy();
+  });
+});
+
 describe("extract-bundle: assistant name sanitization", () => {
   test("strips path-hostile characters and falls back when empty", () => {
     expect(sanitizeAssistantDirName("fresh-eel-8di6pa")).toBe("fresh-eel-8di6pa");

@@ -15,11 +15,9 @@ import { promises as fsPromises } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  discoverVellumRoots,
-  searchedLocations,
-  readRawVellumLockfile,
-} from "./discover.js";
+import { discoverVellumRoots, searchedLocations, readRawVellumLockfile } from "./discover.js";
+import { sniffBundleKind } from "./export-tar.js";
+import { DEFAULT_VELLUM_ROOT } from "./steps/detect.js";
 import { formatBytes, formatProgress } from "./fs-utils.js";
 import { handleToInstanceName } from "./layout.js";
 import { migrate, repair } from "./runner.js";
@@ -106,6 +104,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--internal-vellum-root":
         parsed.vellumRoot = requireValue(argv[++i], arg);
         break;
+      case "--internal-fresh-root":
+        parsed.freshRoot = true;
+        break;
       case "--help":
       case "-h":
         parsed.help = true;
@@ -168,7 +169,9 @@ Flags:
                            new assistant), then migrate it like any other — a legacy
                            .vbundle or a vellum.ai/export tar (its three volumes at the
                            archive's top level); additive, the root's own assistants
-                           are untouched
+                           are untouched. With no vellum installation found, the
+                           bundle BOOTSTRAPS one: a fresh modern root is created and
+                           the bundle restores into it as its first assistant
   --dry-run                Print the plan and touch nothing
   -y, --yes                Non-interactive; assume yes (skips the pre-migration
                            confirmation)
@@ -193,7 +196,7 @@ does take a timestamped backup of that root first.)
 
 Exit codes:
   0  success (or already migrated + verified)
-  2  no vellum root found
+  2  no vellum root found (a --bundle run instead bootstraps a fresh root)
   3  preflight failed
   5  backup failed
   6  migration failed
@@ -202,11 +205,56 @@ Exit codes:
   9  multiple candidate roots found in a non-interactive run
 `;
 
-async function resolveRoot(): Promise<string> {
+/** Thrown when a --bundle bootstrap fails before any root is created. */
+class BundleBootstrapError extends Error {
+  constructor(
+    readonly exitCode: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Root resolution for migration runs: plain discovery (resolveRoot), plus
+ * bundle bootstrapping — with --bundle and NO discovered installation, the
+ * archive itself becomes the install. Vargas's direction, from a user run
+ * that died exit-2 on a machine that had never run vellum: "we would have
+ * untarred the .tar bundle into a modern vellum workspace, before
+ * proceeding with the rest of the migration". The fresh root lands at
+ * VELLUM_DATA_DIR when the discovery env names one, else the default
+ * ~/.vellum; the bundle restores into it as its first assistant (modern
+ * layout, see extract-bundle's freshRoot) and the rest of the migrator
+ * proceeds unchanged. The archive is sniffed HERE so garbage fails before
+ * anything is created. Returns root:"" only when there is no root AND no
+ * bundle — the caller's no-root report stands for that case.
+ */
+async function resolveRootForRun(
+  parsed: ParsedArgs,
+): Promise<{ root: string; fresh: false } | { root: string; fresh: true; kind: string }> {
   const candidates = await discoverVellumRoots();
-  if (candidates.length === 0) return "";
-  if (candidates.length === 1) return candidates[0]!.root;
-  return await promptForRoot(candidates);
+  if (candidates.length === 1) return { root: candidates[0]!.root, fresh: false };
+  if (candidates.length > 1) return { root: await promptForRoot(candidates), fresh: false };
+  if (!parsed.bundlePath) return { root: "", fresh: false };
+  const kind = await sniffBundleKind(parsed.bundlePath);
+  if (kind === "unknown") {
+    throw new BundleBootstrapError(
+      EXIT_CODES.migrationFailed,
+      "--bundle: unrecognized archive — expected a .vbundle assistant backup or a vellum.ai/export tar " +
+        "(the archive's contents don't parse as a tar)",
+    );
+  }
+  return { root: process.env["VELLUM_DATA_DIR"] || DEFAULT_VELLUM_ROOT, fresh: true, kind };
+}
+
+/** The bootstrap notice (stderr — --json keeps stdout machine-readable). */
+function printBootstrapNotice(root: string, kind: string): void {
+  console.error(
+    detail(
+      `no vellum installation found — bootstrapping a fresh vellum root from the ` +
+        `${kind === "vbundle" ? ".vbundle backup" : "vellum.ai/export tar"} at ${root}`,
+    ),
+  );
 }
 
 /**
@@ -561,10 +609,22 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
   }
 
   // Resolve the vellum root HERE — interactively, while stdin still works.
+  // --bundle bootstraps: no installation found → the archive becomes one.
   let resolved: string;
+  let fresh = false;
   try {
-    resolved = await resolveRoot();
+    const resolution = await resolveRootForRun(parsed);
+    resolved = resolution.root;
+    if (resolution.fresh) {
+      fresh = true;
+      parsed.freshRoot = true;
+      printBootstrapNotice(resolution.root, resolution.kind);
+    }
   } catch (err) {
+    if (err instanceof BundleBootstrapError) {
+      console.error(errorText(err.message));
+      return err.exitCode;
+    }
     console.error(errorText(`could not determine which vellum installation to migrate: ${(err as Error).message}`));
     return EXIT_CODES.ambiguousRoot;
   }
@@ -606,6 +666,7 @@ async function detachedMigrate(parsed: ParsedArgs): Promise<number> {
       lockPath,
       "--internal-vellum-root",
       resolved,
+      ...(fresh ? ["--internal-fresh-root"] : []),
     ],
     { detached: true, stdio: ["ignore", logFd, logFd, "ipc"] },
   );
@@ -1077,8 +1138,23 @@ async function main(): Promise<number> {
     resolved = parsed.vellumRoot;
   } else {
     try {
-      resolved = await resolveRoot();
+      const resolution = await resolveRootForRun(parsed);
+      resolved = resolution.root;
+      if (resolution.fresh) {
+        parsed.freshRoot = true;
+        if (!parsed.json) printBootstrapNotice(resolution.root, resolution.kind);
+      }
     } catch (err) {
+      if (err instanceof BundleBootstrapError) {
+        if (parsed.json) {
+          process.stdout.write(
+            `${JSON.stringify({ ok: false, exitCode: err.exitCode, error: err.message }, null, 2)}\n`,
+          );
+        } else {
+          console.error(errorText(err.message));
+        }
+        return err.exitCode;
+      }
       // No way to ask the user which root to migrate.
       if (parsed.json) {
         process.stdout.write(
