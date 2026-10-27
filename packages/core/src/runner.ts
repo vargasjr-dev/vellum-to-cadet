@@ -198,6 +198,13 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   });
 
   if (!detect.vellumRootExists) {
+    // A --bundle BOOTSTRAP dry run plans this shape on purpose: no
+    // installation was found and the extract-bundle step above reported the
+    // fresh root + restore it would create — the plan succeeded, so exit ok.
+    // Without the bundle there is genuinely nothing to migrate.
+    if (options.dryRun && options.freshRoot === true && options.bundlePath) {
+      return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.ok);
+    }
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.nothingToMigrate);
   }
 

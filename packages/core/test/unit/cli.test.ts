@@ -77,6 +77,66 @@ describe("cli", () => {
     expect(report.searched.length).toBeGreaterThan(0);
   });
 
+  test("--bundle bootstraps a fresh root when no installation exists: dry run plans it, exit 0, nothing created", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-boot-"));
+    const bundle = path.join(home, "disk.tar");
+    const { buildExportTar } = await import("../helpers/vbundle-fixture.js");
+    await fs.writeFile(
+      bundle,
+      buildExportTar({
+        entries: [
+          { path: "vellum-velly-workspace/config.json", data: Buffer.from('{"name":"velly"}') },
+          { path: "vellum-velly-workspace/data/db/assistant.db", data: Buffer.from("sqlite") },
+          { path: "vellum-velly-gateway-sec/gateway.sqlite", data: Buffer.from("gateway") },
+          { path: "vellum-velly-ces-sec/keys.bin", data: Buffer.from("keys") },
+        ],
+      }),
+    );
+    const r = runCli(
+      ["--cadet-root", path.join(home, ".cadet"), "--bundle", bundle, "--dry-run", "--json"],
+      { env: { HOME: home } },
+    );
+    expect(r.code).toBe(0);
+    const report = JSON.parse(r.stdout);
+    expect(report.ok).toBe(true);
+    const extract = report.steps.find((s: { step: string }) => s.step === "extract-bundle");
+    expect(extract.summary).toContain("would restore");
+    expect(extract.summary).toContain(path.join(home, ".vellum"));
+    expect(extract.data.layout).toBe("modern");
+    // Dry run touches nothing: the fresh root only exists after a real run.
+    expect(fsExistsSync(path.join(home, ".vellum"))).toBe(false);
+  });
+
+  test("--bundle bootstrap announces itself on stderr in human mode", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-boot-"));
+    const bundle = path.join(home, "disk.tar");
+    const { buildExportTar } = await import("../helpers/vbundle-fixture.js");
+    await fs.writeFile(
+      bundle,
+      buildExportTar({ entries: [{ path: "vellum-velly-workspace/config.json", data: Buffer.from("{}") }] }),
+    );
+    const r = runCli(["--cadet-root", path.join(home, ".cadet"), "--bundle", bundle, "--dry-run"], {
+      env: { HOME: home },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("bootstrapping a fresh vellum root");
+    expect(fsExistsSync(path.join(home, ".vellum"))).toBe(false);
+  });
+
+  test("--bundle with a garbage archive and no installation: fails before creating anything", async () => {
+    const home = await fs.mkdtemp(path.join(tmpdir(), "cli-boot-"));
+    const bundle = path.join(home, "disk.tar");
+    await fs.writeFile(bundle, Buffer.from("definitely not a tar"));
+    const r = runCli(
+      ["--cadet-root", path.join(home, ".cadet"), "--bundle", bundle, "--dry-run", "--json"],
+      { env: { HOME: home } },
+    );
+    expect(r.code).toBe(6);
+    const report = JSON.parse(r.stdout);
+    expect(report.error).toContain("unrecognized archive");
+    expect(fsExistsSync(path.join(home, ".vellum"))).toBe(false);
+  });
+
   test("removed flags are rejected", () => {
     for (const flag of ["--remove-vellum-root", "--skip-stop-assistant", "--skip-stop", "--vellum-root"]) {
       const r = runCli([flag]);
