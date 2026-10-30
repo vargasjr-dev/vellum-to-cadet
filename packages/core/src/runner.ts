@@ -281,6 +281,24 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   // cadet lockfile written, stale retired manifests, legacy credentials
   // kept) — then verify. The layout itself is never touched here.
   if (target.kind === "already-migrated") {
+    // A dry run plans the heal and stops BEFORE any of it runs: this branch
+    // mutates (docker fetch/load, db value rewrites, wake, provisioning) —
+    // a field review showed the old plan check living after this block let
+    // a repeat --dry-run reach live migration operations. Touch nothing.
+    if (options.dryRun) {
+      const reDockerCount = detect.docker.instances.length;
+      done({
+        step: "heal-plan",
+        status: "planned",
+        summary:
+          `dry run: already migrated — would re-check the assistant + gateway dbs, re-scrub credentials, ` +
+          `re-merge the lockfile, then verify` +
+          (reDockerCount > 0
+            ? `; ${reDockerCount} docker instance(s) would be re-fetched, value-migrated and loaded back before the wake`
+            : ""),
+      });
+      return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.ok);
+    }
     // A re-run after a failed docker migration (e.g. the v0.0.11 hang)
     // heals the volumes too: fetch → the SAME value steps → load, the
     // identical shape as the fresh flow — the healed import is

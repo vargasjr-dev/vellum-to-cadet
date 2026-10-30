@@ -31,10 +31,20 @@ import { createGunzip } from "node:zlib";
 
 const BLOCK = 512;
 
-/** Caps — a hostile archive can't force unbounded work. */
-export const EXPORT_TAR_MAX_ENTRIES = 200_000;
-export const EXPORT_TAR_MAX_ENTRY_BYTES = 8 * 1024 * 1024 * 1024;
-export const EXPORT_TAR_MAX_TOTAL_BYTES = 256 * 1024 * 1024 * 1024;
+/**
+ * Caps — a hostile archive can't force unbounded work. Sized for REAL
+ * exports: a real vellum.ai/export tar measured 83.5 GB across 442,091
+ * entries with a 12.04 GB assistant.db (field report, AEGIS review), so the
+ * caps must sit far above one assistant's honest data while still bounding
+ * a hostile archive.
+ */
+export const EXPORT_TAR_MAX_ENTRIES = 2_000_000;
+export const EXPORT_TAR_MAX_ENTRY_BYTES = 64 * 1024 * 1024 * 1024;
+export const EXPORT_TAR_MAX_TOTAL_BYTES = 1024 * 1024 * 1024 * 1024;
+/** Long-name records (PAX `x`, GNU `L`) — real long paths are < 1 KiB. */
+export const EXPORT_TAR_MAX_LONG_NAME_BYTES = 64 * 1024;
+/** Body/pad bytes consumed per pull when skipping an entry's body. */
+const SKIP_CHUNK_BYTES = 1024 * 1024;
 
 /** The state dirs one assistant's volumes restore into. */
 export type VolumeKind = "workspace" | "gateway-security" | "ces-security";
@@ -111,6 +121,8 @@ class TarReader {
   /** Padding bytes that follow the body, consumed before the next header. */
   private pendingPad = 0;
   private paxPath: string | null = null;
+  /** Decompressed bytes consumed so far — header diagnostics read by offset. */
+  private readBytes = 0;
 
   private constructor() {}
 
@@ -130,8 +142,12 @@ class TarReader {
     if (block === null || block.length === 0) return null;
     if (block.length < BLOCK) return null; // truncated tail — treat as end
     if (isZeroBlock(block)) return null;
+    const headerOffset = this.readBytes;
+    this.readBytes += BLOCK;
     if (!isUstarHeader(block))
-      throw new ExportTarError("not a tar archive (bad header magic)");
+      throw new ExportTarError(
+        `not a tar archive (bad header magic at decompressed byte offset ${headerOffset})`,
+      );
     const typeflag = String.fromCharCode(block[156]!);
     const size = readHeaderSize(block);
     this.pendingBody = size;
@@ -142,6 +158,13 @@ class TarReader {
         ? nulTrim(block.subarray(157, 257))
         : null;
     if (typeflag === "x" || typeflag === "L") {
+      // A long-name record's size comes straight from the header — an
+      // archive must not allocate through it (real records are < 1 KiB).
+      if (size > EXPORT_TAR_MAX_LONG_NAME_BYTES) {
+        throw new ExportTarError(
+          `extended-name record near byte offset ${this.readBytes} is ${size} bytes, over the ${EXPORT_TAR_MAX_LONG_NAME_BYTES} byte cap`,
+        );
+      }
       const data = Buffer.alloc(size);
       await this.readBodyInto(data);
       if (typeflag === "L") {
@@ -207,12 +230,16 @@ class TarReader {
     }
   }
 
-  /** Read and throw away exactly n bytes of the open entry. */
+  /** Read and throw away exactly n bytes of the open entry — in bounded
+   * chunks. Pulling the full remainder at once made the ByteSource
+   * accumulate an entire multi-GiB entry in memory (and the repeated
+   * re-concat turned the skip quadratic): a real 12 GB assistant.db entry
+   * desynced/oomed the inspect pass. */
   private async discard(n: number): Promise<void> {
     if (!this.source) throw new ExportTarError("tar reader already closed");
     let left = n;
     while (left > 0) {
-      const chunk = await this.source.pull(left);
+      const chunk = await this.source.pull(Math.min(left, SKIP_CHUNK_BYTES));
       if (chunk === null || chunk.length === 0)
         throw new ExportTarError("archive truncated mid-entry");
       this.account(chunk.length);
@@ -222,6 +249,7 @@ class TarReader {
 
   /** Book-keep how many consumed bytes were body vs padding. */
   private account(consumed: number): void {
+    this.readBytes += consumed;
     const fromBody = Math.min(consumed, this.pendingBody);
     this.pendingBody -= fromBody;
     this.pendingPad -= consumed - fromBody;
@@ -328,8 +356,19 @@ function headerName(header: Buffer): string {
 }
 
 function readHeaderSize(header: Buffer): number {
+  const sizeField = header.subarray(124, 136);
+  // GNU base-256: the high bit of the first byte flags a big-endian binary
+  // number — the ONLY way a real tar expresses an entry larger than ustar's
+  // 11-octal-digit field (8 GiB - 1). A real 12 GB assistant.db arrives
+  // exactly this way; parsing it as octal yields a garbage size, desyncs the
+  // body/pad bookkeeping, and surfaces downstream as "bad header magic".
+  if (sizeField[0] !== undefined && sizeField[0] & 0x80) {
+    let size = sizeField[0] & 0x7f;
+    for (let i = 1; i < sizeField.length; i++) size = size * 256 + sizeField[i]!;
+    return size;
+  }
   let size = 0;
-  for (const b of header.subarray(124, 136)) {
+  for (const b of sizeField) {
     if (b === 0 || b === 0x20) continue;
     size = size * 8 + (b! - 0x30);
   }

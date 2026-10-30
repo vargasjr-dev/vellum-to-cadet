@@ -1,12 +1,18 @@
 import { describe, test } from "node:test";
-import { promises as fs } from "node:fs";
+import { promises as fs, createWriteStream } from "node:fs";
+import * as assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 
 import { expect } from "../helpers/expect.js";
 import {
   buildExportTar,
   buildVBundleArchive,
+  rawTarHeader,
+  tarEntryBytes,
 } from "../helpers/vbundle-fixture.js";
 import {
   extractExportTar,
@@ -352,6 +358,81 @@ async function pathExists(p: string): Promise<boolean> {
     return false;
   }
 }
+
+/** Stream a gzipped export tar carrying one entry of `size` body bytes —
+ * without ever materializing the body in memory (zeros compress to ~nothing,
+ * so the FILE stays small while the DECOMPRESSED stream is huge). */
+async function writeGiantGzipTar(
+  tarPath: string,
+  entryPath: string,
+  size: number,
+): Promise<void> {
+  async function* source(): AsyncGenerator<Buffer> {
+    yield rawTarHeader(entryPath, size);
+    const chunk = Buffer.alloc(8 * 1024 * 1024);
+    let left = size;
+    while (left > 0) {
+      const take = Math.min(left, chunk.length);
+      yield take === chunk.length ? chunk : chunk.subarray(0, take);
+      left -= take;
+    }
+    yield Buffer.alloc(512 * 2); // end-of-archive
+  }
+  await pipeline(Readable.from(source()), createGzip(), createWriteStream(tarPath));
+}
+
+// Real-export scale — a field regression: a real vellum.ai/export tar
+// measured 83.5 GB / 442,091 entries with a 12.04 GB assistant.db, and the
+// old reader died on it ("bad header magic", exit 6). Multi-GiB entries can
+// ONLY be expressed in GNU base-256 (ustar's octal field tops out at
+// 8 GiB - 1), and their bodies must be skipped in bounded chunks — never
+// buffered whole.
+describe("real-export scale", () => {
+  const GIANT_SIZE = 8 * 1024 ** 3 + 1024 * 1024; // just over ustar's octal ceiling
+
+  test("inspects an archive whose entry exceeds ustar's octal size field (GNU base-256)", { timeout: 300_000 }, async () => {
+    const dir = await staging();
+    const tarPath = path.join(dir, "export.tar.gz");
+    await writeGiantGzipTar(tarPath, "velly-workspace/assistant.db", GIANT_SIZE);
+
+    const info = await inspectExportTar(tarPath);
+    expect(info.volumes.workspace).toBe("velly-workspace");
+    expect(info.entries).toBe(1);
+    expect(info.totalBytes).toBe(GIANT_SIZE);
+  });
+
+  test("rejects an oversized long-name record with a cap error, not a magic failure", async () => {
+    const dir = await staging();
+    const tarPath = await writeTar(
+      dir,
+      Buffer.concat([
+        rawTarHeader("L", 1024 * 1024 * 1024, "L"), // a 1 GiB "long name"
+        Buffer.alloc(512 * 2),
+      ]),
+      "huge-longname.tar",
+    );
+    await assert.rejects(
+      async () => inspectExportTar(tarPath),
+      /extended-name record .* byte cap/,
+    );
+  });
+
+  test("names the byte offset when a header fails the magic check", async () => {
+    const dir = await staging();
+    const tarPath = await writeTar(
+      dir,
+      Buffer.concat([
+        tarEntryBytes("velly-workspace/a.txt", Buffer.from("hi")),
+        Buffer.alloc(512, 0x41), // garbage where a header belongs
+      ]),
+      "desynced.tar",
+    );
+    await assert.rejects(
+      async () => inspectExportTar(tarPath),
+      /bad header magic at decompressed byte offset 1024/,
+    );
+  });
+});
 
 // ExportTarError is part of the public surface — a touch here keeps the
 // import honest when tests above change shape.
