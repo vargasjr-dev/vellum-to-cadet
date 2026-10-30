@@ -116,6 +116,103 @@ describe("contact_channels unique-collision dedupe (v0.0.15 field run)", () => {
     after.close();
     expect(rows).toEqual([{ id: "cadet-twin", type: "cadet" }]);
   });
+
+  test("NULL-address twins are not duplicates — both rows survive with their payloads", async () => {
+    // AEGIS field review: under UNIQUE(type, address), SQLite treats NULLs
+    // as DISTINCT — a (vellum, NULL) row and a (cadet, NULL) row coexist
+    // legally, so the rewrite's UPDATE would never have collided. The old
+    // null-safe `IS` twin match treated them as duplicates and deleted the
+    // vellum row — a distinct payload lost. The dedupe must be exactly as
+    // narrow as the constraint it pre-empts.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-dedupe-"));
+    const dbRel = "workspace/data/db/assistant.db";
+    await fs.mkdir(path.join(root, "workspace/data/db"), { recursive: true });
+    const db = new Database(path.join(root, dbRel));
+    // Same table as the real one but with a NULLABLE address — the shape
+    // that made the NULL twins legal in the first place.
+    db.exec(`CREATE TABLE contact_channels (
+      id TEXT PRIMARY KEY,
+      contact_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      address TEXT,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      external_chat_id TEXT,
+      updated_at INTEGER
+    )`);
+    db.exec(`CREATE UNIQUE INDEX idx_contact_channels_type_address ON contact_channels(type, address)`);
+    db.exec(
+      `INSERT INTO contact_channels (id, contact_id, type, address, created_at, external_chat_id) VALUES
+       ('vellum-row', 'contact-a', 'vellum', NULL, 1, 'chat-from-vellum-row'),
+       ('cadet-twin', 'contact-b', 'cadet',  NULL, 2, 'chat-from-cadet-twin')`,
+    );
+    db.close();
+
+    const result = await migrateAssistantDbAt(root, dbRel);
+    expect(result.status).toBe("completed");
+    // Nothing merged, nothing skipped: the plain UPDATE just works.
+    expect(result.issues?.some((i) => i.message.includes("merged"))).toBe(false);
+    expect(result.issues?.some((i) => i.severity === "warning")).toBe(false);
+
+    const after = new Database(path.join(root, dbRel), { readOnly: true });
+    const rows = after
+      .prepare(`SELECT id, type, address, external_chat_id FROM contact_channels ORDER BY id`)
+      .all() as Array<{ id: string; type: string; address: string | null; external_chat_id: string }>;
+    after.close();
+    // Both rows live, both rewritten to cadet, each keeping its own payload.
+    expect(rows).toEqual([
+      { id: "cadet-twin", type: "cadet", address: null, external_chat_id: "chat-from-cadet-twin" },
+      { id: "vellum-row", type: "cadet", address: null, external_chat_id: "chat-from-vellum-row" },
+    ]);
+  });
+
+  test("mixed twins: only the non-NULL shared-address pair merges, the NULL pair survives", async () => {
+    // Same run holds both shapes: the dedupe fires exactly where the
+    // unique constraint actually blocks the rewrite and nowhere else.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vtc-dedupe-"));
+    const dbRel = "workspace/data/db/assistant.db";
+    await fs.mkdir(path.join(root, "workspace/data/db"), { recursive: true });
+    const db = new Database(path.join(root, dbRel));
+    db.exec(`CREATE TABLE contact_channels (
+      id TEXT PRIMARY KEY,
+      contact_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      address TEXT,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      external_chat_id TEXT,
+      updated_at INTEGER
+    )`);
+    db.exec(`CREATE UNIQUE INDEX idx_contact_channels_type_address ON contact_channels(type, address)`);
+    db.exec(
+      `INSERT INTO contact_channels (id, contact_id, type, address, created_at, external_chat_id) VALUES
+       ('v-null',    'contact-a', 'vellum', NULL,          1, 'payload-null-vellum'),
+       ('c-null',    'contact-b', 'cadet',  NULL,          2, 'payload-null-cadet'),
+       ('v-shared',  'contact-a', 'vellum', 'shared-addr', 3, 'payload-shared-vellum'),
+       ('c-shared',  'contact-b', 'cadet',  'shared-addr', 4, 'payload-shared-cadet')`,
+    );
+    db.close();
+
+    const result = await migrateAssistantDbAt(root, dbRel);
+    expect(result.status).toBe("completed");
+    expect(
+      result.issues?.some((i) => i.severity === "info" && i.message.includes("merged 1 duplicate row(s)")),
+    ).toBe(true);
+    expect(result.issues?.some((i) => i.severity === "warning")).toBe(false);
+
+    const after = new Database(path.join(root, dbRel), { readOnly: true });
+    const rows = after
+      .prepare(`SELECT id, type, address, external_chat_id FROM contact_channels ORDER BY id`)
+      .all() as Array<{ id: string; type: string; address: string | null; external_chat_id: string }>;
+    after.close();
+    // The shared-address vellum row merged away (the cadet twin won); both
+    // NULL-address rows were rewritten and coexist; payloads intact.
+    expect(rows).toEqual([
+      { id: "c-null", type: "cadet", address: null, external_chat_id: "payload-null-cadet" },
+      { id: "c-shared", type: "cadet", address: "shared-addr", external_chat_id: "payload-shared-cadet" },
+      { id: "v-null", type: "cadet", address: null, external_chat_id: "payload-null-vellum" },
+    ]);
+  });
 });
 
 describe("unreadable-db self-diagnosis (v0.0.15 field run)", () => {
