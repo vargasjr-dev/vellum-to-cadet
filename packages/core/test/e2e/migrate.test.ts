@@ -414,6 +414,39 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(planStep?.files?.length).toBeGreaterThan(0);
   });
 
+  test("dry run against an already migrated root plans the heal and runs nothing", async () => {
+    // Field regression: the plan check used to sit AFTER the already-migrated
+    // heal block, so a repeat --dry-run reached live migration operations
+    // (docker fetch/load, db value rewrites, wake) before returning.
+    const { root, home } = await buildFullVellum0126();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
+    const opts = { vellumRoot: root, cadetRoot, processOps: noopOps };
+
+    const first = await migrate(opts);
+    expect(first.ok).toBe(true);
+
+    const report = await migrate({ ...opts, dryRun: true });
+    expect(report.ok).toBe(true);
+    expect(report.mode).toBe("plan");
+    const plan = report.steps.find((s) => s.step === "heal-plan");
+    expect(plan?.status).toBe("planned");
+    const liveSteps = [
+      "stop-assistant",
+      "fetch-docker-volumes",
+      "migrate-assistant-db",
+      "migrate-gateway-db",
+      "detect-cloud-email",
+      "migrate-credentials",
+      "load-docker-volumes",
+      "wake-assistants",
+      "provision-cloud-domains",
+    ];
+    for (const step of liveSteps) {
+      expect(report.steps.some((s) => s.step === step)).toBe(false);
+    }
+  });
+
   test("an occupied default cadet root migrates into a fresh instance dir, leaving it untouched", async () => {
     const { root, home } = await buildFullVellum0126();
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");

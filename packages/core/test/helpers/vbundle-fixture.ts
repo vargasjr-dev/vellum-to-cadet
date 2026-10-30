@@ -163,6 +163,44 @@ export function tarEntryBytes(name: string, data: Buffer, linkTarget?: string): 
   return tarEntry(name, data, linkTarget);
 }
 
+/** ustar's octal size field tops out at 8^11 - 1 bytes (~8 GiB - 1). */
+const USTAR_MAX_SIZE = 8 ** 11 - 1;
+
+/** Write the 12-byte size field: ustar octal when it fits, GNU base-256 when
+ * it doesn't (real tars carry multi-GiB entries — a 12 GB assistant.db —
+ * exclusively as base-256). */
+function writeSizeField(header: Buffer, size: number): void {
+  if (size <= USTAR_MAX_SIZE) {
+    writeOctal(header, 124, 12, size);
+    return;
+  }
+  for (let i = 124; i < 136; i++) header[i] = 0;
+  header[124] = 0x80; // base-256 positive flag
+  let remaining = size;
+  for (let i = 135; i >= 125 && remaining > 0; i--) {
+    header[i] = remaining % 256;
+    remaining = Math.floor(remaining / 256);
+  }
+}
+
+/**
+ * A raw 512-byte ustar file header claiming `size` body bytes — for test
+ * entries too large to materialize (the caller streams the body itself).
+ */
+export function rawTarHeader(name: string, size: number, typeflag = "0"): Buffer {
+  const header = Buffer.alloc(BLOCK);
+  Buffer.from(name, "utf8").subarray(0, 100).copy(header, 0);
+  writeOctal(header, 100, 8, 0o644);
+  writeSizeField(header, size);
+  header[156] = typeflag.charCodeAt(0);
+  header.write("ustar\0", 257);
+  header[263] = "0".charCodeAt(0);
+  header[264] = "0".charCodeAt(0);
+  writeOctal(header, 148, 7, headerChecksum(header));
+  header[155] = 0x20;
+  return header;
+}
+
 export interface ExportTarEntry {
   path: string;
   data?: Buffer;
