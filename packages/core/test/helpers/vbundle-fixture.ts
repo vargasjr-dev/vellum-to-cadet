@@ -201,6 +201,27 @@ export function rawTarHeader(name: string, size: number, typeflag = "0"): Buffer
   return header;
 }
 
+/**
+ * A bsdtar-style PAX pair: an `x` record carrying `path` and `size`, then
+ * the file header with its ustar size field left at `declaredSize` (0 in
+ * real bsdtar output — the PAX size record is the only truth for entries
+ * the octal field can't express). The caller streams the body itself.
+ */
+export function paxSizedEntryBytes(
+  name: string,
+  size: number | string,
+  declaredSize = 0,
+): Buffer {
+  const recordData = Buffer.from(`path=${name}\nsize=${size}\n`, "utf8");
+  const xHeader = rawTarHeader("PaxHeader", recordData.length, "x");
+  const padded = Buffer.concat([
+    recordData,
+    Buffer.alloc((BLOCK - (recordData.length % BLOCK)) % BLOCK),
+  ]);
+  const fileHeader = rawTarHeader(name, declaredSize);
+  return Buffer.concat([xHeader, padded, fileHeader]);
+}
+
 export interface ExportTarEntry {
   path: string;
   data?: Buffer;
