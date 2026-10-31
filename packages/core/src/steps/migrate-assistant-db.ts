@@ -430,7 +430,9 @@ async function migrateDbValues(options: DbValuesOptions): Promise<StepResult> {
         // aborts with "UNIQUE constraint failed", 0 rows rewritten, and the
         // whole column stays branded (v0.0.15 field run: 19 rows). The
         // cadet-spelled twin wins — it is the row the renamed runtime
-        // seeded and reads; the vellum row is the dead spelling.
+        // seeded and reads; the vellum row is the dead spelling. NULL-keyed
+        // rows are NOT duplicates (SQLite unique indexes treat NULLs as
+        // distinct) — they coexist through the rewrite untouched.
         let mergedRows = 0;
         for (const keyCols of uniqueIndexesOn(db, table, column)) {
           const merged = dedupeCollidingRows(runCounted, table, column, keyCols);
@@ -600,8 +602,16 @@ function uniqueIndexesOn(
 
 /**
  * Delete the vellum-spelled rows that would collide with an existing
- * cadet-spelled twin on one unique index. `twin.col IS table.col` keeps
- * NULLs equal (SQLite's null-safe comparison). Returns the rows removed.
+ * cadet-spelled twin on one unique index — and ONLY those. Plain `=`
+ * (not the null-safe `IS`) is deliberate: it mirrors SQLite's uniqueness
+ * semantics exactly, where NULLs are DISTINCT from every NULL, so a
+ * (vellum, NULL) row and a (cadet, NULL) row coexist legally under
+ * UNIQUE(type, address). Matching them as duplicates deleted a row the
+ * UPDATE would never have collided with — a distinct payload lost
+ * (field review, AEGIS). With `=`, a twin match requires every key
+ * column non-NULL and equal, which is precisely the condition under
+ * which the rewrite's UPDATE would abort — the dedupe deletes exactly
+ * the blocking rows and nothing else. Returns the rows removed.
  */
 function dedupeCollidingRows(
   runCounted: (sql: string) => number,
@@ -611,7 +621,7 @@ function dedupeCollidingRows(
 ): number {
   const twinMatch = keyCols
     .filter((k) => k !== column)
-    .map((k) => `twin.${k} IS ${table}.${k}`)
+    .map((k) => `twin.${k} = ${table}.${k}`)
     .join(" AND ");
   return runCounted(
     `DELETE FROM ${table} WHERE ${table}.${column} = 'vellum' AND EXISTS (` +
