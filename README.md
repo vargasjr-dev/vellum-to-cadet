@@ -84,6 +84,7 @@ Vellum for good with `npx migrate-vellum-assistant-to-cadet uninstall`.
   makes re-runs verify-only.
 - Running vellum assistant processes are put to sleep automatically (via
   `vellum sleep`) before the migration starts.
+- Supported filesystem: ext4 only, for now.
 
 ## Uninstalling vellum
 
