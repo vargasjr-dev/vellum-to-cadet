@@ -85,6 +85,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--verbose":
         parsed.verbose = true;
         break;
+      case "--no-wake":
+        parsed.noWake = true;
+        break;
       case "--foreground":
         parsed.foreground = true;
         break;
@@ -177,6 +180,9 @@ Flags:
                            confirmation)
   --json                   Machine-readable JSON report on stdout
   --verbose                Log every step to stderr
+  --no-wake                Do everything except the final wake — install, register, and
+                           migrate, but leave the assistant(s) asleep ("cadet wake --all"
+                           when you're ready)
   --foreground             Run in this process (default: detached — survives
                            disconnects; logs: ~/.cadet-migration-logs/)
   -h, --help               Show this help

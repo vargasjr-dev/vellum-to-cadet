@@ -2439,3 +2439,60 @@ describe("e2e: vbundle restore", () => {
     expect(registration?.status).toBe("skipped");
   });
 });
+
+describe("e2e: --no-wake", () => {
+  test("runs the whole migration — install included — but leaves the assistant asleep", async () => {
+    const { root, home } = await buildModernVellum();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    // Sandboxed like the lockfile tests (HOME drives every lockfile write).
+    const prevHome = process.env.HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+    // A lockfile-tracked assistant: the install convenience has a reason to
+    // run, and the conversion has something to register.
+    await fs.writeFile(
+      path.join(home, ".vellum.lock.json"),
+      JSON.stringify({
+        assistants: [
+          {
+            assistantId: "vellum-velly",
+            name: "vellum-velly",
+            cloud: "local",
+            runtimeUrl: "http://127.0.0.1:7830",
+            resources: {
+              instanceDir: path.join(root, "assistants", "velly"),
+              gatewayPort: 7830,
+              daemonPort: 7821,
+            },
+          },
+        ],
+        activeAssistant: "vellum-velly",
+      }),
+      "utf8",
+    );
+
+    const report = await migrate({ vellumRoot: root, processOps: noopOps, noWake: true });
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
+
+    expect(report.ok).toBe(true);
+    expect(report.exitCode).toBe(0);
+    // The install still ran — --no-wake only skips the wake.
+    const install = report.steps.find((s) => s.step === "install-cadet");
+    expect(install?.status).toBe("completed");
+    const wake = report.steps.find((s) => s.step === "wake-assistants");
+    expect(wake?.status).toBe("skipped");
+    expect(wake?.summary).toContain("--no-wake");
+    // The report tells the user how to wake it later.
+    expect((report.nextSteps ?? []).join(" ")).toContain("cadet wake --all");
+    // Registration still happened: the conversion put the entry in the
+    // cadet lockfile, so `cadet wake --all` will find it later.
+    const lockfile = JSON.parse(
+      await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+    ) as { assistants: Array<{ assistantId: string }> };
+    expect(lockfile.assistants.map((a) => a.assistantId)).toContain("velly");
+  });
+});
