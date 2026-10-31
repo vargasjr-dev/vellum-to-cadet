@@ -61,7 +61,7 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     // No explicit cadetRoot: the derivation sends the legacy single root to
     // a named instance under the XDG data root.
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
-    // Sandboxed like the lockfile tests: register-instance writes the
+    // Sandboxed like the lockfile tests: the conversion writes the
     // config-dir lockfile, and an ambient HOME/XDG_CONFIG_HOME (CI runners
     // preset it) would hijack that write out of the sandboxed home.
     const prevHome = process.env.HOME;
@@ -110,31 +110,22 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(next).toContain("built-in web search");
     expect(next).toContain("Perplexity or Brave");
     // Post-migration setup: the fixture ships no vellum lockfile, so the
-    // INSTALL convenience stays conservative and skips — but register-instance
-    // registers the migrated instance in the cadet lockfile and seeds its
-    // gateway signing key (field review item 5: this shape used to end
-    // registered nowhere and wakeable by no one), so the WAKE runs against
-    // the stubbed ops instead of skipping.
-    const registration = report.steps.find((s) => s.step === "register-instance");
-    expect(registration?.status).toBe("completed");
-    expect(registration?.summary).toContain("registered vellum");
-    expect(registration?.summary).toContain("signing key");
-    const lockfileJson = JSON.parse(
-      await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
-    ) as { assistants: Array<{ assistantId: string }> };
-    expect(lockfileJson.assistants.map((a) => a.assistantId)).toContain("vellum");
-    // The signing key: the fixture ships a vellum-era key under protected/
-    // (relocated to gateway-security/ by the layout step) — a continuity
-    // case, and the step must NOT clobber it. The fresh 32-byte seed is
-    // covered by the unit tests for exports that never had a key.
+    // INSTALL convenience stays conservative and skips, and no lockfile
+    // conversion runs — nothing is registered, so the WAKE skips too
+    // (there is no entry for `cadet wake --all` to find; the lockfile
+    // synthesis for data-only exports lives in the --bundle path).
+    const install = report.steps.find((s) => s.step === "install-cadet");
+    expect(install?.status).toBe("skipped");
+    const wake = report.steps.find((s) => s.step === "wake-assistants");
+    expect(wake?.status).toBe("skipped");
+    expect(wake?.summary).toContain("no lockfile-tracked assistant");
+    // The vellum-era signing key: the fixture ships one under protected/
+    // (relocated to gateway-security/ by the layout step) — it rides
+    // through verbatim.
     const keyPath = path.join(cadetRoot, "gateway-security", "actor-token-signing-key");
     expect(await fs.readFile(keyPath, "utf8")).toBe(
       "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
     );
-    const install = report.steps.find((s) => s.step === "install-cadet");
-    expect(install?.status).toBe("skipped");
-    const wake = report.steps.find((s) => s.step === "wake-assistants");
-    expect(wake?.status).toBe("completed");
 
     // ── User workspace: byte-for-byte, including vellum prose. ──
     const userNote = await fs.readFile(path.join(cadetRoot, "workspace/notes/vellum-history.md"), "utf8");
@@ -2003,8 +1994,8 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       expect(first.ok).toBe(true);
       const lockPath = path.join(home, ".config", "cadet", "lockfile.json");
       const firstRaw = JSON.parse(await fs.readFile(lockPath, "utf8"));
-      // By id, not position: register-instance (field review item 5) may
-      // append the migrated instance's own entry alongside converted ones.
+      // By id, not position: merge-and-replace reorders survivors before
+      // converted entries, so position-based reads break.
       const entryById = (
         raw: { assistants: Array<Record<string, any>> },
         id: string,
@@ -2295,6 +2286,14 @@ describe("e2e: vbundle restore", () => {
   test("extracts the bundle as a vellum assistant, then migrates it like any other", async () => {
     const { root, home } = await buildModernVellum();
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    // Sandboxed like the lockfile tests: register-bundle-lockfile writes
+    // the vellum lockfile under the process HOME, and an ambient HOME
+    // (CI runners preset XDG_CONFIG_HOME) would hijack both that write and
+    // the cadet lockfile conversion out of the fixture home.
+    const prevHome = process.env.HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
 
     // The bundle carries a real assistant.db with vellum-branded values, a
     // workspace config with machine tokens, a skill doc, and a credential.
@@ -2331,6 +2330,10 @@ describe("e2e: vbundle restore", () => {
     );
 
     const report = await migrate({ vellumRoot: root, bundlePath, processOps: noopOps });
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
 
     expect(report.ok).toBe(true);
     expect(report.exitCode).toBe(0);
@@ -2341,6 +2344,19 @@ describe("e2e: vbundle restore", () => {
     expect(extract?.summary).toContain("restored");
     expect(extract?.summary).toContain("test-bundle");
     expect(extract?.issues?.some((i) => i.severity === "warning" && i.message.includes("anthropic"))).toBe(true);
+
+    // The restored assistant became a real vellum citizen: the synthesis
+    // wrote the VELLUM-side entry before the rest of the migration ran
+    // (field review item 5), strictly local, pointing at the restored dir.
+    const registration = report.steps.find((s) => s.step === "register-bundle-lockfile");
+    expect(registration?.status).toBe("completed");
+    const vellumLockfile = JSON.parse(
+      await fs.readFile(path.join(home, ".config", "vellum", "lockfile.json"), "utf8"),
+    ) as { assistants: Array<Record<string, any>>; activeAssistant?: string };
+    const bundleEntry = vellumLockfile.assistants.find((a) => a.assistantId === "test-bundle");
+    expect(bundleEntry?.cloud).toBe("local");
+    expect(bundleEntry?.resources?.instanceDir).toBe(path.join(root, "assistants", "test-bundle"));
+    expect(vellumLockfile.activeAssistant).toBe("test-bundle");
 
     // detect saw BOTH assistants — the pre-existing one and the restored one.
     const detect = report.steps.find((s) => s.step === "detect");
@@ -2373,6 +2389,18 @@ describe("e2e: vbundle restore", () => {
     expect(await exists(path.join(cadetRoot, "assistants/velly/workspace/notes/README.md"))).toBe(true);
     expect(await exists(path.join(root, "assistants/test-bundle"))).toBe(true); // source intact
 
+    // The standard conversion registered the migrated instance in the cadet
+    // lockfile — the same path every other assistant takes, no cadet-side
+    // special case: entry by id, instance dir mapped, fresh ports.
+    const cadetLockfile = JSON.parse(
+      await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+    ) as { assistants: Array<Record<string, any>> };
+    const cadetEntry = cadetLockfile.assistants.find((a) => a.assistantId === "test-bundle")!;
+    expect(cadetEntry.cloud).toBe("local");
+    expect(cadetEntry.resources.instanceDir).toBe(path.join(cadetRoot, "assistants", "test-bundle"));
+    expect(cadetEntry.resources.gatewayPort).not.toBe(7830);
+    expect(cadetEntry.resources.daemonPort).not.toBe(7821);
+
     // The bundle file itself is untouched — the original IS the backup.
     const bundleStat = await fs.stat(bundlePath);
     expect(bundleStat.isFile()).toBe(true);
@@ -2381,6 +2409,11 @@ describe("e2e: vbundle restore", () => {
   test("re-running with the same bundle skips the restore and verifies", async () => {
     const { root, home } = await buildModernVellum();
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    // Sandboxed like the first bundle test — the synthesis writes under HOME.
+    const prevHome = process.env.HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
     const bundlePath = path.join(home, "backup.vbundle");
     await fs.writeFile(
       bundlePath,
@@ -2391,10 +2424,18 @@ describe("e2e: vbundle restore", () => {
     expect(first.ok).toBe(true);
 
     const second = await migrate({ vellumRoot: root, bundlePath, processOps: noopOps });
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
     expect(second.ok).toBe(true);
     expect(second.exitCode).toBe(0);
     const extract = second.steps.find((s) => s.step === "extract-bundle");
     expect(extract?.status).toBe("skipped");
     expect(extract?.summary).toContain("already restored");
+    // The lockfile entry is idempotent too: the second run's synthesis sees
+    // the id already recorded and skips without rewriting.
+    const registration = second.steps.find((s) => s.step === "register-bundle-lockfile");
+    expect(registration?.status).toBe("skipped");
   });
 });
