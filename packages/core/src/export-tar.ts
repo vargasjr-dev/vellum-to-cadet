@@ -121,6 +121,8 @@ class TarReader {
   /** Padding bytes that follow the body, consumed before the next header. */
   private pendingPad = 0;
   private paxPath: string | null = null;
+  /** PAX `size` record for the entry that follows the x record, if any. */
+  private paxSize: number | null = null;
   /** Decompressed bytes consumed so far — header diagnostics read by offset. */
   private readBytes = 0;
 
@@ -149,7 +151,15 @@ class TarReader {
         `not a tar archive (bad header magic at decompressed byte offset ${headerOffset})`,
       );
     const typeflag = String.fromCharCode(block[156]!);
-    const size = readHeaderSize(block);
+    let size = readHeaderSize(block);
+    // A PAX `size` record overrides the (zeroed) ustar size field for the
+    // file entry it accompanies — bsdtar's ONLY way to express a > 8 GiB
+    // entry (GNU tar uses base-256 in the header field; both appear in real
+    // exports). Never applies to the x/L records themselves.
+    if (typeflag !== "x" && typeflag !== "L" && this.paxSize !== null) {
+      size = this.paxSize;
+      this.paxSize = null;
+    }
     this.pendingBody = size;
     this.pendingPad = size % BLOCK === 0 ? 0 : BLOCK - (size % BLOCK);
     let name = headerName(block);
@@ -171,6 +181,13 @@ class TarReader {
         name = data.toString("utf8").replace(/\0+$/, "");
       } else {
         this.paxPath = paxRecordValue(data, "path") ?? this.paxPath;
+        const paxSize = paxRecordValue(data, "size");
+        if (paxSize !== null) {
+          const parsed = Number(paxSize);
+          // Garbage in the record is ignored — the ustar field stays
+          // authoritative (a NaN size would silently defeat every cap).
+          if (Number.isFinite(parsed) && parsed >= 0) this.paxSize = parsed;
+        }
       }
       return this.next();
     }

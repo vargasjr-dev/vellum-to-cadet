@@ -11,6 +11,7 @@ import { expect } from "../helpers/expect.js";
 import {
   buildExportTar,
   buildVBundleArchive,
+  paxSizedEntryBytes,
   rawTarHeader,
   tarEntryBytes,
 } from "../helpers/vbundle-fixture.js";
@@ -431,6 +432,61 @@ describe("real-export scale", () => {
       async () => inspectExportTar(tarPath),
       /bad header magic at decompressed byte offset 1024/,
     );
+  });
+
+  test("honors a PAX size record on an entry whose ustar field is zeroed (bsdtar)", async () => {
+    // bsdtar expresses > 8 GiB entries as a PAX `size` record with the ustar
+    // size field left empty — the record is the only truth. Without it the
+    // reader sizes the entry as 0, desyncs on the real body, and the next
+    // header fails the magic check.
+    const dir = await staging();
+    const tar = Buffer.concat([
+      paxSizedEntryBytes("velly-workspace/assistant.db", 4096),
+      Buffer.alloc(4096), // the body the PAX record declares
+      Buffer.alloc(512 * 2),
+    ]);
+    const info = await inspectExportTar(
+      await writeTar(dir, tar, "pax-small.tar"),
+    );
+    expect(info.entries).toBe(1);
+    expect(info.totalBytes).toBe(4096);
+    expect(info.volumes.workspace).toBe("velly-workspace");
+  });
+
+  test("honors a PAX size record for an entry larger than the ustar field can express", { timeout: 300_000 }, async () => {
+    const dir = await staging();
+    const tarPath = path.join(dir, "pax-giant.tar.gz");
+    async function* source(): AsyncGenerator<Buffer> {
+      yield paxSizedEntryBytes("velly-workspace/assistant.db", GIANT_SIZE);
+      const chunk = Buffer.alloc(8 * 1024 * 1024);
+      let left = GIANT_SIZE;
+      while (left > 0) {
+        const take = Math.min(left, chunk.length);
+        yield take === chunk.length ? chunk : chunk.subarray(0, take);
+        left -= take;
+      }
+      yield Buffer.alloc(512 * 2);
+    }
+    await pipeline(Readable.from(source()), createGzip(), createWriteStream(tarPath));
+
+    const info = await inspectExportTar(tarPath);
+    expect(info.entries).toBe(1);
+    expect(info.totalBytes).toBe(GIANT_SIZE);
+  });
+
+  test("ignores a malformed PAX size record instead of defeating the caps", async () => {
+    const dir = await staging();
+    // Number("notanumber") is NaN — the record must be discarded and the
+    // (zeroed) ustar field stay authoritative, never a NaN size.
+    const tar = Buffer.concat([
+      paxSizedEntryBytes("velly-workspace/a.txt", "notanumber"),
+      Buffer.alloc(512 * 2),
+    ]);
+    const info = await inspectExportTar(
+      await writeTar(dir, tar, "pax-garbage.tar"),
+    );
+    expect(info.entries).toBe(1);
+    expect(info.totalBytes).toBe(0);
   });
 });
 
