@@ -19,6 +19,7 @@ import {
   migrateGatewayDbAt,
 } from "./steps/migrate-assistant-db.js";
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
+import { registerInstanceStep } from "./steps/register-instance.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
 import {
@@ -32,7 +33,7 @@ import {
   vellumVolumeNames,
   verifyDockerVolumeData,
 } from "./steps/migrate-docker-volumes.js";
-import { readLockfileAssistants } from "./discover.js";
+import { readCadetLockfileAssistantCount, readLockfileAssistants } from "./discover.js";
 import { extractBundleStep } from "./steps/extract-bundle.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
@@ -622,8 +623,15 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //    containerInfo pointed at the vellum images the containers ran
   //    before). Its version is captured right after the install.
   const assistantCount = (await readLockfileAssistants()).length;
+  // The install decision stays conservative — a global npm/bun install is a
+  // real network operation, only worth attempting when the vellum lockfile
+  // tracked assistants. The WAKE count below is what the registration fixes:
+  // a data-only --bundle BOOTSTRAP records no vellum assistants, yet the
+  // freshly registered instance is real and wakeable (field review item 5).
+  const wakeCount = Math.max(assistantCount, detect.assistantHandles.length);
+
   start("install-cadet");
-  const install = await installCadetCli(ops, assistantCount, { retryAsSudo: options.retryInstallAsSudo });
+  const install = await installCadetCli(ops, wakeCount, { retryAsSudo: options.retryInstallAsSudo });
   done(install);
   const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
   const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;
@@ -655,6 +663,34 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     cadetVersionUnavailableReason: cadetVersionReason,
   });
   done(lockfile);
+
+  // 4.2 Register the migrated instance in the cadet lockfile and seed its
+  //     gateway signing key — the end state a data-only --bundle BOOTSTRAP
+  //     could never reach on its own (field review item 5): with no vellum
+  //     lockfile in the export, no entry landed for the migrated dir and
+  //     the export never carried the signing identity, so wake had nothing
+  //     to wake and failed the continuity check when it did. Runs AFTER the
+  //     conversion (a same-id converted entry wins — real data over
+  //     synthesis — and the legacy home-level lockfile move happens
+  //     undisturbed) and BEFORE the wake. Additive and idempotent: existing
+  //     entries and keys are never touched.
+  start("register-instance");
+  done(
+    await registerInstanceStep({
+      instanceDir: targetCtx.nested
+        ? path.join(detect.cadetRoot, "assistants", targetCtx.instanceName)
+        : detect.cadetRoot,
+      instanceName: targetCtx.instanceName,
+      envSuffix: envSuffixFor(detect.vellumRoot),
+    }),
+  );
+  // The wake count takes the DESTINATION lockfile into account too: a
+  // data-only bundle records no vellum assistants, and the freshly
+  // registered instance is real.
+  const destAssistantCount = await readCadetLockfileAssistantCount(
+    envSuffixFor(detect.vellumRoot),
+  );
+  const finalWakeCount = Math.max(wakeCount, destAssistantCount);
 
   // 4.5 Retired-assistant archives ride along verbatim — untar each one,
   // run the same assistant-logic migration over the extracted tree, re-tar.
@@ -708,7 +744,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     }),
   );
   start("wake-assistants");
-  done(await wakeAssistants(ops, assistantCount, install.data?.["binAvailable"] === true));
+  // When the install skipped (no lockfile-tracked assistants), the binary's
+  // availability was never probed — probe it now: the registered migrated
+  // instance is wakeable the moment a cadet exists on PATH (field review
+  // item 5 — a --bundle BOOTSTRAP on a machine that already runs cadet).
+  const wakeBinAvailable =
+    install.data?.["binAvailable"] === true ||
+    (install.status === "skipped" ? await ops.cadetBinAvailable() : false);
+  done(await wakeAssistants(ops, finalWakeCount, wakeBinAvailable));
 
   // Provision the detected vellum domain + email on the cadet cloud — if
   // and only after they create a cadet account (`cadet login` above) and

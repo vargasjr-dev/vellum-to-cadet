@@ -61,6 +61,13 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     // No explicit cadetRoot: the derivation sends the legacy single root to
     // a named instance under the XDG data root.
     process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    // Sandboxed like the lockfile tests: register-instance writes the
+    // config-dir lockfile, and an ambient HOME/XDG_CONFIG_HOME (CI runners
+    // preset it) would hijack that write out of the sandboxed home.
+    const prevHome = process.env.HOME;
+    const prevXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, ".config");
     const cadetRoot = path.join(home, ".local", "share", "cadet", "assistants", "vellum");
 
     const report = await migrate({
@@ -68,6 +75,12 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
       cadetRoot,
       processOps: noopOps,
     });
+    // Restored before the assertions — only migrate() consumed the env, and
+    // every read below uses absolute fixture paths.
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfigHome;
 
     expect(report.ok).toBe(true);
     expect(report.exitCode).toBe(0);
@@ -96,12 +109,32 @@ describe("e2e: full vellum 0.12.6 workspace", () => {
     expect(next).toContain("Add an ElevenLabs API key");
     expect(next).toContain("built-in web search");
     expect(next).toContain("Perplexity or Brave");
-    // Post-migration setup: the fixture has no lockfile, so both skip.
+    // Post-migration setup: the fixture ships no vellum lockfile, so the
+    // INSTALL convenience stays conservative and skips — but register-instance
+    // registers the migrated instance in the cadet lockfile and seeds its
+    // gateway signing key (field review item 5: this shape used to end
+    // registered nowhere and wakeable by no one), so the WAKE runs against
+    // the stubbed ops instead of skipping.
+    const registration = report.steps.find((s) => s.step === "register-instance");
+    expect(registration?.status).toBe("completed");
+    expect(registration?.summary).toContain("registered vellum");
+    expect(registration?.summary).toContain("signing key");
+    const lockfileJson = JSON.parse(
+      await fs.readFile(path.join(home, ".config", "cadet", "lockfile.json"), "utf8"),
+    ) as { assistants: Array<{ assistantId: string }> };
+    expect(lockfileJson.assistants.map((a) => a.assistantId)).toContain("vellum");
+    // The signing key: the fixture ships a vellum-era key under protected/
+    // (relocated to gateway-security/ by the layout step) — a continuity
+    // case, and the step must NOT clobber it. The fresh 32-byte seed is
+    // covered by the unit tests for exports that never had a key.
+    const keyPath = path.join(cadetRoot, "gateway-security", "actor-token-signing-key");
+    expect(await fs.readFile(keyPath, "utf8")).toBe(
+      "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
+    );
     const install = report.steps.find((s) => s.step === "install-cadet");
     expect(install?.status).toBe("skipped");
-    expect(install?.summary).toContain("no lockfile-tracked assistant(s)");
     const wake = report.steps.find((s) => s.step === "wake-assistants");
-    expect(wake?.status).toBe("skipped");
+    expect(wake?.status).toBe("completed");
 
     // ── User workspace: byte-for-byte, including vellum prose. ──
     const userNote = await fs.readFile(path.join(cadetRoot, "workspace/notes/vellum-history.md"), "utf8");
@@ -1970,7 +2003,13 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       expect(first.ok).toBe(true);
       const lockPath = path.join(home, ".config", "cadet", "lockfile.json");
       const firstRaw = JSON.parse(await fs.readFile(lockPath, "utf8"));
-      const firstEntry = firstRaw.assistants[0];
+      // By id, not position: register-instance (field review item 5) may
+      // append the migrated instance's own entry alongside converted ones.
+      const entryById = (
+        raw: { assistants: Array<Record<string, any>> },
+        id: string,
+      ) => raw.assistants.find((a) => a.assistantId === id)!;
+      const firstEntry = entryById(firstRaw, "velly");
       // Fresh ports: the vellum install (possibly still running) keeps its
       // port space, and the runtime url follows the gateway port.
       expect(firstEntry.resources.gatewayPort).not.toBe(7830);
@@ -1992,7 +2031,7 @@ describe("e2e: cadet lockfile conversion + legacy credentials", () => {
       // The re-run adopts the first run's ports — healing the lockfile never
       // churns the ports of an already-migrated (possibly awake) assistant.
       const secondRaw = JSON.parse(await fs.readFile(lockPath, "utf8"));
-      const secondEntry = secondRaw.assistants[0];
+      const secondEntry = entryById(secondRaw, "velly");
       expect(secondEntry.resources.gatewayPort).toBe(firstEntry.resources.gatewayPort);
       expect(secondEntry.resources.daemonPort).toBe(firstEntry.resources.daemonPort);
       expect(secondEntry.runtimeUrl).toBe(firstEntry.runtimeUrl);

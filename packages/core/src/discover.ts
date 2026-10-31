@@ -504,6 +504,28 @@ export async function readLockfileAssistants(): Promise<
 }
 
 /**
+ * The assistant count the DESTINATION cadet lockfile records (the canonical
+ * config-dir one, `~/.config/cadet[-env]/lockfile.json`) — the count the
+ * install/wake decision must respect: a data-only `--bundle BOOTSTRAP`
+ * ships no vellum lockfile, so the vellum count is 0 while the registered
+ * migrated instance is real. Best-effort: missing or unparsable → 0.
+ */
+export async function readCadetLockfileAssistantCount(
+  envSuffix: string,
+): Promise<number> {
+  try {
+    const configHome =
+      process.env.XDG_CONFIG_HOME?.trim() ||
+      path.join(process.env.HOME?.trim() || os.homedir(), ".config");
+    const dest = path.join(configHome, `cadet${envSuffix}`, "lockfile.json");
+    const raw = JSON.parse(await fs.readFile(dest, "utf8")) as Record<string, unknown>;
+    return Array.isArray(raw.assistants) ? raw.assistants.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * The instances the lockfile records as docker-deployed, plus their images.
  * Only lockfile-tracked assistants matter — the vellum CLI's own `sleep`
  * command stops their containers, so the migrator never touches docker
