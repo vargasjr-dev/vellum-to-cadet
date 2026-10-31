@@ -132,6 +132,17 @@ export interface MigrateOptions {
   /** Verbose logging to stderr. */
   verbose?: boolean;
   /**
+   * Repeatable: skip matching files from the migration copy. Globs match
+   * the source-relative path, the basename, or any directory name along
+   * the way (`*.db`, `assistant-logs.db`, `cache/` prunes a directory).
+   * Only content-untouched files are excludable — rewrite-category
+   * structural files (the config contracts the migrator transforms), the
+   * discovery markers, and the lockfiles are never skipped, so a bad
+   * pattern cannot break the migration; excluded dbs surface as
+   * honestly-skipped db steps.
+   */
+  exclude?: string[];
+  /**
    * Skip the final wake: everything else runs exactly as normal (cadet
    * install, lockfile conversion, registration), but the migrated
    * assistant(s) are left asleep — `cadet wake --all` when ready.

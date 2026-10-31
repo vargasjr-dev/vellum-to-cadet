@@ -2496,3 +2496,36 @@ describe("e2e: --no-wake", () => {
     expect(lockfile.assistants.map((a) => a.assistantId)).toContain("velly");
   });
 });
+
+describe("e2e: --exclude", () => {
+  test("skips the matching verbatim files but migrates the assistant", async () => {
+    const { root, home } = await buildModernVellum();
+    process.env.XDG_DATA_HOME = path.join(home, ".local", "share");
+    // Plant a logs db in the assistant's state dir — the field case (item
+    // 4b): big, churny, but the user keeps it OUT only by explicit choice.
+    const logsDb = path.join(root, "assistants", "velly", ".vellum", "logs", "assistant-logs.db");
+    await fs.mkdir(path.dirname(logsDb), { recursive: true });
+    await fs.writeFile(logsDb, "x".repeat(4096));
+
+    const report = await migrate({ vellumRoot: root, processOps: noopOps, exclude: ["assistant-logs.db"] });
+    expect(report.ok).toBe(true);
+
+    // The file is NOT in the migrated root…
+    const cadetDb = path.join(home, ".local", "share", "cadet", "assistants", "velly", ".vellum", "logs", "assistant-logs.db");
+    expect(
+      await fs
+        .access(cadetDb)
+        .then(() => false, () => true),
+    ).toBe(true);
+    // …and the layout step says so, loudly.
+    const layout = report.steps.find((s) => s.step === "migrate-layout");
+    expect(layout?.status).toBe("completed");
+    expect((layout?.issues ?? []).map((i) => i.message).join(" ")).toContain("--exclude skipped 1 file(s)");
+    // While the rest of the assistant migrated intact.
+    expect(
+      await fs
+        .access(path.join(home, ".local", "share", "cadet", "assistants", "velly", "workspace"))
+        .then(() => true, () => false),
+    ).toBe(true);
+  });
+});

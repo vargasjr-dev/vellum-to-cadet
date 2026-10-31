@@ -190,6 +190,61 @@ export interface WalkEntry {
   isDirectory: boolean;
 }
 
+/**
+ * Glob match for `--exclude`: `*`/`?` stay within one path segment, `**`
+ * crosses segments. A pattern matches the file's source-relative path, its
+ * basename, or any ancestor DIRECTORY matched segment-aligned from the
+ * right — so `cache` (or `cache/`) prunes every directory named `cache`
+ * and everything under it, `a.b` prunes a dir named `a.b`, and
+ * `assistant-logs.db` catches the file by name at any depth. Everything
+ * else matches literally.
+ */
+export function matchesExclude(relPath: string, patterns: string[]): boolean {
+  const posix = relPath.split(path.sep).join("/");
+  const parts = posix.split("/");
+  const base = parts[parts.length - 1]!;
+  const compiled = patterns
+    .map((raw) => raw.replace(/\/+$/, ""))
+    .filter((pat) => pat !== "")
+    .map((pat) => ({ re: excludeGlobToRegExp(pat), segCount: pat.split("/").length }));
+  if (compiled.length === 0) return false;
+  // The file itself: full source-relative path or bare basename.
+  if (compiled.some(({ re }) => re.test(posix) || re.test(base))) return true;
+  // Any ancestor directory, matched against the directory's own trailing
+  // segments (pattern depth-bounded — `**` inside a pattern still spans
+  // segments within that tail).
+  for (let i = 1; i < parts.length; i++) {
+    const segs = parts.slice(0, i);
+    for (const { re, segCount } of compiled) {
+      const k = Math.min(segCount, segs.length);
+      if (re.test(segs.slice(segs.length - k).join("/"))) return true;
+    }
+  }
+  return false;
+}
+
+/** `*`/`?` stay in-segment, `**` crosses segments, everything else literal. */
+function excludeGlobToRegExp(glob: string): RegExp {
+  let src = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        src += ".*";
+        i++;
+        if (glob[i + 1] === "/") i++;
+      } else {
+        src += "[^/]*";
+      }
+    } else if (c === "?") {
+      src += "[^/]";
+    } else {
+      src += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${src}$`);
+}
+
 /** Depth-first walk of a tree, directories before their contents. */
 export async function walkTree(root: string): Promise<WalkEntry[]> {
   const out: WalkEntry[] = [];
