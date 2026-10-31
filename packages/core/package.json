@@ -1,6 +1,6 @@
 {
   "name": "@mycadet/vellum",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Migrate a vellum assistant workspace to cadet. Reads vellum 0.12.x data the same way the vellum assistant did, and writes it to the cadet layout.",
   "license": "UNLICENSED",
   "type": "module",
