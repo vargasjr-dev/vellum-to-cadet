@@ -131,6 +131,12 @@ export interface MigrateOptions {
   yes?: boolean;
   /** Verbose logging to stderr. */
   verbose?: boolean;
+  /**
+   * Skip the final wake: everything else runs exactly as normal (cadet
+   * install, lockfile conversion, registration), but the migrated
+   * assistant(s) are left asleep — `cadet wake --all` when ready.
+   */
+  noWake?: boolean;
   /** True when this process IS the detached child (--internal-run): the launcher already confirmed. */
   internalRun?: boolean;
   /**

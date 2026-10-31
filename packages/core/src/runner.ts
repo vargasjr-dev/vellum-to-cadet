@@ -478,7 +478,16 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     // like the fresh flow would.
     const reAssistantCount = (await readLockfileAssistants()).length;
     start("wake-assistants");
-    done(await wakeAssistants(ops, reAssistantCount, reBinAvailable));
+    if (options.noWake) {
+      done({
+        step: "wake-assistants",
+        status: "skipped",
+        summary:
+          "--no-wake — the migrated assistant(s) are registered but left asleep; `cadet wake --all` when you're ready",
+      });
+    } else {
+      done(await wakeAssistants(ops, reAssistantCount, reBinAvailable));
+    }
     // Provision the detected vellum domain + email on the cadet cloud —
     // only once a cadet account exists (`cadet login` above) and the
     // migrated assistants have registered with it (the wake). No account
@@ -747,14 +756,25 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     }),
   );
   start("wake-assistants");
-  // When the install skipped (no lockfile-tracked assistants), the binary's
-  // availability was never probed — probe it now: the migrated assistant is
-  // wakeable the moment a cadet exists on PATH (field review item 5 — a
-  // --bundle BOOTSTRAP on a machine that already runs cadet).
-  const wakeBinAvailable =
-    install.data?.["binAvailable"] === true ||
-    (install.status === "skipped" ? await ops.cadetBinAvailable() : false);
-  done(await wakeAssistants(ops, finalWakeCount, wakeBinAvailable));
+  if (options.noWake) {
+    // --no-wake: everything else ran exactly as normal — the assistant(s)
+    // are registered and cadet is installed — but they stay asleep.
+    done({
+      step: "wake-assistants",
+      status: "skipped",
+      summary:
+        "--no-wake — the migrated assistant(s) are registered but left asleep; `cadet wake --all` when you're ready",
+    });
+  } else {
+    // When the install skipped (no lockfile-tracked assistants), the binary's
+    // availability was never probed — probe it now: the migrated assistant is
+    // wakeable the moment a cadet exists on PATH (field review item 5 — a
+    // --bundle BOOTSTRAP on a machine that already runs cadet).
+    const wakeBinAvailable =
+      install.data?.["binAvailable"] === true ||
+      (install.status === "skipped" ? await ops.cadetBinAvailable() : false);
+    done(await wakeAssistants(ops, finalWakeCount, wakeBinAvailable));
+  }
 
   // Provision the detected vellum domain + email on the cadet cloud — if
   // and only after they create a cadet account (`cadet login` above) and
@@ -844,6 +864,22 @@ function provisionPendingNextSteps(steps: StepResult[]): string[] {
     : [];
 }
 
+/** The --no-wake note — the migration registered everything and woke nothing. */
+function noWakeNextSteps(steps: StepResult[]): string[] {
+  const skippedByFlag = steps.some(
+    (s) =>
+      s.step === "wake-assistants" &&
+      s.status === "skipped" &&
+      typeof s.summary === "string" &&
+      s.summary.includes("--no-wake"),
+  );
+  return skippedByFlag
+    ? [
+        "Run `cadet wake --all` when you're ready — the migration left the assistant(s) asleep (--no-wake).",
+      ]
+    : [];
+}
+
 function finish(
   detect: DetectInfo,
   steps: StepResult[],
@@ -853,7 +889,11 @@ function finish(
   exitCode: MigrationReport["exitCode"],
 ): MigrationReport {
   const finishedAt = new Date().toISOString();
-  const nextSteps = [...(cutoverNextSteps(steps) ?? []), ...provisionPendingNextSteps(steps)];
+  const nextSteps = [
+    ...noWakeNextSteps(steps),
+    ...(cutoverNextSteps(steps) ?? []),
+    ...provisionPendingNextSteps(steps),
+  ];
   return {
     ok: exitCode === EXIT_CODES.ok,
     exitCode,
