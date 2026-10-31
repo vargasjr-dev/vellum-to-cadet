@@ -243,7 +243,13 @@ async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Pro
           status: "skipped",
           summary: `bundle already restored into the root at ${vellumRoot} — nothing to do`,
           issues,
-          data: { assistantName, bundleId: manifest.bundle_id, alreadyRestored: true },
+          data: {
+            assistantName,
+            bundleId: manifest.bundle_id,
+            alreadyRestored: true,
+            vellumRoot,
+            assistantDir: targetDir,
+          },
         };
       }
       return fail(
@@ -258,7 +264,13 @@ async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Pro
         status: "skipped",
         summary: `bundle already restored as ${displayTarget} — nothing to do`,
         issues,
-        data: { assistantName, bundleId: manifest.bundle_id, alreadyRestored: true },
+        data: {
+          assistantName,
+          bundleId: manifest.bundle_id,
+          alreadyRestored: true,
+          vellumRoot,
+          assistantDir: targetDir,
+        },
       };
     }
     return fail(
@@ -348,7 +360,6 @@ async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Pro
       ...new Set(extracted.credentials.map((c) => c.account)),
     ]);
     if (credIssue) issues.push(credIssue);
-    issues.push(NOT_IN_LOCKFILE_NOTE);
     return {
       step,
       status: "completed",
@@ -363,6 +374,8 @@ async function restoreVBundle(options: MigrateOptions, issues: StepIssue[]): Pro
         credentials: extracted.credentials.length,
         symlinks: extracted.symlinkCount,
         layout,
+        vellumRoot,
+        assistantDir: targetDir,
       },
     };
   } catch (err) {
@@ -463,7 +476,14 @@ async function restoreExportTar(options: MigrateOptions, issues: StepIssue[]): P
             ? `export already restored as ${displayTarget} — nothing to do`
             : `export already restored into the root at ${vellumRoot} — nothing to do`,
         issues,
-        data: { assistantName, bundleId, alreadyRestored: true, layout },
+        data: {
+          assistantName,
+          bundleId,
+          alreadyRestored: true,
+          layout,
+          vellumRoot,
+          assistantDir: targetDir,
+        },
       };
     }
     if (layout === "modern") {
@@ -556,7 +576,6 @@ async function restoreExportTar(options: MigrateOptions, issues: StepIssue[]): P
       }
     }
 
-    issues.push(NOT_IN_LOCKFILE_NOTE);
     return {
       step,
       status: "completed",
@@ -571,6 +590,8 @@ async function restoreExportTar(options: MigrateOptions, issues: StepIssue[]): P
         skippedEntries: extracted.skipped.length,
         volumes: volumeNames,
         layout,
+        vellumRoot,
+        assistantDir: targetDir,
       },
     };
   } catch (err) {

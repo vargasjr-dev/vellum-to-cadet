@@ -19,6 +19,7 @@ import {
   migrateGatewayDbAt,
 } from "./steps/migrate-assistant-db.js";
 import { migrateLockfile } from "./steps/migrate-lockfile.js";
+import { registerBundleLockfileStep } from "./steps/register-bundle-lockfile.js";
 import { migrateRetiredArchives, migrateRetiredManifests } from "./steps/migrate-retired.js";
 import { migrateCredentialsStep } from "./steps/scrub-credentials.js";
 import {
@@ -32,7 +33,7 @@ import {
   vellumVolumeNames,
   verifyDockerVolumeData,
 } from "./steps/migrate-docker-volumes.js";
-import { readLockfileAssistants } from "./discover.js";
+import { readCadetLockfileAssistantCount, readLockfileAssistants } from "./discover.js";
 import { extractBundleStep } from "./steps/extract-bundle.js";
 import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js";
 import { cadetImageRefs } from "./cadet-images.js";
@@ -150,6 +151,28 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
       // detected state honestly alongside the failure.
       const failedDetect: DetectInfo = await detectStep(options, ops);
       return finish(failedDetect, steps, "plan", startedAt, null, EXIT_CODES.migrationFailed);
+    }
+    // The restored assistant becomes a real vellum citizen BEFORE the rest
+    // of the migration runs: a data-only export carries no lockfile state,
+    // so synthesize the VELLUM-side entry and let the standard conversion
+    // produce the cadet one (field review item 5). Runs on the extract's
+    // idempotent skip too — the entry lands once and is never rewritten.
+    if (extraction.status === "completed" || extraction.status === "skipped") {
+      const bundleRoot =
+        typeof extraction.data?.["vellumRoot"] === "string" ? extraction.data["vellumRoot"] : "";
+      const assistantName =
+        typeof extraction.data?.["assistantName"] === "string" ? extraction.data["assistantName"] : "";
+      const assistantDir =
+        typeof extraction.data?.["assistantDir"] === "string" ? extraction.data["assistantDir"] : "";
+      start("register-bundle-lockfile");
+      done(
+        await registerBundleLockfileStep({
+          vellumRoot: bundleRoot,
+          assistantName,
+          assistantDir,
+          envSuffix: envSuffixFor(bundleRoot),
+        }),
+      );
     }
   }
 
@@ -622,8 +645,16 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
   //    containerInfo pointed at the vellum images the containers ran
   //    before). Its version is captured right after the install.
   const assistantCount = (await readLockfileAssistants()).length;
+  // The install decision stays conservative — a global npm/bun install is a
+  // real network operation, only worth attempting when the vellum lockfile
+  // tracked assistants (a --bundle BOOTSTRAP's synthesized entry counts —
+  // register-bundle-lockfile runs before detect). The WAKE count below is
+  // what the conversion + synthesis fix: a data-only --bundle BOOTSTRAP
+  // ends with a real, wakeable assistant (field review item 5).
+  const wakeCount = Math.max(assistantCount, detect.assistantHandles.length);
+
   start("install-cadet");
-  const install = await installCadetCli(ops, assistantCount, { retryAsSudo: options.retryInstallAsSudo });
+  const install = await installCadetCli(ops, wakeCount, { retryAsSudo: options.retryInstallAsSudo });
   done(install);
   const cadetVersion = typeof install.data?.["version"] === "string" ? install.data["version"] : null;
   const cadetImages = cadetVersion ? cadetImageRefs(cadetVersion) : null;
@@ -655,6 +686,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     cadetVersionUnavailableReason: cadetVersionReason,
   });
   done(lockfile);
+
+  // The wake count takes the DESTINATION lockfile into account too: the
+  // converted entries are real wakeable assistants even when the vellum
+  // lockfile tracked nothing.
+  const destAssistantCount = await readCadetLockfileAssistantCount(
+    envSuffixFor(detect.vellumRoot),
+  );
+  const finalWakeCount = Math.max(wakeCount, destAssistantCount);
 
   // 4.5 Retired-assistant archives ride along verbatim — untar each one,
   // run the same assistant-logic migration over the extracted tree, re-tar.
@@ -708,7 +747,14 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     }),
   );
   start("wake-assistants");
-  done(await wakeAssistants(ops, assistantCount, install.data?.["binAvailable"] === true));
+  // When the install skipped (no lockfile-tracked assistants), the binary's
+  // availability was never probed — probe it now: the migrated assistant is
+  // wakeable the moment a cadet exists on PATH (field review item 5 — a
+  // --bundle BOOTSTRAP on a machine that already runs cadet).
+  const wakeBinAvailable =
+    install.data?.["binAvailable"] === true ||
+    (install.status === "skipped" ? await ops.cadetBinAvailable() : false);
+  done(await wakeAssistants(ops, finalWakeCount, wakeBinAvailable));
 
   // Provision the detected vellum domain + email on the cadet cloud — if
   // and only after they create a cadet account (`cadet login` above) and
