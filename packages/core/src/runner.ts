@@ -505,12 +505,12 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   if (options.dryRun) {
     start("plan-copy");
-    const plan = await buildCopyPlan(detect.vellumRoot);
+    const { actions: plan, excluded } = await buildCopyPlan(detect.vellumRoot, options.exclude ?? []);
     const rewrites = plan.filter((p) => p.action === "rewrite").length;
     done({
       step: "plan-copy",
       status: "planned",
-      summary: `dry run: ${plan.length} entries would be migrated to ${detect.cadetRoot} (${rewrites} rewritten)`,
+      summary: `dry run: ${plan.length} entries would be migrated to ${detect.cadetRoot} (${rewrites} rewritten)${excluded.length > 0 ? `, ${excluded.length} excluded by --exclude` : ""}`,
       files: plan,
     });
     return finish(detect, steps, "plan", startedAt, null, EXIT_CODES.ok);
@@ -536,7 +536,7 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
 
   // 3. Migrate the layout (copy + renames + rewrites + manifest).
   start("migrate-layout");
-  const mig = await migrateLayout(detect, timestamp, targetCtx);
+  const mig = await migrateLayout(detect, timestamp, targetCtx, options.exclude ?? []);
   done(mig);
   if (mig.status === "failed") {
     return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.migrationFailed);

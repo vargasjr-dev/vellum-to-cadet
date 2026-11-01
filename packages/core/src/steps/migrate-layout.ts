@@ -7,6 +7,7 @@ import {
   isRewriteEligible,
   isUnderWorkspaceRuntime,
   isVerbatimDir,
+  matchesExclude,
   renameRelativePath,
   sanctionedContentTransform,
   stateRelativePath,
@@ -23,9 +24,28 @@ import type { FileAction, DetectInfo, StepIssue, StepResult } from "../types.js"
  *   rename-only — text file whose *path* changed but contents are untouched
  *   verbatim    — byte-for-byte copy (user data, keys, databases, binaries)
  */
-export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
+/**
+ * Paths --exclude must never touch: the assistant discovery markers and
+ * the lockfiles. Everything else in the verbatim category is fair game.
+ */
+const EXCLUDE_PROTECTED_SEGMENTS = new Set([".vellum-assistant"]);
+const EXCLUDE_PROTECTED_BASENAMES = new Set([".vellum.lock.json", ".vellum.lockfile.json"]);
+
+function isExcludeProtected(relPath: string): boolean {
+  const posix = relPath.split(path.sep).join("/");
+  return (
+    posix.split("/").some((seg) => EXCLUDE_PROTECTED_SEGMENTS.has(seg)) ||
+    EXCLUDE_PROTECTED_BASENAMES.has(posix.slice(posix.lastIndexOf("/") + 1))
+  );
+}
+
+export async function buildCopyPlan(
+  vellumRoot: string,
+  exclude: string[] = [],
+): Promise<{ actions: FileAction[]; excluded: FileAction[] }> {
   const entries = await walkTree(vellumRoot);
   const plan: FileAction[] = [];
+  const excluded: FileAction[] = [];
 
   for (const entry of entries) {
     const destRel = renameRelativePath(entry.relPath);
@@ -34,6 +54,10 @@ export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
     // that is assistants/<name>/.vellum/, which dissolves into the dest.
     const stateRel = stateRelativePath(entry.relPath);
     if (entry.isDirectory) {
+      if (exclude.length > 0 && matchesExclude(entry.relPath, exclude)) {
+        excluded.push({ src: entry.relPath, dest: destRel, action: "verbatim", bytes: 0 });
+        continue;
+      }
       plan.push({
         src: entry.relPath,
         dest: destRel,
@@ -51,24 +75,40 @@ export async function buildCopyPlan(vellumRoot: string): Promise<FileAction[]> {
       action = "rename-only";
     }
 
-    plan.push({
+    const planned = {
       src: entry.relPath,
       dest: destRel,
       action,
       bytes: stat.size,
-    });
+    };
+    // --exclude only skips content-untouched files (verbatim + rename-only
+    // user data, logs, caches) — never REWRITE-category structural files
+    // (their transforms expect them), never the markers and lockfiles the
+    // migrated assistant is built from. Removing a rewrite file would
+    // break the migration; a skipped log file regrows.
+    if (
+      action !== "rewrite" &&
+      exclude.length > 0 &&
+      !isExcludeProtected(entry.relPath) &&
+      matchesExclude(entry.relPath, exclude)
+    ) {
+      excluded.push(planned);
+      continue;
+    }
+    plan.push(planned);
   }
 
-  return plan;
+  return { actions: plan, excluded };
 }
 
 export async function migrateLayout(
   detect: DetectInfo,
   timestamp: string,
   targetCtx: MigrationTargetCtx = DEFAULT_TARGET_CTX,
+  exclude: string[] = [],
 ): Promise<StepResult> {
   try {
-    const plan = await buildCopyPlan(detect.vellumRoot);
+    const { actions: plan, excluded } = await buildCopyPlan(detect.vellumRoot, exclude);
     const { substeps } = await execute(detect, plan, timestamp, targetCtx);
 
     const fileCount = plan.filter((p) => p.bytes > 0 || p.action === "verbatim").length;
@@ -94,6 +134,16 @@ export async function migrateLayout(
         });
       }
       seenDests.add(p.dest);
+    }
+
+    // --exclude: the skipped content is a user decision, but it must be
+    // impossible to miss in the report.
+    if (excluded.length > 0) {
+      const excludedBytes = excluded.reduce((sum, e) => sum + e.bytes, 0);
+      takeaways.push({
+        severity: "warning",
+        message: `--exclude skipped ${excluded.length} file(s) (${(excludedBytes / 1024 / 1024).toFixed(1)} MB) — they are NOT in the migrated root`,
+      });
     }
 
     if (rewrites.length + renamed.length + dbs.length > 0) {
@@ -125,6 +175,7 @@ export async function migrateLayout(
         dbArtifactsVerbatim: dbs.map((d) => d.src),
         workspaceRuntimeVerbatim: runtimeData.length,
         substeps,
+        excluded: excluded.map((e) => ({ src: e.src, bytes: e.bytes })),
       },
     };
   } catch (err) {

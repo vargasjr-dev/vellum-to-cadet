@@ -88,6 +88,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--no-wake":
         parsed.noWake = true;
         break;
+      case "--exclude":
+        (parsed.exclude ??= []).push(requireValue(argv[++i], arg));
+        break;
       case "--foreground":
         parsed.foreground = true;
         break;
@@ -183,6 +186,9 @@ Flags:
   --no-wake                Do everything except the final wake — install, register, and
                            migrate, but leave the assistant(s) asleep ("cadet wake --all"
                            when you're ready)
+  --exclude <glob>         Skip matching files from the copy (repeatable). Matches the
+                           source-relative path or basename: "*.db", "assistant-logs.db",
+                           "logs/" prunes a directory. Structural files are never skipped
   --foreground             Run in this process (default: detached — survives
                            disconnects; logs: ~/.cadet-migration-logs/)
   -h, --help               Show this help
