@@ -39,6 +39,7 @@ import { installCadetCli, cadetLoginStep, wakeAssistants } from "./steps/wake.js
 import { cadetImageRefs } from "./cadet-images.js";
 import { handleToInstanceName, DEFAULT_TARGET_CTX } from "./layout.js";
 import { dbVellumRows, verify, VALUE_MIGRATED_DBS } from "./steps/verify.js";
+import { markMigrated } from "./desktop.js";
 import { defaultProcessOps } from "./process.js";
 import {
   applySubstitutions,
@@ -500,6 +501,11 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
         envSuffix: envSuffixFor(detect.vellumRoot),
       }),
     );
+    // Success books the vellum-side desktop state (best-effort) so the
+    // desktop boot probe never offers this root again.
+    if (await markMigrated(detect.vellumRoot, detect.cadetRoot)) {
+      log(`desktop state: marked migrated (${detect.vellumRoot})`);
+    }
     return finish(detect, steps, "verify-only", startedAt, null, EXIT_CODES.ok);
   }
 
@@ -789,6 +795,11 @@ export async function migrate(options: MigrateOptions = {}): Promise<MigrationRe
     }),
   );
 
+  // Success books the vellum-side desktop state (best-effort) so the
+  // desktop boot probe never offers this root again.
+  if (await markMigrated(detect.vellumRoot, detect.cadetRoot)) {
+    log(`desktop state: marked migrated (${detect.vellumRoot})`);
+  }
   return finish(detect, steps, "migrate", startedAt, null, EXIT_CODES.ok);
 }
 
