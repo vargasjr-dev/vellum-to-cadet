@@ -30,11 +30,14 @@ export { verify } from "./steps/verify.js";
 export { defaultProcessOps } from "./process.js";
 export {
   EXIT_CODES,
+  type ConfirmMigrationInfo,
   type DetectInfo,
   type ExitCode,
   type FileAction,
   type MigrationReport,
   type MigrateOptions,
+  type ProcessOps,
+  type StepItemEvent,
   type StepResult,
 } from "./types.js";
 export {
