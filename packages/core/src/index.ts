@@ -14,6 +14,17 @@ export {
   type StagedRootVerdict,
 } from "./export-contract.js";
 export { detect as detectInstall } from "./steps/detect.js";
+export {
+  probeDesktopInstall,
+  markMigrated,
+  markDeclined,
+  readDesktopMigrationState,
+  desktopMigrationStatePath,
+  type DesktopMigrationState,
+  type DesktopProbe,
+  type DesktopProbeQuietReason,
+} from "./desktop.js";
+export { gatherConfirmInfo } from "./runner.js";
 export { buildCopyPlan } from "./steps/migrate-layout.js";
 export { verify } from "./steps/verify.js";
 export { defaultProcessOps } from "./process.js";
